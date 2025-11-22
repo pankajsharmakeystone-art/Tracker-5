@@ -1,4 +1,4 @@
-// Utility to transform Firestore worklog doc with numeric keys to ActivitySheet format
+// Utility to transform Firestore worklog doc with breaks array to ActivitySheet format
 export function transformFirestoreWorklog(docData: any): Array<{
     type: 'Working' | 'On Break';
     startTime: Date;
@@ -12,17 +12,49 @@ export function transformFirestoreWorklog(docData: any): Array<{
         if (typeof ts === 'object' && ts.seconds) return new Date(ts.seconds * 1000);
         return new Date(ts);
     };
+
+    // If it has a breaks array, use that structure
+    if (Array.isArray(docData.breaks)) {
+        const segments = [];
+        
+        const mainStart = toDate(docData.startTime);
+        const mainEnd = toDate(docData.endTime);
+        
+        // Add main working period
+        if (mainStart) {
+            segments.push({
+                type: 'Working' as const,
+                startTime: mainStart,
+                endTime: mainEnd,
+                durationSeconds: mainEnd && mainStart ? (mainEnd.getTime() - mainStart.getTime()) / 1000 : 0,
+            });
+        }
+        
+        // Add breaks
+        (docData.breaks || []).forEach((breakItem: any) => {
+            const breakStart = toDate(breakItem.startTime);
+            const breakEnd = toDate(breakItem.endTime);
+            segments.push({
+                type: 'On Break' as const,
+                startTime: breakStart!,
+                endTime: breakEnd,
+                durationSeconds: breakEnd && breakStart ? (breakEnd.getTime() - breakStart.getTime()) / 1000 : 0,
+            });
+        });
+        
+        // Sort by startTime (oldest first)
+        segments.sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0));
+        return segments;
+    }
     
-    // Extract all numeric keys as segments
+    // Fallback: if it has numeric keys (old structure)
     const segments = Object.entries(docData)
         .filter(([key]) => !isNaN(Number(key)))
         .map(([, segment]: [string, any]) => ({
             segment,
             startTime: toDate(segment.startTime),
         }))
-        // Sort by startTime (oldest first)
         .sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0))
-        // Transform to final format
         .map(({ segment }) => {
             const start = toDate(segment.startTime);
             const end = toDate(segment.endTime);
