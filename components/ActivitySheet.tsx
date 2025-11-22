@@ -5,24 +5,23 @@ export function transformFirestoreWorklog(docData: any): Array<{
     endTime: Date | null;
     durationSeconds: number;
 }> {
-    // Get all numeric keys
+    // Get all numeric keys and map directly to segments using Firestore's startTime and endTime as-is
+    const toDate = (ts: any): Date | null => {
+        if (!ts) return null;
+        if (ts instanceof Date) return ts;
+        if (typeof ts.toDate === 'function') return ts.toDate();
+        if (typeof ts === 'object' && ts.seconds) return new Date(ts.seconds * 1000);
+        return new Date(ts);
+    };
     const segments = Object.keys(docData)
         .filter(key => !isNaN(Number(key)))
         .map(key => docData[key])
         .sort((a, b) => {
-            const aStart = a.startTime instanceof Date ? a.startTime : new Date(a.startTime?.seconds ? a.startTime.seconds * 1000 : a.startTime);
-            const bStart = b.startTime instanceof Date ? b.startTime : new Date(b.startTime?.seconds ? b.startTime.seconds * 1000 : b.startTime);
-            return aStart.getTime() - bStart.getTime();
+            const aStart = toDate(a.startTime);
+            const bStart = toDate(b.startTime);
+            return (aStart?.getTime() || 0) - (bStart?.getTime() || 0);
         })
         .map((segment, idx) => {
-            // Convert Firestore Timestamp or string to Date
-            const toDate = (ts: any): Date | null => {
-                if (!ts) return null;
-                if (ts instanceof Date) return ts;
-                if (typeof ts.toDate === 'function') return ts.toDate();
-                if (typeof ts === 'object' && ts.seconds) return new Date(ts.seconds * 1000);
-                return new Date(ts);
-            };
             const start = toDate(segment.startTime);
             const end = toDate(segment.endTime);
             return {
