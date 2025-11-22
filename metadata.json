@@ -1,0 +1,5 @@
+{
+  "name": "React Firebase Auth & Firestore",
+  "description": "A minimalist and responsive React application demonstrating complete Firebase Authentication (Email/Password, Google Sign-In) and Firestore database integration with a protected dashboard, all styled with Tailwind CSS.",
+  "requestFramePermissions": []
+}
