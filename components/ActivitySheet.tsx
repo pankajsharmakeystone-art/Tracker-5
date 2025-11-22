@@ -93,6 +93,10 @@ const ActivitySheet: React.FC<{ workLog: any }> = ({ workLog }) => {
     const timeline = Array.isArray(workLog)
         ? workLog
         : transformFirestoreWorklog(workLog);
+    
+    // Debug logging
+    console.log('ActivitySheet received workLog:', workLog);
+    console.log('ActivitySheet transformed timeline:', timeline);
 
     if (timeline.length === 0) {
         return (
