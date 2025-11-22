@@ -24,15 +24,8 @@ export function transformFirestoreWorklog(docData: any): Array<{
         .map(segment => {
             const start = toDate(segment.startTime);
             const end = toDate(segment.endTime);
-            // Use the type field from Firestore, fallback to alternating if missing
-            const type = (segment.type || (
-                Object.keys(docData)
-                    .filter(key => !isNaN(Number(key)))
-                    .sort()
-                    .indexOf(Object.entries(docData).find(([, v]) => v === segment)?.[0] || '') % 2 === 0 
-                    ? 'Working' 
-                    : 'On Break'
-            )) as 'Working' | 'On Break';
+            // Use the type field from Firestore
+            const type = (segment.type as 'Working' | 'On Break') || 'Working';
             return {
                 type: type,
                 startTime: start!,
