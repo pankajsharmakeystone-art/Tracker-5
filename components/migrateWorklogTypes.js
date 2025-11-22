@@ -1,7 +1,14 @@
-const admin = require('firebase-admin');
+import admin from 'firebase-admin';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // TODO: Replace with the path to your service account key
-const serviceAccount = require('./serviceAccountKey.json');
+const serviceAccountPath = path.join(__dirname, '..', 'tracker-5-firebase-adminsdk-fbsvc-719d14ae45.json');
+const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
