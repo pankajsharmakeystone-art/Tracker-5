@@ -126,6 +126,14 @@ const ActivitySheet: React.FC<{ workLog: any }> = ({ workLog }) => {
     const timeline = Array.isArray(workLog)
         ? workLog
         : transformFirestoreWorklog(workLog);
+    
+    // Debug: Check what structure we received
+    console.log('=== ActivitySheet Debug ===');
+    console.log('Has breaks array?', Array.isArray(workLog?.breaks));
+    console.log('Has numeric keys?', Object.keys(workLog || {}).some(k => !isNaN(Number(k))));
+    console.log('Numeric keys:', Object.keys(workLog || {}).filter(k => !isNaN(Number(k))).slice(0, 3));
+    console.log('Timeline length:', timeline.length);
+    console.log('First timeline item:', timeline[0]);
 
     if (timeline.length === 0) {
         return (
