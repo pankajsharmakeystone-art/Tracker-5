@@ -5,7 +5,6 @@ export function transformFirestoreWorklog(docData: any): Array<{
     endTime: Date | null;
     durationSeconds: number;
 }> {
-    // Get all numeric keys and map directly to segments using Firestore's startTime and endTime as-is
     const toDate = (ts: any): Date | null => {
         if (!ts) return null;
         if (ts instanceof Date) return ts;
@@ -13,26 +12,28 @@ export function transformFirestoreWorklog(docData: any): Array<{
         if (typeof ts === 'object' && ts.seconds) return new Date(ts.seconds * 1000);
         return new Date(ts);
     };
-    const segments = Object.keys(docData)
-        .filter(key => !isNaN(Number(key)))
-        .map(key => docData[key])
-        .sort((a, b) => {
-            const aStart = toDate(a.startTime);
-            const bStart = toDate(b.startTime);
-            return (aStart?.getTime() || 0) - (bStart?.getTime() || 0);
-        })
-        .map(segment => {
+    
+    // Extract all numeric keys as segments
+    const segments = Object.entries(docData)
+        .filter(([key]) => !isNaN(Number(key)))
+        .map(([, segment]: [string, any]) => ({
+            segment,
+            startTime: toDate(segment.startTime),
+        }))
+        // Sort by startTime (oldest first)
+        .sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0))
+        // Transform to final format
+        .map(({ segment }) => {
             const start = toDate(segment.startTime);
             const end = toDate(segment.endTime);
-            // Use the type field from Firestore
-            const type = (segment.type as 'Working' | 'On Break') || 'Working';
             return {
-                type: type,
+                type: (segment.type || 'Working') as 'Working' | 'On Break',
                 startTime: start!,
                 endTime: end,
                 durationSeconds: end && start ? (end.getTime() - start.getTime()) / 1000 : 0,
             };
         });
+    
     return segments;
 }
 
@@ -93,10 +94,6 @@ const ActivitySheet: React.FC<{ workLog: any }> = ({ workLog }) => {
     const timeline = Array.isArray(workLog)
         ? workLog
         : transformFirestoreWorklog(workLog);
-    
-    // Debug logging
-    console.log('ActivitySheet received workLog:', workLog);
-    console.log('ActivitySheet transformed timeline:', timeline);
 
     if (timeline.length === 0) {
         return (
