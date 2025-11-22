@@ -1,6 +1,6 @@
 // Utility to transform Firestore worklog doc with numeric keys to ActivitySheet format
 export function transformFirestoreWorklog(docData: any): Array<{
-    type: 'Working' | 'Break';
+    type: 'Working' | 'On Break';
     startTime: Date;
     endTime: Date | null;
     durationSeconds: number;
@@ -13,24 +13,25 @@ export function transformFirestoreWorklog(docData: any): Array<{
         if (typeof ts === 'object' && ts.seconds) return new Date(ts.seconds * 1000);
         return new Date(ts);
     };
-    const segments = Object.keys(docData)
+    const sortedSegments = Object.keys(docData)
         .filter(key => !isNaN(Number(key)))
         .map(key => docData[key])
         .sort((a, b) => {
             const aStart = toDate(a.startTime);
             const bStart = toDate(b.startTime);
             return (aStart?.getTime() || 0) - (bStart?.getTime() || 0);
-        })
-        .map((segment, idx) => {
-            const start = toDate(segment.startTime);
-            const end = toDate(segment.endTime);
-            return {
-                type: (idx % 2 === 0 ? 'Working' : 'Break') as 'Working' | 'Break',
-                startTime: start!,
-                endTime: end,
-                durationSeconds: end && start ? (end.getTime() - start.getTime()) / 1000 : 0,
-            };
         });
+    // Always start with 'Working' for the earliest segment
+    const segments = sortedSegments.map((segment, idx) => {
+        const start = toDate(segment.startTime);
+        const end = toDate(segment.endTime);
+        return {
+            type: (idx % 2 === 0 ? 'Working' : 'On Break') as 'Working' | 'On Break',
+            startTime: start!,
+            endTime: end,
+            durationSeconds: end && start ? (end.getTime() - start.getTime()) / 1000 : 0,
+        };
+    });
     return segments;
 }
 
@@ -123,7 +124,7 @@ const ActivitySheet: React.FC<{ workLog: any }> = ({ workLog }) => {
                                 {seg.type === 'Working' ? (
                                     <span className="text-green-800 dark:text-green-300 font-bold">Working</span>
                                 ) : (
-                                    <span className="text-yellow-800 dark:text-yellow-300 font-bold">Break</span>
+                                    <span className="text-yellow-800 dark:text-yellow-300 font-bold">On Break</span>
                                 )}
                             </td>
 
