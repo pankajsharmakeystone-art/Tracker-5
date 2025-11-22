@@ -1,3 +1,40 @@
+// Utility to transform Firestore worklog doc with numeric keys to ActivitySheet format
+export function transformFirestoreWorklog(docData: any): Array<{
+    type: 'Working' | 'Break';
+    startTime: Date;
+    endTime: Date | null;
+    durationSeconds: number;
+}> {
+    // Get all numeric keys
+    const segments = Object.keys(docData)
+        .filter(key => !isNaN(Number(key)))
+        .map(key => docData[key])
+        .sort((a, b) => {
+            const aStart = a.startTime instanceof Date ? a.startTime : new Date(a.startTime?.seconds ? a.startTime.seconds * 1000 : a.startTime);
+            const bStart = b.startTime instanceof Date ? b.startTime : new Date(b.startTime?.seconds ? b.startTime.seconds * 1000 : b.startTime);
+            return aStart.getTime() - bStart.getTime();
+        })
+        .map((segment, idx) => {
+            // Convert Firestore Timestamp or string to Date
+            const toDate = (ts: any): Date | null => {
+                if (!ts) return null;
+                if (ts instanceof Date) return ts;
+                if (typeof ts.toDate === 'function') return ts.toDate();
+                if (typeof ts === 'object' && ts.seconds) return new Date(ts.seconds * 1000);
+                return new Date(ts);
+            };
+            const start = toDate(segment.startTime);
+            const end = toDate(segment.endTime);
+            return {
+                type: (idx % 2 === 0 ? 'Working' : 'Break') as 'Working' | 'Break',
+                startTime: start!,
+                endTime: end,
+                durationSeconds: end && start ? (end.getTime() - start.getTime()) / 1000 : 0,
+            };
+        });
+    return segments;
+}
+
 import React from 'react';
 import { Timestamp } from 'firebase/firestore';
 import type { WorkLog } from '../types';
@@ -48,46 +85,13 @@ const formatDuration = (seconds: number): string => {
     return `${h}:${m}:${s}`;
 };
 
-const ActivitySheet: React.FC<Props> = ({ workLog }) => {
 
-    const buildTimeline = (): Segment[] => {
-
-        // Extract activities (Working)
-        const activities: Segment[] = (workLog.activities || []).map((act: any) => {
-            const start = toDate(act.startTime);
-            const end = toDate(act.endTime);
-
-            return {
-                type: 'Working' as const,
-                startTime: start!,
-                endTime: end,
-                durationSeconds: end && start ? (end.getTime() - start.getTime()) / 1000 : 0,
-            };
-        });
-
-        // Extract breaks
-        const breaks: Segment[] = (workLog.breaks || []).map((brk: any) => {
-            const start = toDate(brk.startTime);
-            const end = toDate(brk.endTime);
-
-            return {
-                type: 'Break' as const,
-                startTime: start!,
-                endTime: end,
-                durationSeconds: end && start ? (end.getTime() - start.getTime()) / 1000 : 0,
-            };
-        });
-
-        // Merge and sort
-        const merged = [...activities, ...breaks].sort(
-            (a, b) => a.startTime.getTime() - b.startTime.getTime()
-        );
-
-        // Most recent first
-        return merged.reverse();
-    };
-
-    const timeline = buildTimeline();
+// Usage: Instead of passing workLog.activities/breaks, use transformFirestoreWorklog(workLog)
+const ActivitySheet: React.FC<{ workLog: any }> = ({ workLog }) => {
+    // If workLog is already in the expected format, skip transform
+    const timeline = Array.isArray(workLog)
+        ? workLog
+        : transformFirestoreWorklog(workLog);
 
     if (timeline.length === 0) {
         return (
