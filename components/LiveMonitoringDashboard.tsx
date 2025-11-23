@@ -1,10 +1,12 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog } from '../services/db';
-import type { WorkLog } from '../types';
 import { Timestamp } from 'firebase/firestore';
+import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog } from '../services/db';
+import { useAuth } from '../hooks/useAuth';
+import type { WorkLog } from '../types';
 import Spinner from './Spinner';
 import ActivitySheet from './ActivitySheet';
+import LiveStreamModal from './LiveStreamModal';
 
 interface Props {
   teamId?: string;
@@ -184,10 +186,13 @@ const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) 
 };
 
 const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
+    const { userData } = useAuth();
     const [rawLogs, setRawLogs] = useState<WorkLog[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedLog, setSelectedLog] = useState<WorkLog | null>(null);
     const [editingLog, setEditingLog] = useState<WorkLog | null>(null);
+    const [liveStreamAgent, setLiveStreamAgent] = useState<{ uid: string; displayName: string; teamId?: string } | null>(null);
+    const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
     
     const [selectedDate, setSelectedDate] = useState(() => {
         const d = new Date();
@@ -284,6 +289,32 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         }
     };
 
+    const managerTeamIds = useMemo(() => {
+        if (!userData) return [] as string[];
+        if (Array.isArray(userData.teamIds) && userData.teamIds.length > 0) return userData.teamIds;
+        return userData.teamId ? [userData.teamId] : [];
+    }, [userData]);
+
+    const canRequestStreamForAgent = (log: WorkLog) => {
+        if (!log || log.status === 'clocked_out' || !userData) return false;
+        if (userData.role === 'admin') return true;
+        if (userData.role === 'manager' && log.teamId) {
+            return managerTeamIds.includes(log.teamId);
+        }
+        return false;
+    };
+
+    const handleLiveStream = (log: WorkLog) => {
+        if (!log?.userId || !canRequestStreamForAgent(log)) return;
+        setLiveStreamAgent({ uid: log.userId, displayName: log.userDisplayName, teamId: log.teamId });
+        setIsLiveModalOpen(true);
+    };
+
+    const closeLiveStreamModal = () => {
+        setIsLiveModalOpen(false);
+        setLiveStreamAgent(null);
+    };
+
     const getStatusBadge = (agent: any) => {
         if (agent.isZombie) {
              return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200 animate-pulse">Stale / Zombie</span>;
@@ -305,6 +336,13 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
     return (
         <>
+            {isLiveModalOpen && liveStreamAgent && (
+                <LiveStreamModal
+                    isOpen={isLiveModalOpen}
+                    agent={liveStreamAgent}
+                    onClose={closeLiveStreamModal}
+                />
+            )}
             {selectedLog && <ViewLogModal log={selectedLog} onClose={() => setSelectedLog(null)} />}
             {editingLog && <EditTimeModal log={editingLog} onClose={() => setEditingLog(null)} />}
             
@@ -383,6 +421,15 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                     >
                                         Edit
                                     </button>
+                                    {canRequestStreamForAgent(agent) && (
+                                        <button
+                                            onClick={() => handleLiveStream(agent)}
+                                            className="font-medium text-emerald-600 dark:text-emerald-400 hover:underline"
+                                            title="Request Live Screen"
+                                        >
+                                            Live
+                                        </button>
+                                    )}
                                     {(agent.isZombie || (agent.status !== 'clocked_out' && !isToday)) && (
                                         <button
                                             onClick={() => handleForceClose(agent)}

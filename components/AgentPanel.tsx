@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../hooks/useAuth';
+import { useAgentLiveStream } from '../hooks/useAgentLiveStream';
 import { updateWorkLog, getTeamById, streamActiveWorkLog, updateAgentStatus, streamGlobalAdminSettings, streamScheduleForMonth, updateAgentAutoClockOut, performClockOut, performClockIn, isSessionStale, closeStaleSession } from '../services/db';
 import { serverTimestamp, increment, Timestamp, doc, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../services/firebase';
@@ -32,6 +33,7 @@ const TabButton = ({ tabName, title, activeTab, setActiveTab }: { tabName: strin
 
 const AgentPanel: React.FC = () => {
     const { userData } = useAuth();
+    useAgentLiveStream();
     const [workLog, setWorkLog] = useState<WorkLog | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);

@@ -1,6 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../hooks/useAuth';
+import { useAgentLiveStream } from '../hooks/useAgentLiveStream';
 import { updateWorkLog, getTeamById, streamActiveWorkLog, updateAgentStatus, streamGlobalAdminSettings, streamScheduleForMonth, updateAgentAutoClockOut, performClockOut, performClockIn } from '../services/db';
 import { serverTimestamp, increment, Timestamp, doc, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../services/firebase';
@@ -22,6 +23,7 @@ const formatDuration = (totalSeconds) => {
 const TabButton = ({ tabName, title, activeTab, setActiveTab }) => (_jsx("button", { onClick: () => setActiveTab(tabName), className: `px-4 py-2 text-sm font-medium rounded-md ${activeTab === tabName ? 'bg-blue-600 text-white' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'}`, children: title }));
 const AgentPanel = () => {
     const { userData } = useAuth();
+    useAgentLiveStream();
     const [workLog, setWorkLog] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);

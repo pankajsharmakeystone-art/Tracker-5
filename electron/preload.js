@@ -63,5 +63,8 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   setAutoLaunch: (enable) => ipcRenderer.invoke("set-auto-launch", enable),
 
   // LOCK-SCREEN end-break API (invoked by the fullscreen lock UI)
-  endBreak: () => ipcRenderer.invoke("end-break-from-lock-screen")
+  endBreak: () => ipcRenderer.invoke("end-break-from-lock-screen"),
+
+  // Live streaming helpers
+  getLiveStreamSources: () => ipcRenderer.invoke("live-stream-get-sources")
 });
