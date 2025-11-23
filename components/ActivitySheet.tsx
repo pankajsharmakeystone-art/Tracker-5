@@ -13,6 +13,14 @@ export function transformFirestoreWorklog(docData: any): Array<{
         return new Date(ts);
     };
 
+    const getMillis = (ts: any): number => {
+        if (!ts) return 0;
+        if (typeof (ts as any).toMillis === 'function') return (ts as any).toMillis();
+        if (ts instanceof Date) return ts.getTime();
+        if (ts && typeof ts.seconds === 'number') return ts.seconds * 1000;
+        return new Date(ts).getTime();
+    };
+
     // If it has a breaks array, use that structure
     if (Array.isArray(docData.breaks)) {
         const segments = [] as any[];
@@ -28,8 +36,8 @@ export function transformFirestoreWorklog(docData: any): Array<{
         if (docData.clockOutTime) events.push({ time: docData.clockOutTime, type: 'CLOCK_OUT' });
 
         events.sort((a, b) => {
-            const aMs = typeof a.time.toMillis === 'function' ? a.time.toMillis() : (a.time.seconds ? a.time.seconds * 1000 : new Date(a.time).getTime());
-            const bMs = typeof b.time.toMillis === 'function' ? b.time.toMillis() : (b.time.seconds ? b.time.seconds * 1000 : new Date(b.time).getTime());
+            const aMs = getMillis(a.time);
+            const bMs = getMillis(b.time);
             return aMs - bMs;
         });
 
@@ -37,8 +45,8 @@ export function transformFirestoreWorklog(docData: any): Array<{
         let currentStatus: 'Working' | 'On Break' = 'Working';
 
         for (const ev of events) {
-            const cursorMs = typeof cursor.toMillis === 'function' ? cursor.toMillis() : (cursor.seconds ? cursor.seconds * 1000 : new Date(cursor).getTime());
-            const evMs = typeof ev.time.toMillis === 'function' ? ev.time.toMillis() : (ev.time.seconds ? ev.time.seconds * 1000 : new Date(ev.time).getTime());
+            const cursorMs = getMillis(cursor);
+            const evMs = getMillis(ev.time);
             if (evMs > cursorMs) {
                 segments.push({
                     type: currentStatus,
@@ -54,8 +62,8 @@ export function transformFirestoreWorklog(docData: any): Array<{
 
         if (docData.status !== 'clocked_out') {
             const now = typeof Timestamp !== 'undefined' ? Timestamp.now() : new Date();
-            const cursorMs = typeof cursor.toMillis === 'function' ? cursor.toMillis() : (cursor.seconds ? cursor.seconds * 1000 : new Date(cursor).getTime());
-            const nowMs = typeof now.toMillis === 'function' ? now.toMillis() : (now.getTime ? now.getTime() : Date.now());
+            const cursorMs = getMillis(cursor);
+            const nowMs = getMillis(now);
             if (nowMs > cursorMs) {
                 segments.push({
                     type: docData.status === 'working' ? 'Working' : 'On Break',
