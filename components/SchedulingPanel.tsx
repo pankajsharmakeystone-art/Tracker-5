@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { streamScheduleForMonth, updateScheduleForMonth, streamUsersByTeam } from '../services/db';
-import type { MonthlySchedule, UserData, ShiftTime } from '../types';
+import type { MonthlySchedule, UserData, ShiftTime, ShiftEntry } from '../types';
 import Spinner from './Spinner';
 
 interface Props {
@@ -18,7 +18,7 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
     const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
     const [editingCell, setEditingCell] = useState<string | null>(null);
     const [editingValue, setEditingValue] = useState<ShiftTime>({ startTime: '09:00', endTime: '17:00' });
-    const [copiedValue, setCopiedValue] = useState<ShiftTime | 'OFF' | 'L' | null>(null);
+    const [copiedValue, setCopiedValue] = useState<ShiftEntry | null>(null);
     const [lastSelectedCell, setLastSelectedCell] = useState<string | null>(null);
 
     const year = currentDate.getFullYear();
@@ -49,7 +49,7 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
         };
     }, [teamId, year, month]);
 
-    const handleBulkScheduleUpdate = async (updates: { userId: string, date: string, value: ShiftTime | 'OFF' | 'L' | null }[]) => {
+    const handleBulkScheduleUpdate = async (updates: { userId: string, date: string, value: ShiftEntry | null }[]) => {
         const newSchedule = JSON.parse(JSON.stringify(schedule)); // Deep copy for mutation
         updates.forEach(({ userId, date, value }) => {
             if (!newSchedule[userId]) {
@@ -111,7 +111,7 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
         setLastSelectedCell(cellId);
     };
 
-    const handleCellDoubleClick = (cellId: string, currentValue: ShiftTime | 'OFF' | 'L' | undefined) => {
+    const handleCellDoubleClick = (cellId: string, currentValue: ShiftEntry | undefined) => {
         setSelectedCells(new Set([cellId]));
         setEditingCell(cellId);
         if (currentValue && typeof currentValue === 'object') {
