@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { streamTodayWorkLogs, streamAllAgentStatuses, streamGlobalAdminSettings, sendCommandToDesktop } from '../services/db';
-import type { WorkLog, AdminSettings } from '../types';
+import type { WorkLog, AdminSettingsType } from '../types';
 import Spinner from './Spinner';
 import { Timestamp } from 'firebase/firestore';
 
@@ -39,7 +39,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
     const [isMinimized, setIsMinimized] = useState(false);
     const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
     const [agentStatuses, setAgentStatuses] = useState<Record<string, any>>({});
-    const [adminSettings, setAdminSettings] = useState<AdminSettings | null>(null);
+    const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
     const [loading, setLoading] = useState(true);
     const [now, setNow] = useState(() => Date.now());
 

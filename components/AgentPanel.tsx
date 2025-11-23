@@ -4,7 +4,7 @@ import { useAuth } from '../hooks/useAuth';
 import { updateWorkLog, getTeamById, streamActiveWorkLog, updateAgentStatus, streamGlobalAdminSettings, streamScheduleForMonth, updateAgentAutoClockOut, performClockOut, performClockIn, isSessionStale, closeStaleSession } from '../services/db';
 import { serverTimestamp, increment, Timestamp, doc, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import type { WorkLog, Team, TeamSettings, AdminSettings, MonthlySchedule } from '../types';
+import type { WorkLog, Team, TeamSettings, AdminSettingsType, MonthlySchedule } from '../types';
 import Spinner from './Spinner';
 import ActivitySheet from './ActivitySheet';
 import AgentScheduleView from './AgentScheduleView';
@@ -40,7 +40,7 @@ const AgentPanel: React.FC = () => {
     const [teamSettings, setTeamSettings] = useState<TeamSettings | null>(null);
     const [activeTab, setActiveTab] = useState('timeClock');
 
-    const [adminSettings, setAdminSettings] = useState<AdminSettings | null>(null);
+    const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
     const [monthlySchedule, setMonthlySchedule] = useState<MonthlySchedule>({});
     const [activeTeamId, setActiveTeamId] = useState<string | null>(null);
     const [availableTeams, setAvailableTeams] = useState<Team[]>([]);
@@ -226,7 +226,8 @@ const AgentPanel: React.FC = () => {
         }
         const check = () => {
             const elapsed = (Date.now() - breakStartedAt) / 60000;
-            if (elapsed >= adminSettings.manualBreakTimeoutMinutes) setShowTimeoutModal(true);
+            const timeout = adminSettings.manualBreakTimeoutMinutes ?? 30;
+            if (elapsed >= timeout) setShowTimeoutModal(true);
         };
         check();
         const i = setInterval(check, 10000);

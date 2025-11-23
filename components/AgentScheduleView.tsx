@@ -20,10 +20,11 @@ const AgentScheduleView: React.FC<Props> = ({ userId, teamId }) => {
         setLoading(true);
         try {
             const monthlySchedule = await getScheduleForMonth(teamId, year, month + 1);
-            setSchedule(monthlySchedule[userId] || {});
+            const userShifts = monthlySchedule[userId] || {};
+            setSchedule({ userId, shifts: userShifts });
         } catch (error) {
             console.error("Failed to fetch schedule:", error);
-            setSchedule({});
+            setSchedule({ userId, shifts: {} });
         } finally {
             setLoading(false);
         }
@@ -92,7 +93,7 @@ const AgentScheduleView: React.FC<Props> = ({ userId, teamId }) => {
                     }
                     
                     const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-                    const shift = schedule ? schedule[dateStr] : null;
+                    const shift = schedule?.shifts ? schedule.shifts[dateStr] : null;
                     const isToday = isCurrentMonth && day === today.getDate();
 
                     return (

@@ -59,21 +59,21 @@ export interface UserData {
     role: Role;
     displayName: string;
     teamId?: string;
+    teamIds?: string[];
     createdAt?: any;
 }
 
 export interface AuthContextType {
     currentUser: User | null;
+    user: User | null;
     userData: UserData | null;
     loading: boolean;
     logout: () => Promise<void>;
 }
 
 export interface ShiftTime {
-    startHour: number;
-    startMinute: number;
-    endHour: number;
-    endMinute: number;
+    startTime: string;
+    endTime: string;
 }
 
 export interface Schedule {
@@ -89,7 +89,7 @@ export interface MonthlySchedule {
     };
 }
 
-export interface AdminSettings {
+export interface AdminSettingsType {
     autoClockOutEnabled: boolean;
     idleTimeout: number;
     dropboxToken?: string;

@@ -22,7 +22,7 @@ const isNewUser = (user: FirebaseUser): boolean => {
 };
 
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
-  const [user, setUser] = useState<User>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [userData, setUserData] = useState<UserData | null>(null);
   // Initialize loading to true so the app waits for Firebase before rendering
   const [loading, setLoading] = useState(true);
@@ -68,7 +68,11 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     return () => unsubscribe();
   }, []);
 
-  const value = { user, userData, loading };
+  const logout = async () => {
+    await auth.signOut();
+  };
+
+  const value = { currentUser: user, user, userData, loading, logout };
 
   return (
     <AuthContext.Provider value={value}>

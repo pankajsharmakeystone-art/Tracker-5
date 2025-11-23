@@ -2,7 +2,7 @@
 import { doc, setDoc, getDoc, serverTimestamp, collection, query, where, getDocs, addDoc, limit, updateDoc, Timestamp, arrayUnion, increment, onSnapshot, deleteDoc, deleteField, orderBy } from 'firebase/firestore';
 import { db } from './firebase';
 import type { User as FirebaseUser } from 'firebase/auth';
-import type { UserData, Role, Team, WorkLog, MonthlySchedule, TeamSettings, AdminSettings, ShiftTime } from '../types';
+import type { UserData, Role, Team, WorkLog, MonthlySchedule, TeamSettings, AdminSettingsType, ShiftTime } from '../types';
 
 // --- User Management ---
 
@@ -639,18 +639,18 @@ export const updateScheduleForMonth = async (teamId: string, year: number, month
     await setDoc(scheduleDocRef, scheduleData, { merge: true });
 }
 
-export const streamGlobalAdminSettings = (callback: (settings: AdminSettings | null) => void) => {
+export const streamGlobalAdminSettings = (callback: (settings: AdminSettingsType | null) => void) => {
     const settingsRef = doc(db, 'adminSettings', 'global');
     return onSnapshot(settingsRef, (docSnap) => {
         if (docSnap.exists()) {
-            callback(docSnap.data() as AdminSettings);
+            callback(docSnap.data() as AdminSettingsType);
         } else {
             callback(null);
         }
     }, (error) => console.error("Error streaming global settings:", error));
 };
 
-export const updateGlobalAdminSettings = async (settings: Partial<AdminSettings>) => {
+export const updateGlobalAdminSettings = async (settings: Partial<AdminSettingsType>) => {
     const settingsRef = doc(db, 'adminSettings', 'global');
     await setDoc(settingsRef, settings, { merge: true });
 };

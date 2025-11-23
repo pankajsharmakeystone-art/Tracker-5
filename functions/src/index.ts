@@ -26,7 +26,7 @@ export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
       .where("date", "<", todayTs)
       .get();
 
-    if (snapshot.empty) return null;
+    if (snapshot.empty) return;
 
     const batch = db.batch();
     let count = 0;

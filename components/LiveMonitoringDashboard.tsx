@@ -347,8 +347,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                 </td>
                                 <td className="py-4 px-6">{getStatusBadge(agent)}</td>
                                 <td className="py-4 px-6">
-                                    {agent.lateMinutes > 0 ? (
-                                        <span className="text-red-600 font-bold">{agent.lateMinutes} min Late</span>
+                                    {(agent.lateMinutes ?? 0) > 0 ? (
+                                        <span className="text-red-600 font-bold">{agent.lateMinutes ?? 0} min Late</span>
                                     ) : (
                                         <span className="text-green-600">On Time</span>
                                     )}

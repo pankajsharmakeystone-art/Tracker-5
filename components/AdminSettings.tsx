@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { streamGlobalAdminSettings, updateGlobalAdminSettings } from '../services/db';
-import type { AdminSettings as AdminSettingsType } from '../types';
+import type { AdminSettingsType } from '../types';
 import Spinner from './Spinner';
 
 interface FormFieldProps {
@@ -66,7 +66,7 @@ const AdminSettings: React.FC = () => {
         const unsubscribe = streamGlobalAdminSettings((data) => {
             if (data) {
                 // Merge with default settings to ensure all fields exist
-                setSettings((prev: AdminSettings) => ({ ...defaultSettings, ...data }));
+                setSettings((prev: AdminSettingsType) => ({ ...defaultSettings, ...data }));
             } else {
                 setSettings(defaultSettings);
             }
@@ -84,7 +84,7 @@ const AdminSettings: React.FC = () => {
             finalValue = value === '' ? 0 : parseInt(value, 10);
         }
 
-        setSettings((prev: AdminSettings) => ({ ...prev, [name]: finalValue }));
+        setSettings((prev: AdminSettingsType) => ({ ...prev, [name]: finalValue }));
     };
 
     const handleSave = async (e: React.FormEvent) => {
@@ -121,16 +121,16 @@ const AdminSettings: React.FC = () => {
                 <FormField label="Require Login on Boot" description="Force users to log in every time the desktop application starts.">
                     <ToggleSwitch
                         id="requireLoginOnBoot"
-                        checked={settings.requireLoginOnBoot}
-                        onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, requireLoginOnBoot: e.target.checked }))}
+                        checked={settings.requireLoginOnBoot ?? false}
+                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, requireLoginOnBoot: e.target.checked }))}
                     />
                 </FormField>
                 
                 <FormField label="Allow Screen Recording" description="Enable or disable the screen recording feature for all agents.">
                      <ToggleSwitch
                         id="allowRecording"
-                        checked={settings.allowRecording}
-                        onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, allowRecording: e.target.checked }))}
+                        checked={settings.allowRecording ?? false}
+                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, allowRecording: e.target.checked }))}
                     />
                 </FormField>
 
@@ -150,8 +150,8 @@ const AdminSettings: React.FC = () => {
                 <FormField label="Show Recording Notification" description="Show a desktop notification when screen recording starts or stops.">
                      <ToggleSwitch
                         id="showRecordingNotification"
-                        checked={settings.showRecordingNotification}
-                        onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, showRecordingNotification: e.target.checked }))}
+                        checked={settings.showRecordingNotification ?? false}
+                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, showRecordingNotification: e.target.checked }))}
                     />
                 </FormField>
                 
@@ -184,7 +184,7 @@ const AdminSettings: React.FC = () => {
                         <ToggleSwitch
                             id="autoClockOutEnabled"
                             checked={settings.autoClockOutEnabled}
-                            onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, autoClockOutEnabled: e.target.checked }))}
+                            onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, autoClockOutEnabled: e.target.checked }))}
                         />
                     </div>
                 </FormField>
@@ -204,8 +204,8 @@ const AdminSettings: React.FC = () => {
                 <FormField label="Auto-Upload Recordings" description="Automatically upload screen recordings to Dropbox. Requires a valid token.">
                      <ToggleSwitch
                         id="autoUpload"
-                        checked={settings.autoUpload}
-                        onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, autoUpload: e.target.checked }))}
+                        checked={settings.autoUpload ?? false}
+                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, autoUpload: e.target.checked }))}
                     />
                 </FormField>
 
