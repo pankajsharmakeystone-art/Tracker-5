@@ -105,6 +105,18 @@ let dropboxTokenExpiry = null;
 // track manual-break timeout notifications per uid to avoid repeat spam
 const manualBreakNotified = new Map();
 
+function getDropboxAppKey() {
+  return cachedAdminSettings?.dropboxAppKey || process.env.DROPBOX_CLIENT_ID || process.env.DROPBOX_APP_KEY || "";
+}
+
+function getDropboxAppSecret() {
+  return cachedAdminSettings?.dropboxAppSecret || process.env.DROPBOX_CLIENT_SECRET || process.env.DROPBOX_APP_SECRET || "";
+}
+
+function hasDropboxCredentials() {
+  return Boolean(cachedDropboxRefreshToken || cachedDropboxAccessToken || cachedAdminSettings?.dropboxToken);
+}
+
 // ---------- CREATE MAIN WINDOW ----------
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -329,19 +341,25 @@ function startAdminSettingsWatch() {
     log("adminSettings updated:", cachedAdminSettings);
 
     // Cache Dropbox tokens for refresh logic
-    if (cachedAdminSettings?.dropboxRefreshToken) {
-      cachedDropboxRefreshToken = cachedAdminSettings.dropboxRefreshToken;
+    cachedDropboxRefreshToken = cachedAdminSettings?.dropboxRefreshToken || null;
+    if (cachedDropboxRefreshToken) {
       log("[dropbox] refresh token cached");
     }
-    if (cachedAdminSettings?.dropboxAccessToken) {
-      cachedDropboxAccessToken = cachedAdminSettings.dropboxAccessToken;
-      // If expiry is provided, use it; otherwise assume 4 hours
+
+    if (Object.prototype.hasOwnProperty.call(cachedAdminSettings, "dropboxAccessToken")) {
+      cachedDropboxAccessToken = cachedAdminSettings.dropboxAccessToken || null;
       if (cachedAdminSettings?.dropboxTokenExpiry) {
         dropboxTokenExpiry = new Date(cachedAdminSettings.dropboxTokenExpiry).getTime();
       } else {
-        dropboxTokenExpiry = Date.now() + (4 * 60 * 60 * 1000); // 4 hours
+        dropboxTokenExpiry = cachedDropboxAccessToken ? Date.now() + (4 * 60 * 60 * 1000) : null;
       }
-      log("[dropbox] access token cached");
+      if (cachedDropboxAccessToken) {
+        log("[dropbox] access token cached");
+      }
+    } else if (!cachedDropboxAccessToken && cachedAdminSettings?.dropboxToken) {
+      cachedDropboxAccessToken = cachedAdminSettings.dropboxToken;
+      dropboxTokenExpiry = null;
+      log("[dropbox] legacy access token cached");
     }
 
     // handle login lock
@@ -951,7 +969,7 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer) => {
     fs.writeFileSync(filePath, buffer);
     log("Saved recording to:", filePath);
 
-    if (cachedAdminSettings?.autoUpload && cachedAdminSettings?.dropboxToken) {
+    if (cachedAdminSettings?.autoUpload && hasDropboxCredentials()) {
       log("uploading to Dropbox:", filePath);
       const safeName = cachedDisplayName ? String(cachedDisplayName).replace(/[\/:*?"<>|]/g, '-') : (currentUid || 'unknown');
       const now = new Date();
@@ -960,7 +978,7 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer) => {
       const dd = String(now.getDate()).padStart(2, '0');
       const isoDate = `${yyyy}-${mm}-${dd}`;
       const dropboxPath = `/recordings/${safeName}/${isoDate}/${fileName}`;
-      const up = await uploadToDropboxWithPath(filePath, cachedAdminSettings.dropboxToken, dropboxPath);
+      const up = await uploadToDropboxWithPath(filePath, dropboxPath);
       log("upload result:", up);
       if (currentUid) {
         await db.collection("agentStatus").doc(currentUid)
@@ -1043,11 +1061,12 @@ ipcMain.handle("clock-out-and-sign-out", async () => {
   }
 });
 
-ipcMain.handle("upload-dropbox", async (_, filePath) => {
+ipcMain.handle("upload-dropbox", async (_, filePath, dropboxPathOverride) => {
   try {
-    const token = cachedAdminSettings?.dropboxToken;
-    if (!token) throw new Error("no-token");
-    return await uploadToDropbox(filePath, token);
+    if (!hasDropboxCredentials()) throw new Error("no-token");
+    const fileName = path.basename(filePath || "recording.webm");
+    const dropboxPath = dropboxPathOverride || `/manual-uploads/${fileName}`;
+    return await uploadToDropboxWithPath(filePath, dropboxPath);
   } catch(e){
     return { success: false, error: e.message };
   }
@@ -1075,16 +1094,23 @@ async function refreshDropboxToken() {
       return null;
     }
 
+    const appKey = getDropboxAppKey();
+    const appSecret = getDropboxAppSecret();
+    if (!appKey || !appSecret) {
+      log("[dropbox] missing app key/secret for refresh");
+      return null;
+    }
+
     // Request new access token using refresh token
     const res = await fetch("https://api.dropboxapi.com/oauth2/token", {
       method: "POST",
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": `Basic ${Buffer.from(`${appKey}:${appSecret}`).toString("base64")}`
       },
       body: new URLSearchParams({
         grant_type: "refresh_token",
-        refresh_token: cachedDropboxRefreshToken,
-        client_id: process.env.DROPBOX_CLIENT_ID || "" // Set this as env var
+        refresh_token: cachedDropboxRefreshToken
       })
     });
 
@@ -1095,8 +1121,19 @@ async function refreshDropboxToken() {
     }
 
     cachedDropboxAccessToken = json.access_token;
-    dropboxTokenExpiry = Date.now() + (json.expires_in * 1000);
+    const expiresIn = (json.expires_in || (4 * 60 * 60));
+    dropboxTokenExpiry = Date.now() + (expiresIn * 1000);
     log("[dropbox] token refreshed, expires in", json.expires_in, "seconds");
+
+    // Persist new short-lived token so other desktops get the update
+    try {
+      await db.collection("adminSettings").doc("global").set({
+        dropboxAccessToken: cachedDropboxAccessToken,
+        dropboxTokenExpiry: new Date(dropboxTokenExpiry).toISOString()
+      }, { merge: true });
+    } catch (persistErr) {
+      log("[dropbox] failed to persist refreshed token:", persistErr.message);
+    }
 
     // Update Firebase with new token if needed
     if (currentUid) {
@@ -1115,9 +1152,11 @@ async function refreshDropboxToken() {
 // Get valid Dropbox access token, refreshing if needed
 async function getValidDropboxToken() {
   try {
-    // If we have a cached token and it hasn't expired, use it
-    if (cachedDropboxAccessToken && dropboxTokenExpiry && Date.now() < dropboxTokenExpiry - 60000) {
-      return cachedDropboxAccessToken;
+    // If we have a cached token and it hasn't expired (or no expiry provided), use it
+    if (cachedDropboxAccessToken) {
+      if (!dropboxTokenExpiry || Date.now() < dropboxTokenExpiry - 60000) {
+        return cachedDropboxAccessToken;
+      }
     }
 
     // Token expired or missing, refresh it
@@ -1136,13 +1175,9 @@ async function getValidDropboxToken() {
 
 // Upload to Dropbox with explicit path
 
-async function uploadToDropboxWithPath(filePath, token, dropboxPath) {
+async function uploadToDropboxWithPath(filePath, dropboxPath) {
   try {
-    // Get a valid token (refreshed if needed)
-    let validToken = token;
-    if (!validToken || validToken === cachedAdminSettings?.dropboxToken) {
-      validToken = await getValidDropboxToken();
-    }
+    const validToken = await getValidDropboxToken();
 
     if (!validToken) {
       return { success: false, error: "no-valid-token" };
