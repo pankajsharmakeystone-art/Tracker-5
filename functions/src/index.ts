@@ -1,6 +1,7 @@
 
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
+import { onSchedule } from "firebase-functions/v2/scheduler";
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -12,9 +13,7 @@ const db = admin.firestore();
  * Goal: Close non-overnight sessions from previous days that were forgotten.
  * CRITICAL: Do NOT close sessions marked as `isOvernightShift: true`.
  */
-export const dailyMidnightCleanup = functions.pubsub
-  .schedule("5 0 * * *") 
-  .onRun(async (context) => {
+export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
     console.log("Starting daily midnight cleanup...");
 
     const today = new Date();
@@ -82,9 +81,7 @@ export const dailyMidnightCleanup = functions.pubsub
  * Auto Clock-Out at Shift End
  * Enforces schedule limits.
  */
-export const autoClockOutAtShiftEnd = functions.pubsub
-  .schedule("every 5 minutes")
-  .onRun(async (context) => {
+export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async (event) => {
       const now = new Date();
       const snapshot = await db.collection("worklogs")
         .where("status", "in", ["working", "on_break", "break"])

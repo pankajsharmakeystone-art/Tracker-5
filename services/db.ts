@@ -74,7 +74,7 @@ export const createTeam = async (teamName: string, adminId: string): Promise<Tea
             showLiveTeamStatus: true
         }
     });
-    return { id: newTeamDoc.id, name: teamName, ownerId: adminId, createdAt: new Date() };
+    return { id: newTeamDoc.id, name: teamName, ownerId: adminId };
 }
 
 export const getTeamById = async (teamId: string): Promise<Team | null> => {
@@ -240,7 +240,7 @@ export const getActiveWorkLog = async (uid: string): Promise<WorkLog | null> => 
         docs.sort((a, b) => {
             return getDocMillis(b.data()) - getDocMillis(a.data());
         });
-        return { id: docs[0].id, ...docs[0].data() } as WorkLog;
+        return { ...docs[0].data(), id: docs[0].id } as WorkLog;
     }
     return null;
 };

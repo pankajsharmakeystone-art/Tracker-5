@@ -67,9 +67,9 @@ const AgentPanel: React.FC = () => {
                 const ids = userData.teamIds || (userData.teamId ? [userData.teamId] : []);
                 if (ids.length > 0) {
                     try {
-                         const promises = ids.map(id => getTeamById(id));
+                         const promises = ids.map((id: string) => getTeamById(id));
                          const results = await Promise.all(promises);
-                         const validTeams = results.filter(t => t !== null) as Team[];
+                         const validTeams = results.filter((t: Team | null) => t !== null) as Team[];
                          setAvailableTeams(validTeams);
                          if (validTeams.length > 0 && !activeTeamId) {
                              setActiveTeamId(validTeams[0].id);

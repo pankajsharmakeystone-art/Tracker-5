@@ -66,7 +66,7 @@ const AdminSettings: React.FC = () => {
         const unsubscribe = streamGlobalAdminSettings((data) => {
             if (data) {
                 // Merge with default settings to ensure all fields exist
-                setSettings(prev => ({ ...defaultSettings, ...data }));
+                setSettings((prev: AdminSettings) => ({ ...defaultSettings, ...data }));
             } else {
                 setSettings(defaultSettings);
             }
@@ -84,7 +84,7 @@ const AdminSettings: React.FC = () => {
             finalValue = value === '' ? 0 : parseInt(value, 10);
         }
 
-        setSettings(prev => ({ ...prev, [name]: finalValue }));
+        setSettings((prev: AdminSettings) => ({ ...prev, [name]: finalValue }));
     };
 
     const handleSave = async (e: React.FormEvent) => {
@@ -122,7 +122,7 @@ const AdminSettings: React.FC = () => {
                     <ToggleSwitch
                         id="requireLoginOnBoot"
                         checked={settings.requireLoginOnBoot}
-                        onChange={(e) => setSettings(prev => ({ ...prev, requireLoginOnBoot: e.target.checked }))}
+                        onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, requireLoginOnBoot: e.target.checked }))}
                     />
                 </FormField>
                 
@@ -130,7 +130,7 @@ const AdminSettings: React.FC = () => {
                      <ToggleSwitch
                         id="allowRecording"
                         checked={settings.allowRecording}
-                        onChange={(e) => setSettings(prev => ({ ...prev, allowRecording: e.target.checked }))}
+                        onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, allowRecording: e.target.checked }))}
                     />
                 </FormField>
 
@@ -151,7 +151,7 @@ const AdminSettings: React.FC = () => {
                      <ToggleSwitch
                         id="showRecordingNotification"
                         checked={settings.showRecordingNotification}
-                        onChange={(e) => setSettings(prev => ({ ...prev, showRecordingNotification: e.target.checked }))}
+                        onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, showRecordingNotification: e.target.checked }))}
                     />
                 </FormField>
                 
@@ -184,7 +184,7 @@ const AdminSettings: React.FC = () => {
                         <ToggleSwitch
                             id="autoClockOutEnabled"
                             checked={settings.autoClockOutEnabled}
-                            onChange={(e) => setSettings(prev => ({ ...prev, autoClockOutEnabled: e.target.checked }))}
+                            onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, autoClockOutEnabled: e.target.checked }))}
                         />
                     </div>
                 </FormField>
@@ -205,7 +205,7 @@ const AdminSettings: React.FC = () => {
                      <ToggleSwitch
                         id="autoUpload"
                         checked={settings.autoUpload}
-                        onChange={(e) => setSettings(prev => ({ ...prev, autoUpload: e.target.checked }))}
+                        onChange={(e) => setSettings((prev: AdminSettings) => ({ ...prev, autoUpload: e.target.checked }))}
                     />
                 </FormField>
 
