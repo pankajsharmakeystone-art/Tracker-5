@@ -9,6 +9,7 @@ export interface ActivityEntry {
 }
 
 export interface WorkLog {
+    id?: string;
     userId: string;
     userDisplayName: string;
 
@@ -28,6 +29,8 @@ export interface WorkLog {
     totalBreakSeconds: number;
 
     teamId?: string;
+    startTime?: any;
+    lateMinutes?: number;
 }
 
 export interface TeamSettings {
@@ -39,4 +42,92 @@ export interface Team {
     name: string;
     ownerId: string;
     settings?: TeamSettings;
+    createdAt?: any;
+}
+
+export type Role = "admin" | "manager" | "agent";
+
+export interface User {
+    uid: string;
+    email: string | null;
+    displayName?: string | null;
+}
+
+export interface UserData {
+    uid: string;
+    email: string;
+    role: Role;
+    displayName: string;
+    teamId?: string;
+    createdAt?: any;
+}
+
+export interface AuthContextType {
+    currentUser: User | null;
+    userData: UserData | null;
+    loading: boolean;
+    logout: () => Promise<void>;
+}
+
+export interface ShiftTime {
+    startHour: number;
+    startMinute: number;
+    endHour: number;
+    endMinute: number;
+}
+
+export interface Schedule {
+    userId: string;
+    shifts: {
+        [date: string]: ShiftTime;
+    };
+}
+
+export interface MonthlySchedule {
+    [userId: string]: {
+        [date: string]: ShiftTime;
+    };
+}
+
+export interface AdminSettings {
+    autoClockOutEnabled: boolean;
+    idleTimeout: number;
+    dropboxToken?: string;
+    recordingMode?: "auto" | "manual" | "off";
+    requireLoginOnBoot?: boolean;
+    autoUpload?: boolean;
+    showRecordingNotification?: boolean;
+    manualBreakTimeoutMinutes?: number;
+    allowRecording?: boolean;
+    recordingQuality?: "480p" | "720p" | "1080p";
+}
+
+declare global {
+    interface Window {
+        desktopAPI?: {
+            onReady: (callback: (data: any) => void) => void;
+            onRegistered: (callback: (data: any) => void) => void;
+            registerUid: (uid: string) => Promise<any>;
+            unregisterUid: () => Promise<any>;
+            setAgentStatus: (status: string) => Promise<any>;
+            requestScreenSources: () => Promise<any>;
+            stopRecording: () => Promise<any>;
+            notifyRecordingSaved: (fileName: string, data: any) => Promise<any>;
+            getIdleTime: () => Promise<number>;
+            uploadToDropbox: (filePath: string) => Promise<any>;
+            getRecordingQuality: () => Promise<any>;
+            requestSignOut: () => Promise<any>;
+            clockOutAndSignOut: () => Promise<any>;
+            onCommandStartRecording: (callback: (data: any) => void) => void;
+            onCommandStopRecording: (callback: (data: any) => void) => void;
+            onCommandForceBreak: (callback: (data: any) => void) => void;
+            onSettingsUpdated: (callback: (data: any) => void) => void;
+            onAutoClockOut: (callback: (data: any) => void) => void;
+            ping: () => Promise<any>;
+            minimizeToTray: () => void;
+            setAutoLaunch: (enable: boolean) => Promise<any>;
+            endBreak: () => Promise<any>;
+        };
+        currentUserUid?: string;
+    }
 }

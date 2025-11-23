@@ -53,7 +53,7 @@ const UserManagementTable: React.FC = () => {
         const ids = user.teamIds || (user.teamId ? [user.teamId] : []);
         if (ids.length === 0) return 'None';
         
-        return ids.map(id => teams.find(t => t.id === id)?.name || 'Unknown').join(', ');
+        return ids.map((id: string) => teams.find(t => t.id === id)?.name || 'Unknown').join(', ');
     };
 
     const openTeamModal = (user: UserData) => {

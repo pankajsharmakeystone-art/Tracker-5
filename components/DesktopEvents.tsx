@@ -11,7 +11,7 @@ const DesktopEvents: React.FC = () => {
     console.log("DesktopEvents: Attaching IPC listeners...");
 
     // Listener for Start Recording Command from Main Process
-    window.desktopAPI.onCommandStartRecording(async ({ uid }) => {
+    window.desktopAPI.onCommandStartRecording(async ({ uid }: { uid: string }) => {
       console.log("IPC Command: Start Recording for UID:", uid);
       
       try {
