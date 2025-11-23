@@ -132,6 +132,12 @@ declare global {
             minimizeToTray: () => void;
             setAutoLaunch: (enable: boolean) => Promise<any>;
             endBreak: () => Promise<any>;
+            getLiveStreamSources: () => Promise<{
+                success: boolean;
+                sources?: Array<{ id: string; name: string }>;
+                resolution?: { width: number; height: number };
+                error?: string;
+            }>;
         };
         currentUserUid?: string;
     }

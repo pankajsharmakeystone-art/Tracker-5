@@ -946,6 +946,27 @@ ipcMain.handle("start-recording", async () => {
   }
 });
 
+ipcMain.handle("live-stream-get-sources", async () => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ["screen", "window"] });
+    const quality = String(cachedAdminSettings?.recordingQuality || "720p");
+    const mapping = {
+      "480p": { width: 640, height: 480 },
+      "720p": { width: 1280, height: 720 },
+      "1080p": { width: 1920, height: 1080 }
+    };
+    const resolution = mapping[quality] || mapping["720p"];
+    return {
+      success: true,
+      sources: sources.map((s) => ({ id: s.id, name: s.name })),
+      resolution
+    };
+  } catch (error) {
+    console.error("[live-stream-get-sources] error", error);
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle("stop-recording", async () => {
   try {
     // called by renderer when it ends recording explicitly
