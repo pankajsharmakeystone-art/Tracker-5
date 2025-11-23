@@ -1,3 +1,5 @@
+import type { User as FirebaseAuthUser } from 'firebase/auth';
+
 export interface BreakEntry {
     startTime: any;
     endTime: any;
@@ -47,11 +49,7 @@ export interface Team {
 
 export type Role = "admin" | "manager" | "agent";
 
-export interface User {
-    uid: string;
-    email: string | null;
-    displayName?: string | null;
-}
+export type User = FirebaseAuthUser;
 
 export interface UserData {
     uid: string;
