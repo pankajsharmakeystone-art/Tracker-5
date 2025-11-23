@@ -72,8 +72,6 @@ export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
       await batch.commit();
       console.log(`Closed ${count} stale non-overnight sessions.`);
     }
-
-    return null;
   });
 
 
@@ -138,6 +136,5 @@ export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async (event
           }
       });
 
-      if (count > 0) await batch.commit();
-      return null;
+        if (count > 0) await batch.commit();
   });

@@ -9,7 +9,7 @@ export interface ActivityEntry {
 }
 
 export interface WorkLog {
-    id?: string;
+    id: string;
     userId: string;
     userDisplayName: string;
 
@@ -76,16 +76,18 @@ export interface ShiftTime {
     endTime: string;
 }
 
+export type ShiftEntry = ShiftTime | 'OFF' | 'L';
+
 export interface Schedule {
     userId: string;
     shifts: {
-        [date: string]: ShiftTime;
+        [date: string]: ShiftEntry;
     };
 }
 
 export interface MonthlySchedule {
     [userId: string]: {
-        [date: string]: ShiftTime;
+        [date: string]: ShiftEntry;
     };
 }
 
