@@ -29,7 +29,7 @@ export const createViewerRequest = async (params) => {
 export const appendCandidate = async (sessionRef, role, candidate) => {
     const field = role === 'agent' ? 'agentIceCandidates' : 'viewerIceCandidates';
     await updateDoc(sessionRef, {
-        [field]: arrayUnion({ ...candidate, createdAt: serverTimestamp() }),
+        [field]: arrayUnion({ ...candidate, createdAt: Date.now() }),
         updatedAt: serverTimestamp()
     });
 };
