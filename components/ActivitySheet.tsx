@@ -15,39 +15,61 @@ export function transformFirestoreWorklog(docData: any): Array<{
 
     // If it has a breaks array, use that structure
     if (Array.isArray(docData.breaks)) {
-        const segments = [];
-        
+        const segments = [] as any[];
         const mainStart = toDate(docData.startTime);
         const mainEnd = toDate(docData.endTime);
-        
-        // Add main working period
-        if (mainStart) {
-            segments.push({
-                type: 'Working' as const,
-                startTime: mainStart,
-                endTime: mainEnd,
-                durationSeconds: mainEnd && mainStart ? (mainEnd.getTime() - mainStart.getTime()) / 1000 : 0,
-            });
-        }
-        
-        // Add breaks
-        (docData.breaks || []).forEach((breakItem: any) => {
-            const breakStart = toDate(breakItem.startTime);
-            const breakEnd = toDate(breakItem.endTime);
-            segments.push({
-                type: 'On Break' as const,
-                startTime: breakStart!,
-                endTime: breakEnd,
-                durationSeconds: breakEnd && breakStart ? (breakEnd.getTime() - breakStart.getTime()) / 1000 : 0,
-            });
+
+        // Build events timeline similar to older logic
+        const events: { time: any; type: 'START_BREAK' | 'END_BREAK' | 'CLOCK_OUT' }[] = [];
+        (docData.breaks || []).forEach((b: any) => {
+            if (b.startTime) events.push({ time: b.startTime, type: 'START_BREAK' });
+            if (b.endTime) events.push({ time: b.endTime, type: 'END_BREAK' });
         });
-        
-        // Sort by startTime (oldest first)
-        segments.sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0));
-        return segments;
+        if (docData.clockOutTime) events.push({ time: docData.clockOutTime, type: 'CLOCK_OUT' });
+
+        events.sort((a, b) => {
+            const aMs = typeof a.time.toMillis === 'function' ? a.time.toMillis() : (a.time.seconds ? a.time.seconds * 1000 : new Date(a.time).getTime());
+            const bMs = typeof b.time.toMillis === 'function' ? b.time.toMillis() : (b.time.seconds ? b.time.seconds * 1000 : new Date(b.time).getTime());
+            return aMs - bMs;
+        });
+
+        let cursor = docData.clockInTime;
+        let currentStatus: 'Working' | 'On Break' = 'Working';
+
+        for (const ev of events) {
+            const cursorMs = typeof cursor.toMillis === 'function' ? cursor.toMillis() : (cursor.seconds ? cursor.seconds * 1000 : new Date(cursor).getTime());
+            const evMs = typeof ev.time.toMillis === 'function' ? ev.time.toMillis() : (ev.time.seconds ? ev.time.seconds * 1000 : new Date(ev.time).getTime());
+            if (evMs > cursorMs) {
+                segments.push({
+                    type: currentStatus,
+                    startTime: toDate(cursor)!,
+                    endTime: toDate(ev.time),
+                    durationSeconds: (evMs - cursorMs) / 1000,
+                });
+            }
+            cursor = ev.time;
+            if (ev.type === 'START_BREAK') currentStatus = 'On Break';
+            else if (ev.type === 'END_BREAK') currentStatus = 'Working';
+        }
+
+        if (docData.status !== 'clocked_out') {
+            const now = typeof Timestamp !== 'undefined' ? Timestamp.now() : new Date();
+            const cursorMs = typeof cursor.toMillis === 'function' ? cursor.toMillis() : (cursor.seconds ? cursor.seconds * 1000 : new Date(cursor).getTime());
+            const nowMs = typeof now.toMillis === 'function' ? now.toMillis() : (now.getTime ? now.getTime() : Date.now());
+            if (nowMs > cursorMs) {
+                segments.push({
+                    type: docData.status === 'working' ? 'Working' : 'On Break',
+                    startTime: toDate(cursor)!,
+                    endTime: null,
+                    durationSeconds: (nowMs - cursorMs) / 1000,
+                });
+            }
+        }
+
+        return segments.sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0));
     }
-    
-    // Fallback: if it has numeric keys (old structure)
+
+    // Fallback for numeric keyed structure
     const segments = Object.entries(docData)
         .filter(([key]) => !isNaN(Number(key)))
         .map(([, segment]: [string, any]) => ({
@@ -65,7 +87,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
                 durationSeconds: end && start ? (end.getTime() - start.getTime()) / 1000 : 0,
             };
         });
-    
+
     return segments;
 }
 
@@ -123,17 +145,7 @@ const formatDuration = (seconds: number): string => {
 // Usage: Instead of passing workLog.activities/breaks, use transformFirestoreWorklog(workLog)
 const ActivitySheet: React.FC<{ workLog: any }> = ({ workLog }) => {
     // If workLog is already in the expected format, skip transform
-    const timeline = Array.isArray(workLog)
-        ? workLog
-        : transformFirestoreWorklog(workLog);
-    
-    // Debug: Check what structure we received
-    console.log('=== ActivitySheet Debug ===');
-    console.log('Has breaks array?', Array.isArray(workLog?.breaks));
-    console.log('Has numeric keys?', Object.keys(workLog || {}).some(k => !isNaN(Number(k))));
-    console.log('Numeric keys:', Object.keys(workLog || {}).filter(k => !isNaN(Number(k))).slice(0, 3));
-    console.log('Timeline length:', timeline.length);
-    console.log('First timeline item:', timeline[0]);
+    const timeline = (Array.isArray(workLog) ? workLog : transformFirestoreWorklog(workLog)).slice().reverse();
 
     if (timeline.length === 0) {
         return (
