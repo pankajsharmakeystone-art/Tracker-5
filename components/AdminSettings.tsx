@@ -46,6 +46,9 @@ const AdminSettings: React.FC = () => {
         allowRecording: false,
         autoUpload: false,
         dropboxToken: '',
+        dropboxRefreshToken: '',
+        dropboxAppKey: '',
+        dropboxAppSecret: '',
         idleTimeout: 300,
         recordingMode: 'manual',
         requireLoginOnBoot: false,
@@ -201,7 +204,7 @@ const AdminSettings: React.FC = () => {
                     />
                 </FormField>
 
-                <FormField label="Auto-Upload Recordings" description="Automatically upload screen recordings to Dropbox. Requires a valid token.">
+                <FormField label="Auto-Upload Recordings" description="Automatically upload screen recordings to Dropbox. Requires a refresh token + app credentials.">
                      <ToggleSwitch
                         id="autoUpload"
                         checked={settings.autoUpload ?? false}
@@ -209,7 +212,40 @@ const AdminSettings: React.FC = () => {
                     />
                 </FormField>
 
-                <FormField label="Dropbox API Token" description="Enter your Dropbox app's generated access token for uploads.">
+                <FormField label="Dropbox Refresh Token" description="Paste the long-lived refresh token generated with token_access_type=offline. This keeps uploads working after short-lived tokens expire.">
+                    <input
+                        type="text"
+                        name="dropboxRefreshToken"
+                        value={settings.dropboxRefreshToken || ''}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        placeholder="Enter Dropbox Refresh Token"
+                    />
+                </FormField>
+
+                <FormField label="Dropbox App Key" description="Optional override for the Dropbox app key (client_id). Leave blank to use the value bundled with the desktop app.">
+                    <input
+                        type="text"
+                        name="dropboxAppKey"
+                        value={settings.dropboxAppKey || ''}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        placeholder="Optional App Key"
+                    />
+                </FormField>
+
+                <FormField label="Dropbox App Secret" description="Optional override for the Dropbox app secret (client_secret). Required if you supply a custom app key.">
+                    <input
+                        type="text"
+                        name="dropboxAppSecret"
+                        value={settings.dropboxAppSecret || ''}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        placeholder="Optional App Secret"
+                    />
+                </FormField>
+
+                <FormField label="Legacy Dropbox Access Token" description="Optional: legacy long-lived access token fallback. Only used if no refresh token is configured.">
                     <input
                         type="text"
                         name="dropboxToken"

@@ -95,6 +95,11 @@ export interface AdminSettingsType {
     autoClockOutEnabled: boolean;
     idleTimeout: number;
     dropboxToken?: string;
+    dropboxRefreshToken?: string;
+    dropboxAccessToken?: string;
+    dropboxTokenExpiry?: string | number;
+    dropboxAppKey?: string;
+    dropboxAppSecret?: string;
     recordingMode?: "auto" | "manual" | "off";
     requireLoginOnBoot?: boolean;
     autoUpload?: boolean;
