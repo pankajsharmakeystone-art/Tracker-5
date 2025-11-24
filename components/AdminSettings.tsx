@@ -3,7 +3,6 @@ import React, { useState, useEffect } from 'react';
 import { streamGlobalAdminSettings, updateGlobalAdminSettings } from '../services/db';
 import type { AdminSettingsType } from '../types';
 import Spinner from './Spinner';
-import { useAuth } from '../hooks/useAuth';
 
 interface FormFieldProps {
     label: string;
@@ -42,18 +41,6 @@ const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ checked, onChange, id }) =>
     </label>
 );
 
-const FUNCTIONS_REGION = 'us-central1';
-const FUNCTIONS_BASE_URL = import.meta.env.VITE_FUNCTIONS_BASE_URL || `https://${FUNCTIONS_REGION}-${import.meta.env.VITE_FIREBASE_PROJECT_ID || 'tracker-5'}.cloudfunctions.net`;
-const rawDropboxEndpoint = import.meta.env.VITE_DROPBOX_SESSION_ENDPOINT
-    || (import.meta.env.PROD
-        ? '/api/create-dropbox-session'
-        : `${FUNCTIONS_BASE_URL}/createDropboxOauthSession`);
-const DROPBOX_SESSION_ENDPOINT = /^https?:\/\//i.test(rawDropboxEndpoint)
-    ? rawDropboxEndpoint
-    : rawDropboxEndpoint.startsWith('/')
-        ? rawDropboxEndpoint
-        : `/${rawDropboxEndpoint}`;
-
 const AdminSettings: React.FC = () => {
     const defaultSettings: AdminSettingsType = {
         allowRecording: false,
@@ -76,9 +63,6 @@ const AdminSettings: React.FC = () => {
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
-    const [tokenMessage, setTokenMessage] = useState<string | null>(null);
-    const [tokenGenerating, setTokenGenerating] = useState(false);
-    const { currentUser } = useAuth();
 
     useEffect(() => {
         setLoading(true);
@@ -111,7 +95,6 @@ const AdminSettings: React.FC = () => {
         setSaving(true);
         setError(null);
         setSuccess(null);
-        setTokenMessage(null);
         try {
             await updateGlobalAdminSettings(settings);
             setSuccess('Settings saved successfully!');
@@ -121,55 +104,6 @@ const AdminSettings: React.FC = () => {
             console.error(err);
         } finally {
             setSaving(false);
-        }
-    };
-
-    const handleGenerateDropboxToken = async () => {
-        setError(null);
-        setTokenMessage(null);
-
-        if (!settings.dropboxAppKey || !settings.dropboxAppSecret) {
-            setError('Enter your Dropbox App Key and Secret, then save before generating a refresh token.');
-            return;
-        }
-        if (!currentUser) {
-            setError('You must be signed in to generate a Dropbox refresh token.');
-            return;
-        }
-
-        try {
-            setTokenGenerating(true);
-            const idToken = await currentUser.getIdToken();
-            const response = await fetch(DROPBOX_SESSION_ENDPOINT, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${idToken}`
-                },
-                body: JSON.stringify({
-                    idToken,
-                    appKey: settings.dropboxAppKey,
-                    appSecret: settings.dropboxAppSecret
-                })
-            });
-
-            const payload = await response.json().catch(() => ({}));
-            if (!response.ok || !payload?.startUrl) {
-                const message = payload?.error || 'Failed to start Dropbox authorization.';
-                throw new Error(message);
-            }
-
-            const popup = window.open(payload.startUrl, '_blank', 'width=480,height=720');
-            if (!popup) {
-                setTokenMessage(`Popup blocked. Please allow popups for this site and try again, or open this link manually: ${payload.startUrl}`);
-            } else {
-                setTokenMessage('Dropbox window opened. Complete the authorization and return here—settings will update automatically once Dropbox confirms.');
-            }
-        } catch (err) {
-            console.error('Failed to start Dropbox OAuth', err);
-            setError(err instanceof Error ? err.message : 'Failed to start Dropbox authorization.');
-        } finally {
-            setTokenGenerating(false);
         }
     };
 
@@ -278,7 +212,7 @@ const AdminSettings: React.FC = () => {
                     />
                 </FormField>
 
-                <FormField label="Dropbox Refresh Token" description="Paste the long-lived refresh token generated with token_access_type=offline. This keeps uploads working after short-lived tokens expire.">
+                <FormField label="Dropbox Refresh Token" description="Paste the long-lived refresh token generated with token_access_type=offline. Generate it manually in the Dropbox console and keep it secure.">
                     <input
                         type="text"
                         name="dropboxRefreshToken"
@@ -287,6 +221,9 @@ const AdminSettings: React.FC = () => {
                         className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
                         placeholder="Enter Dropbox Refresh Token"
                     />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                        Tip: Visit your Dropbox app&apos;s OAuth settings, authorize with <code>token_access_type=offline</code>, then paste the resulting refresh token here.
+                    </p>
                 </FormField>
 
                 <FormField label="Dropbox App Key" description="Optional override for the Dropbox app key (client_id). Leave blank to use the value bundled with the desktop app.">
@@ -310,21 +247,6 @@ const AdminSettings: React.FC = () => {
                         placeholder="Optional App Secret"
                     />
                 </FormField>
-
-                <div className="bg-white dark:bg-gray-900 rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-4 mb-6">
-                    <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">
-                        Need a refresh token? Save your Dropbox App Key/Secret above, then click the button below. We'll open a Dropbox window, guide you through authorization, and store the refresh token automatically.
-                    </p>
-                    <button
-                        type="button"
-                        onClick={handleGenerateDropboxToken}
-                        disabled={tokenGenerating}
-                        className="inline-flex items-center justify-center rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
-                    >
-                        {tokenGenerating ? 'Starting Dropbox Flow...' : 'Generate Refresh Token'}
-                    </button>
-                    {tokenMessage && <p className="text-xs text-gray-600 dark:text-gray-400 mt-2">{tokenMessage}</p>}
-                </div>
 
                 <FormField label="Legacy Dropbox Access Token" description="Optional: legacy long-lived access token fallback. Only used if no refresh token is configured.">
                     <input
