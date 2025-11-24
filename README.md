@@ -28,3 +28,12 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Cn17wxMG8487klqzHJ60Op
 5. Restart the Electron desktop app (or wait ~30 s) so it picks up the updated settings and refreshes tokens on demand.
 
 > If you host Firebase Functions in a different region or emulator, set `VITE_FUNCTIONS_BASE_URL` so the dashboard button knows which endpoint to call.
+
+## Desktop Releases & Auto-Update
+
+1. **Build locally:** `npm run build` generates the Vite bundle consumed by Electron.
+2. **Publish installers:** set `GH_TOKEN=<github personal access token with repo scope>` and run `npm run electron:release`. Electron Builder will package Windows (NSIS), macOS (DMG), and Linux (AppImage) installers and upload them to the `pankajsharmakeystone-art/Tracker-5` GitHub Releases page.
+3. **Download button:** The landing page already links to `https://github.com/pankajsharmakeystone-art/Tracker-5/releases/latest`, so once the release is published the desktop app is available to end users immediately.
+4. **Auto-update:** The bundled `electron-updater` checks GitHub Releases on launch. Every time you cut a new release (bump `version` in `package.json` and rerun the command above) clients download and install it automatically after restart.
+
+> For dry runs without publishing, run `npm run electron:build` instead—the installers will be written to the `release/` folder locally.

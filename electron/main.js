@@ -10,12 +10,34 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const fetch = require("node-fetch");
+const electronLog = require("electron-log");
 
 // auto-updater
 const { autoUpdater } = require("electron-updater");
 
+const isDev = process.env.ELECTRON_DEV === 'true' || process.env.NODE_ENV === 'development';
+
+electronLog.initialize?.();
+if (electronLog?.transports?.file) {
+  electronLog.transports.file.level = "info";
+}
+autoUpdater.logger = electronLog;
+autoUpdater.autoDownload = true;
+
 // ---------- HELPER FUNCTIONS ----------
 function log(...args){ console.log("[electron]", ...args); }
+
+function emitAutoUpdateStatus(event, payload = {}) {
+  const safePayload = payload || {};
+  log(`[autoUpdater] ${event}`, safePayload);
+  try {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send("auto-update-status", { event, ...safePayload });
+    }
+  } catch (e) {
+    log("auto-update status emit failed", e.message);
+  }
+}
 
 // ---------- FIREBASE ADMIN ----------
 const admin = require("firebase-admin");
@@ -105,6 +127,17 @@ let dropboxTokenExpiry = null;
 // track manual-break timeout notifications per uid to avoid repeat spam
 const manualBreakNotified = new Map();
 
+autoUpdater.on("checking-for-update", () => emitAutoUpdateStatus("checking"));
+autoUpdater.on("update-available", (info) => emitAutoUpdateStatus("available", { version: info?.version }));
+autoUpdater.on("update-not-available", () => emitAutoUpdateStatus("up-to-date"));
+autoUpdater.on("download-progress", (progress) => emitAutoUpdateStatus("downloading", {
+  percent: Math.round(progress?.percent || 0),
+  transferred: progress?.transferred,
+  total: progress?.total
+}));
+autoUpdater.on("update-downloaded", (info) => emitAutoUpdateStatus("downloaded", { version: info?.version }));
+autoUpdater.on("error", (error) => emitAutoUpdateStatus("error", { message: error?.message || String(error) }));
+
 function getDropboxAppKey() {
   return cachedAdminSettings?.dropboxAppKey || process.env.DROPBOX_CLIENT_ID || process.env.DROPBOX_APP_KEY || "";
 }
@@ -131,7 +164,6 @@ function createMainWindow() {
   });
 
   // Dev/prod URL switching
-  const isDev = process.env.ELECTRON_DEV === 'true' || process.env.NODE_ENV === 'development';
   if (isDev) {
     mainWindow.loadURL('https://tracker-5.vercel.app');
   } else {
@@ -1246,9 +1278,19 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
 }
 
 // ---------- AUTO UPDATE ----------
-try {
-  autoUpdater.checkForUpdatesAndNotify();
-} catch(e){}
+function scheduleAutoUpdateCheck() {
+  if (isDev) {
+    log("autoUpdater skipped in dev mode");
+    return;
+  }
+
+  const delay = Number(process.env.AUTO_UPDATE_DELAY_MS || 3000);
+  setTimeout(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+      emitAutoUpdateStatus("error", { message: error?.message || String(error) });
+    });
+  }, isNaN(delay) ? 3000 : delay);
+}
 
 // ---------- APP INIT ----------
 app.whenReady().then(() => {
@@ -1265,6 +1307,8 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
   });
+
+  scheduleAutoUpdateCheck();
 });
 
 app.on("window-all-closed", () => {

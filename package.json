@@ -1,20 +1,29 @@
 {
-  "name": "react-firebase-auth-&-firestore",
+  "name": "tracker-5",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.5.0",
   "type": "module",
+  "main": "electron/main.js",
+  "author": "Tracker 5",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pankajsharmakeystone-art/Tracker-5.git"
+  },
+  "homepage": "https://tracker-5.vercel.app",
   "scripts": {
     "start": "vite",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "electron:serve": "cross-env ELECTRON_DEV=true electron electron/main.js",
-    "electron:build": "npm run build && electron-builder"
+    "electron:build": "npm run build && electron-builder",
+    "electron:release": "npm run build && electron-builder --publish always"
   },
   "dependencies": {
     "firebase": "^12.6.0",
     "firebase-admin": "^13.6.0",
     "firebase-functions": "^7.0.0",
+    "electron-log": "^5.1.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.9.6"
@@ -29,5 +38,48 @@
     "electron-builder": "^26.0.12",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
+  },
+  "build": {
+    "appId": "com.trackerfive.desktop",
+    "productName": "Tracker 5 Desktop",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "!electron/node_modules"
+    ],
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "electron/build"
+    },
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "pankajsharmakeystone-art",
+        "repo": "Tracker-5",
+        "releaseType": "release"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office"
+    }
   }
 }
