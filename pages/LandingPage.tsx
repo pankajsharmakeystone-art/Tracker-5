@@ -28,9 +28,7 @@ const LandingPage: React.FC = () => {
                         Sign In
                     </Link>
                     <a
-                        href="https://github.com/pankajsharmakeystone-art/Tracker-5/releases/latest/download/Tracker-5-Desktop-Setup.exe"
-                        target="_blank"
-                        rel="noopener noreferrer"
+                        href="/download/desktop"
                         download
                         className="inline-flex items-center justify-center px-6 py-3 text-base font-medium text-white bg-green-600 border border-transparent rounded-md shadow-sm hover:bg-green-700"
                     >

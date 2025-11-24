@@ -1,0 +1,9 @@
+{
+  "redirects": [
+    {
+      "source": "/download/desktop",
+      "destination": "https://github.com/pankajsharmakeystone-art/Tracker-5/releases/latest/download/Tracker-5-Desktop-Setup.exe",
+      "permanent": false
+    }
+  ]
+}
