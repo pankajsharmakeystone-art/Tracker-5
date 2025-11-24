@@ -135,11 +135,14 @@ export const useAgentLiveStream = () => {
         return;
       }
 
-      if (data.answer && pcRef.current && !pcRef.current.currentRemoteDescription) {
-        try {
-          await pcRef.current.setRemoteDescription({ type: 'answer', sdp: data.answer.sdp });
-        } catch (err) {
-          console.error('Failed to set remote description on agent', err);
+      if (data.answer && pcRef.current) {
+        const pc = pcRef.current;
+        if (pc.signalingState === 'have-local-offer') {
+          try {
+            await pc.setRemoteDescription({ type: 'answer', sdp: data.answer.sdp });
+          } catch (err) {
+            console.error('Failed to set remote description on agent', err);
+          }
         }
       }
 

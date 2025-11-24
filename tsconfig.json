@@ -13,6 +13,7 @@
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "isolatedModules": true,
+    "noEmit": true,
     "types": ["vite/client"]
   },
   "include": ["."],
