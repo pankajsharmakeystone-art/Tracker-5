@@ -1,105 +1,13 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import admin from 'firebase-admin';
 import crypto from 'node:crypto';
-
-const DROPBOX_SESSIONS_COLLECTION = 'dropboxOauthSessions';
-const DEFAULT_REGION = process.env.FIREBASE_FUNCTIONS_REGION || 'us-central1';
-
-const APP_NAME = 'dropbox-session-api';
-let firebaseApp: admin.app.App | null = null;
-let firestore: admin.firestore.Firestore | null = null;
-let auth: admin.auth.Auth | null = null;
-type ServiceAccountJSON = admin.ServiceAccount & {
-  project_id?: string;
-  private_key?: string;
-  client_email?: string;
-};
-
-let cachedServiceAccount: ServiceAccountJSON | null = null;
+import admin from 'firebase-admin';
+import { getFirebaseServices } from './_lib/firebaseAdmin';
+import { DROPBOX_SESSIONS_COLLECTION, inferExternalBaseUrl } from './_lib/dropbox';
 
 const allowCors = (res: VercelResponse) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-};
-
-const sanitizeServiceAccount = (raw: string): ServiceAccountJSON => {
-  const parsed = JSON.parse(raw) as ServiceAccountJSON;
-  if (typeof parsed.private_key === 'string') {
-    parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
-    if (!parsed.privateKey) parsed.privateKey = parsed.private_key;
-  }
-  if (parsed.client_email && !parsed.clientEmail) {
-    parsed.clientEmail = parsed.client_email;
-  }
-  if (parsed.project_id && !parsed.projectId) {
-    parsed.projectId = parsed.project_id;
-  }
-  return parsed;
-};
-
-const tryLoadServiceAccount = () => {
-  if (cachedServiceAccount) return cachedServiceAccount;
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!raw) return null;
-  try {
-    cachedServiceAccount = sanitizeServiceAccount(raw);
-    return cachedServiceAccount;
-  } catch (error) {
-    console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON', error);
-    return null;
-  }
-};
-
-const parseServiceAccount = () => {
-  if (cachedServiceAccount) return cachedServiceAccount;
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!raw) {
-    throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON env var is required');
-  }
-  try {
-    cachedServiceAccount = sanitizeServiceAccount(raw);
-    return cachedServiceAccount;
-  } catch (error) {
-    throw new Error('Unable to parse FIREBASE_SERVICE_ACCOUNT_JSON');
-  }
-};
-
-const inferProjectId = () => {
-  if (process.env.FIREBASE_PROJECT_ID) return process.env.FIREBASE_PROJECT_ID;
-  if (process.env.GCLOUD_PROJECT) return process.env.GCLOUD_PROJECT;
-  if (process.env.GCP_PROJECT) return process.env.GCP_PROJECT;
-  const serviceAccount = tryLoadServiceAccount();
-  if (serviceAccount?.project_id) return serviceAccount.project_id;
-  if (firebaseApp?.options.projectId) return firebaseApp.options.projectId;
-  return 'tracker-5';
-};
-
-const getFunctionsBaseUrl = () => {
-  const raw = process.env.FIREBASE_FUNCTIONS_BASE_URL;
-  if (raw) return raw.replace(/\/$/, '');
-  return `https://${DEFAULT_REGION}-${inferProjectId()}.cloudfunctions.net`;
-};
-
-const initializeFirebase = () => {
-  if (firebaseApp && firestore && auth) {
-    return { firestore, auth };
-  }
-
-  const serviceAccount = parseServiceAccount();
-
-  const existingApp = admin.apps.find((appInstance) => appInstance?.name === APP_NAME);
-  firebaseApp = existingApp || admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: serviceAccount.projectId || serviceAccount.project_id,
-      clientEmail: serviceAccount.clientEmail || serviceAccount.client_email,
-      privateKey: serviceAccount.privateKey || serviceAccount.private_key,
-    }),
-  }, APP_NAME);
-
-  firestore = admin.firestore(firebaseApp);
-  auth = admin.auth(firebaseApp);
-  return { firestore, auth };
 };
 
 class HttpError extends Error {
@@ -128,10 +36,6 @@ const ensureAdminUser = async (uid: string, db: admin.firestore.Firestore) => {
   }
 };
 
-const dropboxStartUrlForSession = (sessionId: string) => {
-  return `${getFunctionsBaseUrl()}/dropboxOauthStart?session=${sessionId}`;
-};
-
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   allowCors(res);
   if (req.method === 'OPTIONS') {
@@ -146,7 +50,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   let firebase;
   try {
-    firebase = initializeFirebase();
+    firebase = getFirebaseServices();
   } catch (error) {
     res.status(500).json({ error: 'firebase-initialization-failed', details: (error as Error).message });
     return;
@@ -180,7 +84,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       status: 'pending',
     });
 
-    res.status(200).json({ startUrl: dropboxStartUrlForSession(sessionRef.id) });
+    const baseUrl = inferExternalBaseUrl(req);
+    res.status(200).json({ startUrl: `${baseUrl}/api/dropbox-start?session=${sessionRef.id}` });
   } catch (error) {
     if (error instanceof HttpError) {
       res.status(error.status).json({ error: error.message });
