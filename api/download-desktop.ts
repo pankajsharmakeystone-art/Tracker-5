@@ -1,6 +1,4 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { Readable } from 'node:stream';
-import { ReadableStream as NodeReadableStream } from 'node:stream/web';
 
 const OWNER = 'pankajsharmakeystone-art';
 const REPO = 'Tracker-5';
@@ -39,23 +37,8 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
       return;
     }
 
-    const downloadResponse = await fetch(asset.browser_download_url, {
-      headers: buildHeaders()
-    });
-
-    if (!downloadResponse.ok || !downloadResponse.body) {
-      const message = `Failed to download asset (${downloadResponse.status})`;
-      res.status(502).json({ error: message });
-      return;
-    }
-
-    const filename = asset?.name || DEFAULT_ASSET;
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Cache-Control', 'no-store');
-
-    const nodeStream = Readable.fromWeb(downloadResponse.body as NodeReadableStream);
-    nodeStream.pipe(res);
+    res.redirect(302, asset.browser_download_url);
   } catch (error) {
     res.status(500).json({ error: (error as Error).message || 'Unexpected error while downloading desktop app' });
   }
