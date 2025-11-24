@@ -17,7 +17,9 @@
     "preview": "vite preview",
     "electron:serve": "cross-env ELECTRON_DEV=true electron electron/main.js",
     "electron:build": "npm run build && electron-builder",
-    "electron:release": "npm run build && electron-builder --publish always"
+    "electron:release": "npm run build && electron-builder --publish always",
+    "sync:version": "node ./scripts/sync-electron-version.cjs",
+    "postversion": "npm run sync:version"
   },
   "dependencies": {
     "electron-log": "^5.1.4",
