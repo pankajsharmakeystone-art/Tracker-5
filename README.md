@@ -23,11 +23,24 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Cn17wxMG8487klqzHJ60Op
 
 1. In the web dashboard, open **Application Settings** → **Dropbox**.
 2. Enter your Dropbox App Key/Secret (from the Dropbox developer console) and click **Save Settings**.
-3. Click **Generate Refresh Token**. A Dropbox popup opens and walks you through granting offline access.
+3. Click **Generate Refresh Token**. A Dropbox popup opens and walks you through granting offline access. (If the button is disabled, enter the Dropbox app key + secret first.)
 4. After Dropbox shows "Connected", close the popup. The refresh token, short-lived access token, and expiry are stored in Firestore automatically.
 5. Restart the Electron desktop app (or wait ~30 s) so it picks up the updated settings and refreshes tokens on demand.
 
 > If you host Firebase Functions in a different region or emulator, set `VITE_FUNCTIONS_BASE_URL` so the dashboard button knows which endpoint to call.
+
+### Required Environment Variables (Vercel)
+
+Add the following secrets to your Vercel project (or `.env` if you run `vercel dev`):
+
+| Name | Description |
+| --- | --- |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Full JSON string for a Firebase service account that has access to Firestore + Authentication. Paste it as a single line and keep it secret. |
+| `FIREBASE_PROJECT_ID` *(optional)* | Overrides the project ID inferred from the service account when building Cloud Function URLs. |
+| `FIREBASE_FUNCTIONS_REGION` *(optional)* | Defaults to `us-central1`. Change only if you deploy the Dropbox Cloud Functions elsewhere. |
+| `FIREBASE_FUNCTIONS_BASE_URL` *(optional)* | Use this if your callable Functions live behind a custom domain (otherwise it is derived automatically). |
+
+For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_ENDPOINT` to a reachable server that can forward to the new API (for example, `https://<your-vercel-deployment>/api/create-dropbox-session`).
 
 ## Desktop Releases & Auto-Update
 
