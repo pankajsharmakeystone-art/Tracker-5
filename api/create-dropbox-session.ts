@@ -7,6 +7,30 @@ const FUNCTION_PATH = process.env.DROPBOX_SESSION_FUNCTION || 'createDropboxOaut
 
 const targetUrl = `${FUNCTIONS_BASE_URL}/${FUNCTION_PATH}`;
 
+type IncomingBody = Record<string, unknown> | string | undefined | null;
+
+const normalizePayload = (incoming: IncomingBody) => {
+  if (incoming == null) {
+    return { payload: {}, idToken: undefined };
+  }
+
+  if (typeof incoming === 'string') {
+    try {
+      const parsed = JSON.parse(incoming);
+      return normalizePayload(parsed as Record<string, unknown>);
+    } catch (err) {
+      console.warn('Failed to parse incoming Dropbox payload; defaulting to empty body', err);
+      return { payload: {}, idToken: undefined };
+    }
+  }
+
+  const { idToken, ...rest } = incoming as Record<string, unknown>;
+  return {
+    payload: rest,
+    idToken: typeof idToken === 'string' ? idToken : undefined
+  };
+};
+
 function asJsonString(body: unknown): string {
   if (typeof body === 'string') {
     return body;
@@ -34,8 +58,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
+  const { payload, idToken } = normalizePayload(req.body as IncomingBody);
   const authHeader = req.headers.authorization;
-  if (!authHeader) {
+  const bearer = authHeader || (idToken ? `Bearer ${idToken}` : undefined);
+
+  if (!bearer) {
     res.status(401).json({ error: 'missing-authorization' });
     return;
   }
@@ -44,10 +71,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const response = await fetch(targetUrl, {
       method: 'POST',
       headers: {
-        Authorization: authHeader,
+        Authorization: bearer,
         'Content-Type': 'application/json'
       },
-      body: asJsonString(req.body)
+      body: asJsonString(payload)
     });
 
     const text = await response.text();
