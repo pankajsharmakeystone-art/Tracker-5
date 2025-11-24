@@ -18,21 +18,26 @@ const DesktopEvents: React.FC = () => {
         const result = await window.desktopAPI!.requestScreenSources();
         
         if (!result?.success) {
-            console.error("Error getting sources:", result?.error);
-            return;
+          console.error("Error getting sources:", result?.error);
+          return;
         }
         
         const sources = result.sources;
         if (!sources || sources.length === 0) {
-            console.error("No screen sources available");
-            return;
+          console.error("No screen sources available");
+          return;
         }
 
-        const selectedSource = sources[0]; // first screen
-        console.log(`Selected Source: ${selectedSource.name} (${selectedSource.id})`);
-        
-        // Pass resolution if available
-        await startDesktopRecording(selectedSource.id, selectedSource.name, result.resolution);
+        const screenSources = sources.filter((src) => src.id.startsWith('screen') || /screen/i.test(src.name));
+        const targets = screenSources.length > 0 ? screenSources : [sources[0]];
+
+        console.log("Starting recording for displays:", targets.map((s) => `${s.name} (${s.id})`).join(', '));
+
+        await startDesktopRecording(
+          targets.map((s) => s.id),
+          targets.map((s) => s.name),
+          result.resolution
+        );
       } catch (e) {
         console.error("Failed to handle start recording command", e);
       }
