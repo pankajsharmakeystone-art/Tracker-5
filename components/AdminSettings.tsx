@@ -44,6 +44,15 @@ const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ checked, onChange, id }) =>
 
 const FUNCTIONS_REGION = 'us-central1';
 const FUNCTIONS_BASE_URL = import.meta.env.VITE_FUNCTIONS_BASE_URL || `https://${FUNCTIONS_REGION}-${import.meta.env.VITE_FIREBASE_PROJECT_ID || 'tracker-5'}.cloudfunctions.net`;
+const rawDropboxEndpoint = import.meta.env.VITE_DROPBOX_SESSION_ENDPOINT
+    || (import.meta.env.PROD
+        ? '/api/create-dropbox-session'
+        : `${FUNCTIONS_BASE_URL}/createDropboxOauthSession`);
+const DROPBOX_SESSION_ENDPOINT = /^https?:\/\//i.test(rawDropboxEndpoint)
+    ? rawDropboxEndpoint
+    : rawDropboxEndpoint.startsWith('/')
+        ? rawDropboxEndpoint
+        : `/${rawDropboxEndpoint}`;
 
 const AdminSettings: React.FC = () => {
     const defaultSettings: AdminSettingsType = {
@@ -131,7 +140,7 @@ const AdminSettings: React.FC = () => {
         try {
             setTokenGenerating(true);
             const idToken = await currentUser.getIdToken();
-            const response = await fetch(`${FUNCTIONS_BASE_URL}/createDropboxOauthSession`, {
+            const response = await fetch(DROPBOX_SESSION_ENDPOINT, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
