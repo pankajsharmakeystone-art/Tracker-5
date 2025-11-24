@@ -1,8 +1,16 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { streamGlobalAdminSettings, updateGlobalAdminSettings } from '../services/db';
 import type { AdminSettingsType } from '../types';
 import Spinner from './Spinner';
+import { useAuth } from '../hooks/useAuth';
+
+const resolveDropboxSessionEndpoint = () => {
+    if (import.meta.env.VITE_DROPBOX_SESSION_ENDPOINT) {
+        return import.meta.env.VITE_DROPBOX_SESSION_ENDPOINT;
+    }
+    return '/api/create-dropbox-session';
+};
 
 interface FormFieldProps {
     label: string;
@@ -63,6 +71,11 @@ const AdminSettings: React.FC = () => {
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
+    const [tokenGenerating, setTokenGenerating] = useState(false);
+    const [tokenMessage, setTokenMessage] = useState<string | null>(null);
+    const dropboxSessionEndpoint = useMemo(() => resolveDropboxSessionEndpoint(), []);
+    const { currentUser } = useAuth();
+    const canAutoGenerate = Boolean(settings.dropboxAppKey && settings.dropboxAppSecret);
 
     useEffect(() => {
         setLoading(true);
@@ -104,6 +117,55 @@ const AdminSettings: React.FC = () => {
             console.error(err);
         } finally {
             setSaving(false);
+        }
+    };
+
+    const handleGenerateDropboxToken = async () => {
+        if (!currentUser) {
+            setTokenMessage('Please sign in again to generate a Dropbox token.');
+            return;
+        }
+        if (!settings.dropboxAppKey || !settings.dropboxAppSecret) {
+            setTokenMessage('Enter your Dropbox app key and secret first.');
+            return;
+        }
+
+        setTokenGenerating(true);
+        setTokenMessage(null);
+
+        try {
+            const idToken = await currentUser.getIdToken();
+            const response = await fetch(dropboxSessionEndpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${idToken}`
+                },
+                body: JSON.stringify({
+                    appKey: settings.dropboxAppKey,
+                    appSecret: settings.dropboxAppSecret
+                })
+            });
+
+            const data = await response.json().catch(() => null);
+            if (!response.ok) {
+                throw new Error(data?.error || `Failed to start Dropbox OAuth (${response.status})`);
+            }
+
+            if (!data?.startUrl) {
+                throw new Error('Server did not return the Dropbox authorization link.');
+            }
+
+            const popup = window.open(data.startUrl, 'dropboxOauthPopup', 'width=600,height=700');
+            if (!popup) {
+                throw new Error('Popup blocked. Please allow popups for this site and try again.');
+            }
+            popup.focus();
+            setTokenMessage('Dropbox window opened. Complete the consent flow, then return here. Tokens update automatically.');
+        } catch (err) {
+            setTokenMessage((err as Error).message || 'Unable to start Dropbox authorization.');
+        } finally {
+            setTokenGenerating(false);
         }
     };
 
@@ -212,21 +274,41 @@ const AdminSettings: React.FC = () => {
                     />
                 </FormField>
 
-                <FormField label="Dropbox Refresh Token" description="Paste the long-lived refresh token generated with token_access_type=offline. Generate it manually in the Dropbox console and keep it secure.">
-                    <input
-                        type="text"
-                        name="dropboxRefreshToken"
-                        value={settings.dropboxRefreshToken || ''}
-                        onChange={handleInputChange}
-                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
-                        placeholder="Enter Dropbox Refresh Token"
-                    />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                        Tip: Visit your Dropbox app&apos;s OAuth settings, authorize with <code>token_access_type=offline</code>, then paste the resulting refresh token here.
-                    </p>
+                <FormField label="Dropbox Refresh Token" description="Click Generate to run the Dropbox OAuth popup or paste an existing refresh token manually.">
+                    <div className="flex flex-col gap-3">
+                        <input
+                            type="text"
+                            name="dropboxRefreshToken"
+                            value={settings.dropboxRefreshToken || ''}
+                            onChange={handleInputChange}
+                            className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                            placeholder="Dropbox Refresh Token"
+                        />
+                        <div className="flex flex-col sm:flex-row gap-3">
+                            <button
+                                type="button"
+                                onClick={handleGenerateDropboxToken}
+                                disabled={tokenGenerating || !canAutoGenerate}
+                                className="inline-flex items-center justify-center text-white bg-emerald-600 hover:bg-emerald-700 focus:ring-4 focus:outline-none focus:ring-emerald-300 font-medium rounded-lg text-sm px-4 py-2.5 dark:bg-emerald-600 dark:hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                                {tokenGenerating ? 'Opening Dropbox…' : 'Generate Refresh Token'}
+                            </button>
+                        </div>
+                        {!canAutoGenerate && (
+                            <p className="text-xs text-amber-600 dark:text-amber-400">
+                                Provide both the Dropbox app key and secret above to enable the automatic flow.
+                            </p>
+                        )}
+                        {tokenMessage && (
+                            <p className="text-xs text-emerald-600 dark:text-emerald-400">{tokenMessage}</p>
+                        )}
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                            Manual fallback: visit the Dropbox developer console, authorize your app with <code>token_access_type=offline</code>, and paste the refresh token above.
+                        </p>
+                    </div>
                 </FormField>
 
-                <FormField label="Dropbox App Key" description="Optional override for the Dropbox app key (client_id). Leave blank to use the value bundled with the desktop app.">
+                <FormField label="Dropbox App Key" description="Required when using the Generate button. This matches the client_id from the Dropbox developer console.">
                     <input
                         type="text"
                         name="dropboxAppKey"
@@ -237,7 +319,7 @@ const AdminSettings: React.FC = () => {
                     />
                 </FormField>
 
-                <FormField label="Dropbox App Secret" description="Optional override for the Dropbox app secret (client_secret). Required if you supply a custom app key.">
+                <FormField label="Dropbox App Secret" description="Required when using the Generate button. Keep this value private.">
                     <input
                         type="text"
                         name="dropboxAppSecret"
