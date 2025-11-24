@@ -1,22 +1,8 @@
 
-import React, { useCallback } from 'react';
+import React from 'react';
 import { Link } from 'react-router-dom';
 
 const LandingPage: React.FC = () => {
-    const handleDesktopDownload = useCallback(() => {
-        try {
-            const link = document.createElement('a');
-            link.href = '/download/desktop';
-            link.rel = 'noreferrer';
-            link.download = 'Tracker-5-Desktop-Setup.exe';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        } catch (err) {
-            window.open('/download/desktop', '_blank', 'noopener,noreferrer');
-        }
-    }, []);
-
     return (
         <div className="flex flex-col items-center justify-center min-h-screen p-4 text-center bg-gray-50 dark:bg-gray-900">
             <main className="max-w-2xl">
@@ -41,13 +27,13 @@ const LandingPage: React.FC = () => {
                     >
                         Sign In
                     </Link>
-                    <button
-                        type="button"
-                        onClick={handleDesktopDownload}
+                    <a
+                        href="/download/desktop"
+                        download
                         className="inline-flex items-center justify-center px-6 py-3 text-base font-medium text-white bg-green-600 border border-transparent rounded-md shadow-sm hover:bg-green-700"
                     >
                         Download Desktop App
-                    </button>
+                    </a>
                 </div>
             </main>
         </div>
