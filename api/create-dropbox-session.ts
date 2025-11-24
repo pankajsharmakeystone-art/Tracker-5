@@ -58,7 +58,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  const { payload, idToken } = normalizePayload(req.body as IncomingBody);
+  const { payload: normalizedPayload, idToken } = normalizePayload(req.body as IncomingBody);
   const authHeader = req.headers.authorization;
   const bearer = authHeader || (idToken ? `Bearer ${idToken}` : undefined);
 
@@ -74,7 +74,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         Authorization: bearer,
         'Content-Type': 'application/json'
       },
-      body: asJsonString(payload)
+      body: asJsonString(normalizedPayload)
     });
 
     const text = await response.text();
