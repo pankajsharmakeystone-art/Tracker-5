@@ -68,7 +68,8 @@
       "target": [
         "nsis"
       ],
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "artifactName": "Tracker-5-Desktop-Setup.${ext}"
     },
     "mac": {
       "category": "public.app-category.productivity",
