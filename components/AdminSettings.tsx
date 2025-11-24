@@ -147,6 +147,7 @@ const AdminSettings: React.FC = () => {
                     Authorization: `Bearer ${idToken}`
                 },
                 body: JSON.stringify({
+                    idToken,
                     appKey: settings.dropboxAppKey,
                     appSecret: settings.dropboxAppSecret
                 })
