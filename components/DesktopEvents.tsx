@@ -2,6 +2,11 @@
 import React, { useEffect, useRef } from 'react';
 import { startDesktopRecording, stopDesktopRecording } from '../desktop/recorder';
 
+interface DesktopSource {
+  id: string;
+  name: string;
+}
+
 const DesktopEvents: React.FC = () => {
   const listenersAttached = useRef(false);
 
@@ -22,20 +27,20 @@ const DesktopEvents: React.FC = () => {
           return;
         }
         
-        const sources = result.sources;
+        const sources = (result.sources || []) as DesktopSource[];
         if (!sources || sources.length === 0) {
           console.error("No screen sources available");
           return;
         }
 
-        const screenSources = sources.filter((src) => src.id.startsWith('screen') || /screen/i.test(src.name));
+        const screenSources = sources.filter((src: DesktopSource) => src.id.startsWith('screen') || /screen/i.test(src.name));
         const targets = screenSources.length > 0 ? screenSources : [sources[0]];
 
-        console.log("Starting recording for displays:", targets.map((s) => `${s.name} (${s.id})`).join(', '));
+        console.log("Starting recording for displays:", targets.map((s: DesktopSource) => `${s.name} (${s.id})`).join(', '));
 
         await startDesktopRecording(
-          targets.map((s) => s.id),
-          targets.map((s) => s.name),
+          targets.map((s: DesktopSource) => s.id),
+          targets.map((s: DesktopSource) => s.name),
           result.resolution
         );
       } catch (e) {
