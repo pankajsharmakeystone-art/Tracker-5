@@ -1,13 +1,16 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { Readable } from 'node:stream';
+import { ReadableStream as NodeReadableStream } from 'node:stream/web';
 
 const OWNER = 'pankajsharmakeystone-art';
 const REPO = 'Tracker-5';
 const DEFAULT_ASSET = 'Tracker-5-Desktop-Setup.exe';
 
-function buildHeaders() {
+function buildHeaders(extra: Record<string, string> = {}) {
   const token = process.env.GITHUB_DOWNLOAD_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
   const headers: Record<string, string> = {
-    'User-Agent': 'tracker-5-downloader'
+    'User-Agent': 'tracker-5-downloader',
+    ...extra
   };
   if (token) {
     headers.Authorization = `token ${token}`;
@@ -32,13 +35,28 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
     const asset = assets.find((a: any) => a?.name === DEFAULT_ASSET)
       || assets.find((a: any) => typeof a?.name === 'string' && a.name.endsWith('.exe'));
 
-    if (!asset?.browser_download_url) {
+    if (!asset?.url) {
       res.status(404).json({ error: 'Desktop installer not found in latest release' });
       return;
     }
 
+    const filename = asset?.name || DEFAULT_ASSET;
+    const downloadResponse = await fetch(asset.url, {
+      headers: buildHeaders({ Accept: 'application/octet-stream' })
+    });
+
+    if (!downloadResponse.ok || !downloadResponse.body) {
+      const message = `Failed to fetch asset binary (${downloadResponse.status})`;
+      res.status(502).json({ error: message });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Cache-Control', 'no-store');
-    res.redirect(302, asset.browser_download_url);
+
+    const nodeStream = Readable.fromWeb(downloadResponse.body as NodeReadableStream);
+    nodeStream.pipe(res);
   } catch (error) {
     res.status(500).json({ error: (error as Error).message || 'Unexpected error while downloading desktop app' });
   }
