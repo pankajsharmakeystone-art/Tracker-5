@@ -88,7 +88,7 @@ const initializeFirebase = () => {
 
   const serviceAccount = parseServiceAccount();
 
-  const existingApp = admin.apps.find((appInstance) => appInstance.name === APP_NAME);
+  const existingApp = admin.apps.find((appInstance) => appInstance?.name === APP_NAME);
   firebaseApp = existingApp || admin.initializeApp({
     credential: admin.credential.cert({
       projectId: serviceAccount.projectId || serviceAccount.project_id,
