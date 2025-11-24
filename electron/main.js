@@ -238,6 +238,68 @@ function createTray() {
   }
 }
 
+function showAboutDialog() {
+  try {
+    const version = app.getVersion();
+    const details = [
+      `Version: ${version}`,
+      `Electron: ${process.versions.electron}`,
+      `Chrome: ${process.versions.chrome}`,
+      `Node: ${process.versions.node}`
+    ].join("\n");
+
+    dialog.showMessageBox({
+      title: `About ${app.getName()}`,
+      message: `${app.getName()} Desktop`,
+      detail: details,
+      type: "info",
+      buttons: ["Close"]
+    });
+  } catch (e) {
+    log("about dialog failed", e.message);
+  }
+}
+
+function buildAppMenu() {
+  const template = [];
+
+  if (process.platform === "darwin") {
+    template.push({
+      label: app.getName(),
+      submenu: [
+        { label: `About ${app.getName()}`, click: showAboutDialog },
+        { type: "separator" },
+        { role: "services", submenu: [] },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" }
+      ]
+    });
+  }
+
+  template.push({
+    label: "File",
+    submenu: [
+      { label: "Open App", click: () => { if (mainWindow) mainWindow.show(); } },
+      { type: "separator" },
+      process.platform === "darwin" ? { role: "close" } : { role: "quit" }
+    ]
+  });
+
+  template.push({
+    label: "Help",
+    submenu: [
+      { label: `About ${app.getName()}`, click: showAboutDialog }
+    ]
+  });
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+}
+
 // ---------- POPUP (bottom-right) ----------
 function showRecordingPopup(message) {
   // Only show if admin enabled the notification
@@ -1296,6 +1358,7 @@ function scheduleAutoUpdateCheck() {
 app.whenReady().then(() => {
   createMainWindow();
   createTray();
+  buildAppMenu();
   startAdminSettingsWatch();
 
   if (cachedAdminSettings?.requireLoginOnBoot) {
