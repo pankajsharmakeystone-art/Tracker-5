@@ -1,57 +1,57 @@
-
 export {};
 
-let mediaRecorder: MediaRecorder | null = null;
-let recordedChunks: Blob[] = [];
-let stream: MediaStream | null = null;
+interface RecordingSession {
+  mediaRecorder: MediaRecorder;
+  recordedChunks: Blob[];
+  stream: MediaStream;
+  sourceName: string;
+}
 
-export const startDesktopRecording = async (sourceId: string, sourceName: string, resolution?: { width: number; height: number }) => {
-  console.log(`Initiating desktop recording for source: ${sourceName} (${sourceId})`);
-  
-  if (!window.desktopAPI) {
-    console.error("Desktop API is missing.");
-    return;
+const sessions = new Map<string, RecordingSession>();
+
+const buildConstraints = (sourceId: string, resolution?: { width: number; height: number }) => {
+  const mandatoryConfig: any = {
+    chromeMediaSource: 'desktop',
+    chromeMediaSourceId: sourceId,
+  };
+
+  if (resolution) {
+    mandatoryConfig.maxWidth = resolution.width;
+    mandatoryConfig.maxHeight = resolution.height;
+    mandatoryConfig.minWidth = resolution.width;
+    mandatoryConfig.minHeight = resolution.height;
   }
 
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    console.warn("Recording is already active.");
+  return {
+    audio: false,
+    video: {
+      mandatory: mandatoryConfig,
+    },
+  } as unknown as MediaStreamConstraints;
+};
+
+const sanitizeName = (name: string) => {
+  return name.replace(/[^a-z0-9_\-]/gi, '_');
+};
+
+const startRecorderForSource = async (sourceId: string, sourceName: string, resolution?: { width: number; height: number }) => {
+  if (sessions.has(sourceId)) {
+    console.warn(`Recording already active for ${sourceId}`);
     return;
   }
 
   try {
-    // Capture the specific screen using Electron's constraint syntax
-    // 'mandatory' is required for chromeMediaSourceId in Electron environment
-    const mandatoryConfig: any = {
-        chromeMediaSource: 'desktop',
-        chromeMediaSourceId: sourceId,
-    };
-
-    if (resolution) {
-        mandatoryConfig.maxWidth = resolution.width;
-        mandatoryConfig.maxHeight = resolution.height;
-        mandatoryConfig.minWidth = resolution.width;
-        mandatoryConfig.minHeight = resolution.height;
-    }
-
-    const constraints = {
-      audio: false,
-      video: {
-        mandatory: mandatoryConfig
-      }
-    } as unknown as MediaStreamConstraints;
-
-    stream = await navigator.mediaDevices.getUserMedia(constraints);
-
-    // Setup MediaRecorder with VP9 preferred
+    const constraints = buildConstraints(sourceId, resolution);
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
     const mimeType = 'video/webm; codecs=vp9';
     const options: MediaRecorderOptions = {
-      mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm'
+      mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm',
     };
 
-    console.log(`Starting MediaRecorder with mimeType: ${options.mimeType}`);
-    
-    recordedChunks = [];
-    mediaRecorder = new MediaRecorder(stream, options);
+    const recordedChunks: Blob[] = [];
+    const mediaRecorder = new MediaRecorder(stream, options);
+
+    sessions.set(sourceId, { mediaRecorder, recordedChunks, stream, sourceName });
 
     mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
@@ -60,47 +60,60 @@ export const startDesktopRecording = async (sourceId: string, sourceName: string
     };
 
     mediaRecorder.onstop = async () => {
-      console.log("Recorder stopped. Processing chunks...");
-      
-      const blob = new Blob(recordedChunks, { type: 'video/webm' });
-      const arrayBuffer = await blob.arrayBuffer();
-      const fileName = `recording-${Date.now()}.webm`;
+      console.log(`Recorder stopped for ${sourceName}`);
+      const session = sessions.get(sourceId);
+      if (!session) return;
 
-      if (window.desktopAPI && window.desktopAPI.notifyRecordingSaved) {
-        try {
-          console.log(`Sending ${fileName} (${arrayBuffer.byteLength} bytes) to desktop...`);
-          await window.desktopAPI.notifyRecordingSaved(fileName, arrayBuffer);
-          console.log("Upload handoff successful.");
-        } catch (ipcError) {
-          console.error("Failed to send recording to desktop app via IPC:", ipcError);
+      try {
+        const blob = new Blob(session.recordedChunks, { type: 'video/webm' });
+        const arrayBuffer = await blob.arrayBuffer();
+        const safeName = sanitizeName(session.sourceName || 'screen');
+        const fileName = `recording-${safeName}-${Date.now()}.webm`;
+
+        if (window.desktopAPI?.notifyRecordingSaved) {
+          try {
+            console.log(`Sending ${fileName} (${arrayBuffer.byteLength} bytes) to desktop...`);
+            await window.desktopAPI.notifyRecordingSaved(fileName, arrayBuffer);
+          } catch (ipcError) {
+            console.error('Failed to send recording to desktop app via IPC:', ipcError);
+          }
         }
-      } else {
-        console.warn("window.desktopAPI.notifyRecordingSaved is not available.");
+      } finally {
+        session.stream.getTracks().forEach((track) => track.stop());
+        sessions.delete(sourceId);
       }
-
-      // Cleanup: Stop the stream tracks to release the screen capture icon/resource
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-        stream = null;
-      }
-      mediaRecorder = null;
-      recordedChunks = [];
     };
 
-    // Start recording, request data every 1000ms (1 second)
     mediaRecorder.start(1000);
-    console.log("MediaRecorder started successfully.");
-
+    console.log(`MediaRecorder started for ${sourceName} (${sourceId})`);
   } catch (err) {
-    console.error("Error during desktop recording setup:", err);
+    console.error(`Error starting recording for ${sourceName}:`, err);
   }
 };
 
-export const stopDesktopRecording = () => {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    console.log("Stopping MediaRecorder...");
-    mediaRecorder.stop();
-  } else {
-    console.log("No active recording to stop.");
+export const startDesktopRecording = async (sourceId: string | string[], sourceName: string | string[], resolution?: { width: number; height: number }) => {
+  if (!window.desktopAPI) {
+    console.error('Desktop API is missing.');
+    return;
   }
+
+  const ids = Array.isArray(sourceId) ? sourceId : [sourceId];
+  const names = Array.isArray(sourceName) ? sourceName : [sourceName];
+
+  const starters = ids.map((id, idx) => startRecorderForSource(id, names[idx] || names[0], resolution));
+  await Promise.allSettled(starters);
+};
+
+export const stopDesktopRecording = () => {
+  if (sessions.size === 0) {
+    console.log('No active recordings to stop.');
+    return;
+  }
+
+  sessions.forEach(({ mediaRecorder }, sourceId) => {
+    if (mediaRecorder.state !== 'inactive') {
+      console.log(`Stopping recorder for ${sourceId}`);
+      mediaRecorder.stop();
+    }
+  });
 };
