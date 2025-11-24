@@ -23,11 +23,12 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Cn17wxMG8487klqzHJ60Op
 
 1. In the web dashboard, open **Application Settings** → **Dropbox**.
 2. Enter your Dropbox App Key/Secret (from the Dropbox developer console) and click **Save Settings**.
-3. Click **Generate Refresh Token**. A Dropbox popup opens and walks you through granting offline access. (If the button is disabled, enter the Dropbox app key + secret first.)
-4. After Dropbox shows "Connected", close the popup. The refresh token, short-lived access token, and expiry are stored in Firestore automatically.
-5. Restart the Electron desktop app (or wait ~30 s) so it picks up the updated settings and refreshes tokens on demand.
+3. Make sure your Dropbox app lists `https://<your-domain>/api/dropbox-callback` as an allowed redirect URI (replace `<your-domain>` with the deployed dashboard host).
+4. Click **Generate Refresh Token**. A Dropbox popup opens and walks you through granting offline access. (If the button is disabled, enter the Dropbox app key + secret first.)
+5. After Dropbox shows "Connected", close the popup. The refresh token, short-lived access token, and expiry are stored in Firestore automatically.
+6. Restart the Electron desktop app (or wait ~30 s) so it picks up the updated settings and refreshes tokens on demand.
 
-> If you host Firebase Functions in a different region or emulator, set `VITE_FUNCTIONS_BASE_URL` so the dashboard button knows which endpoint to call.
+> The web dashboard now serves the OAuth start/callback endpoints directly from Vercel. No Firebase Function proxy or CORS tweaks are required.
 
 ### Required Environment Variables (Vercel)
 
@@ -36,11 +37,9 @@ Add the following secrets to your Vercel project (or `.env` if you run `vercel d
 | Name | Description |
 | --- | --- |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | Full JSON string for a Firebase service account that has access to Firestore + Authentication. Paste it as a single line and keep it secret. |
-| `FIREBASE_PROJECT_ID` *(optional)* | Overrides the project ID inferred from the service account when building Cloud Function URLs. |
-| `FIREBASE_FUNCTIONS_REGION` *(optional)* | Defaults to `us-central1`. Change only if you deploy the Dropbox Cloud Functions elsewhere. |
-| `FIREBASE_FUNCTIONS_BASE_URL` *(optional)* | Use this if your callable Functions live behind a custom domain (otherwise it is derived automatically). |
+| `DROPBOX_OAUTH_BASE_URL` *(optional)* | Overrides the base URL used when generating OAuth links. Set this if you front the dashboard with a custom domain. |
 
-For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_ENDPOINT` to a reachable server that can forward to the new API (for example, `https://<your-vercel-deployment>/api/create-dropbox-session`).
+For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_ENDPOINT` to a reachable server that can forward to the new API (for example, `https://<your-vercel-deployment>/api/create-dropbox-session`). Also update your Dropbox app's redirect URI to point to the host you are testing against (e.g., `http://localhost:4173/api/dropbox-callback`).
 
 ## Desktop Releases & Auto-Update
 
