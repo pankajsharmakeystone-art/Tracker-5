@@ -1213,6 +1213,31 @@ async function refreshDropboxToken() {
     const appSecret = getDropboxAppSecret();
     if (!appKey || !appSecret) {
       log("[dropbox] missing app key/secret for refresh");
+
+      // Auto-update IPC
+      ipcMain.handle("auto-install-update", async () => {
+        try {
+          autoUpdater.quitAndInstall();
+          return { success: true };
+        } catch (error) {
+          emitAutoUpdateStatus("error", { message: error?.message || String(error) });
+          return { success: false, error: error?.message || String(error) };
+        }
+      });
+
+      ipcMain.handle("auto-check-updates", async () => {
+        try {
+          if (isDev) {
+            emitAutoUpdateStatus("error", { message: "Auto updates disabled in dev mode" });
+            return { success: false, error: "dev-mode" };
+          }
+          await autoUpdater.checkForUpdates();
+          return { success: true };
+        } catch (error) {
+          emitAutoUpdateStatus("error", { message: error?.message || String(error) });
+          return { success: false, error: error?.message || String(error) };
+        }
+      });
       return null;
     }
 

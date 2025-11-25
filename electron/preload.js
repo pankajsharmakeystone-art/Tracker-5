@@ -67,4 +67,14 @@ contextBridge.exposeInMainWorld("desktopAPI", {
 
   // Live streaming helpers
   getLiveStreamSources: () => ipcRenderer.invoke("live-stream-get-sources")
+,
+  // Auto-update bridge
+  onAutoUpdateStatus: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("auto-update-status", handler);
+    return () => ipcRenderer.removeListener("auto-update-status", handler);
+  },
+  requestImmediateUpdateCheck: () => ipcRenderer.invoke("auto-check-updates"),
+  installPendingUpdate: () => ipcRenderer.invoke("auto-install-update")
 });

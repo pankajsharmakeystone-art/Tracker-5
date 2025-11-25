@@ -128,6 +128,9 @@ declare global {
             onCommandForceBreak: (callback: (data: any) => void) => void;
             onSettingsUpdated: (callback: (data: any) => void) => void;
             onAutoClockOut: (callback: (data: any) => void) => void;
+            onAutoUpdateStatus?: (callback: (data: { event: string; version?: string; percent?: number; message?: string }) => void) => (() => void) | void;
+            requestImmediateUpdateCheck?: () => Promise<any>;
+            installPendingUpdate?: () => Promise<any>;
             ping: () => Promise<any>;
             minimizeToTray: () => void;
             setAutoLaunch: (enable: boolean) => Promise<any>;

@@ -5,6 +5,7 @@ import { AuthProvider } from './contexts/AuthContext';
 import { useAuth } from './hooks/useAuth';
 import ProtectedRoute from './components/ProtectedRoute';
 import DesktopEvents from './components/DesktopEvents';
+import AutoUpdatePrompt from './components/AutoUpdatePrompt';
 import Spinner from './components/Spinner';
 
 import LoginPage from './pages/LoginPage';
@@ -31,6 +32,7 @@ const AppContent = () => {
     <>
       {/* Listen for Electron Desktop commands globally */}
       <DesktopEvents />
+      <AutoUpdatePrompt />
       
       <HashRouter>
         <Routes>
