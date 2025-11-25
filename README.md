@@ -70,6 +70,21 @@ Flags:
 
 The script clones the repo to a sibling folder so you can migrate gradually: close VS Code, open the new folder, run `npm install`, and re-add environment files (`.env`, `firebase-service-account.json` stored outside git) before continuing development.
 
+### Post-reset setup
+
+Use `scripts/post-reset-setup.ps1` to bootstrap dependencies and env files after recloning/resetting:
+
+```powershell
+pwsh -File scripts/post-reset-setup.ps1 -InstallNpm -InstallFunctions -InstallElectron -GenerateEnv -EnvTemplate .env.example -EnvTarget .env.local
+```
+
+- `-InstallNpm` installs root dependencies.
+- `-InstallElectron` runs `npm install` inside `electron/`.
+- `-InstallFunctions` installs Firebase Functions dependencies.
+- `-GenerateEnv` copies `.env.example` to `.env.local` (skips if it already exists).
+
+Edit the generated `.env.local` manually and run `scripts/materialize-firebase-key.ps1` afterwards to place the Firebase service account JSON outside the repo.
+
 ## Desktop Releases & Auto-Update
 
 1. **Build locally:** `npm run build` generates the Vite bundle consumed by Electron.
