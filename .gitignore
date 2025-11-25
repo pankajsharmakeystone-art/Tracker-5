@@ -13,6 +13,14 @@ dist-ssr
 release
 *.local
 
+# Secrets
+*.service-account.json
+*firebase-adminsdk*.json
+*.env
+*.env.*
+electron/firebase-key.json
+tracker-5-firebase-adminsdk-*.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

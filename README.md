@@ -41,6 +41,14 @@ Add the following secrets to your Vercel project (or `.env` if you run `vercel d
 
 For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_ENDPOINT` to a reachable server that can forward to the new API (for example, `https://<your-vercel-deployment>/api/create-dropbox-session`). Also update your Dropbox app's redirect URI to point to the host you are testing against (e.g., `http://localhost:4173/api/dropbox-callback`).
 
+## Protecting Firebase Credentials
+
+- **Never commit service-account JSON**: `.gitignore` now blocks `firebase-adminsdk` files, but verify `git status` before pushing.
+- **Store keys outside the repo**: save the JSON someplace like `C:\secrets\tracker-service-account.json` and point tools to it with `FIREBASE_SERVICE_ACCOUNT_PATH` or `FIREBASE_KEY_PATH`.
+- **Electron builds**: before running `npm run electron:release`, set `FIREBASE_KEY_PATH` so the packager bundles the correct file from outside the repo. Delete any copied key after the build completes.
+- **CLI scripts**: utilities such as `components/migrateWorklogTypes.js` now read either `FIREBASE_SERVICE_ACCOUNT_JSON` (inline JSON) or `FIREBASE_SERVICE_ACCOUNT_PATH`.
+- **Rotate leaked keys**: because older commits contained the service account, generate a new key in Firebase Console → Project Settings → Service accounts, update your deployment secrets, and delete the compromised key.
+
 ## Desktop Releases & Auto-Update
 
 1. **Build locally:** `npm run build` generates the Vite bundle consumed by Electron.

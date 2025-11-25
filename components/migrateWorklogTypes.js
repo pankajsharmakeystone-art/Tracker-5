@@ -6,9 +6,27 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// TODO: Replace with the path to your service account key
-const serviceAccountPath = path.join(__dirname, '..', 'tracker-5-firebase-adminsdk-fbsvc-719d14ae45.json');
-const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+function loadServiceAccount() {
+  const inlineJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_ADMIN_SDK_JSON;
+  if (inlineJson) {
+    return JSON.parse(inlineJson);
+  }
+
+  const explicitPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH
+    || process.env.FIREBASE_ADMIN_SDK_PATH
+    || process.env.FIREBASE_KEY_PATH
+    || path.join(process.cwd(), 'firebase-service-account.json');
+
+  if (!fs.existsSync(explicitPath)) {
+    throw new Error(
+      `Set FIREBASE_SERVICE_ACCOUNT_PATH (or provide FIREBASE_SERVICE_ACCOUNT_JSON) before running migrateWorklogTypes.js. Checked: ${explicitPath}`
+    );
+  }
+
+  return JSON.parse(fs.readFileSync(explicitPath, 'utf8'));
+}
+
+const serviceAccount = loadServiceAccount();
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
