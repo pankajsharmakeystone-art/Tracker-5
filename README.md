@@ -60,6 +60,18 @@ For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_END
       -VercelEnvKey FIREBASE_SERVICE_ACCOUNT_JSON -SetEnv -Force
    ```
    (The token needs `projects.read` scope.)
+   Additional providers:
+   - `-HttpUrl https://...` plus optional `-HttpHeaders @{ Authorization = "Bearer ..." }` to fetch from any HTTPS secret endpoint.
+   - `-ProviderCommand "aws secretsmanager get-secret-value --secret-id tracker-service-account --query SecretString --output text"` to execute any shell command whose stdout is the JSON.
+
+   To run the Electron release and clean up the key automatically:
+   ```powershell
+   pwsh -File scripts/materialize-firebase-key.ps1 \ 
+      -VercelToken $env:VC_TOKEN -VercelProject tracker-5 \ 
+      -SetEnv -Force -RunCommand "npm run electron:release" \ 
+      -Cleanup -RemoveEnvOnCleanup
+   ```
+   `-Cleanup` deletes the materialized JSON after the command finishes (even on failure), and `-RemoveEnvOnCleanup` clears `FIREBASE_KEY_PATH` so you don't accidentally reference a deleted file later.
 
 ## Fresh Clone Automation
 
