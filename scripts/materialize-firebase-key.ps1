@@ -32,7 +32,15 @@ function Get-JsonFromVercel {
     $headers = @{ "Authorization" = "Bearer $Token" }
     $url = "https://api.vercel.com/v10/projects/$Project/env?decrypt=true"
     $response = Invoke-RestMethod -Method Get -Uri $url -Headers $headers
-    $match = $response.env | Where-Object { $_.key -eq $EnvKey }
+    $entries = @()
+    $hasEnv = $response.PSObject.Properties.Name -contains 'env'
+    $hasEnvs = $response.PSObject.Properties.Name -contains 'envs'
+    if ($hasEnv) {
+        $entries = $response.env
+    } elseif ($hasEnvs) {
+        $entries = $response.envs
+    }
+    $match = $entries | Where-Object { $_.key -eq $EnvKey }
     if ($match) {
         return $match.value
     }
