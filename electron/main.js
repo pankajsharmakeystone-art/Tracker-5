@@ -77,7 +77,7 @@ try {
 } catch (e) {
   log("FATAL: Could not initialize Firebase Admin SDK:", e.message);
   if (e.stack) log(e.stack);
-  dialog.showErrorBoxSync(
+  dialog.showErrorBox(
     "Firebase Initialization Error",
     `Could not initialize Firebase Admin SDK:\n\n${e.message}\n\nPlease check:\n1. firebase-key.json exists in electron/ folder\n2. The file contains valid service account JSON\n3. Required fields: project_id, private_key, client_email`
   );
@@ -89,7 +89,7 @@ try {
   db = admin.firestore();
 } catch (e) {
   log("FATAL: Could not get Firestore instance:", e.message);
-  dialog.showErrorBoxSync("Firestore Error", `Could not initialize Firestore: ${e.message}`);
+  dialog.showErrorBox("Firestore Error", `Could not initialize Firestore: ${e.message}`);
   process.exit(1);
 }
 

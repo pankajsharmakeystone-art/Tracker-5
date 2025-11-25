@@ -16,7 +16,10 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Cn17wxMG8487klqzHJ60Op
 1. Install dependencies:
    `npm install`
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+3. Copy `.env.example` to `.env.local` and fill in the required `VITE_FIREBASE_*` values.
+   - These values come from **Firebase Console → Project Settings → General → Your apps**.
+   - **Use a newly generated, HTTP-referrer–restricted web API key.** Restrict it to `https://tracker-5.vercel.app` (and any other allowed origins) plus the minimum set of Firebase APIs (Identity Toolkit, Firestore, etc.).
+4. Run the app:
    `npm run dev`
 
 ## Dropbox Auto Refresh Setup
