@@ -48,6 +48,11 @@ For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_END
 - **Electron builds**: before running `npm run electron:release`, set `FIREBASE_KEY_PATH` so the packager bundles the correct file from outside the repo. Delete any copied key after the build completes.
 - **CLI scripts**: utilities such as `components/migrateWorklogTypes.js` now read either `FIREBASE_SERVICE_ACCOUNT_JSON` (inline JSON) or `FIREBASE_SERVICE_ACCOUNT_PATH`.
 - **Rotate leaked keys**: because older commits contained the service account, generate a new key in Firebase Console → Project Settings → Service accounts, update your deployment secrets, and delete the compromised key.
+- **Automate local materialization**: run
+   ```powershell
+   pwsh -File scripts/materialize-firebase-key.ps1 -SourcePath C:\secrets\tracker-service-account.json -SetEnv -Force
+   ```
+   or feed inline JSON with `-InlineJson "$env:FIREBASE_SERVICE_ACCOUNT_JSON"`. The script copies the key to `%LOCALAPPDATA%\Tracker5\firebase-service-account.json`, optionally sets `FIREBASE_KEY_PATH`, and refuses to overwrite existing files unless `-Force` is provided.
 
 ## Fresh Clone Automation
 
