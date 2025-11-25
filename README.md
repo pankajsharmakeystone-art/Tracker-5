@@ -53,6 +53,13 @@ For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_END
    pwsh -File scripts/materialize-firebase-key.ps1 -SourcePath C:\secrets\tracker-service-account.json -SetEnv -Force
    ```
    or feed inline JSON with `-InlineJson "$env:FIREBASE_SERVICE_ACCOUNT_JSON"`. The script copies the key to `%LOCALAPPDATA%\Tracker5\firebase-service-account.json`, optionally sets `FIREBASE_KEY_PATH`, and refuses to overwrite existing files unless `-Force` is provided.
+   If you already store the secret in Vercel, you can pull it directly:
+   ```powershell
+   pwsh -File scripts/materialize-firebase-key.ps1 \ 
+      -VercelToken $env:VC_TOKEN -VercelProject tracker-5 \ 
+      -VercelEnvKey FIREBASE_SERVICE_ACCOUNT_JSON -SetEnv -Force
+   ```
+   (The token needs `projects.read` scope.)
 
 ## Fresh Clone Automation
 
