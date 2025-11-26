@@ -44,11 +44,21 @@ const firebase = require("firebase/compat/app");
 require("firebase/compat/auth");
 require("firebase/compat/firestore");
 
-const potentialEnvFiles = [
+const potentialEnvFiles = [];
+
+if (process.resourcesPath) {
+  potentialEnvFiles.push(
+    path.join(process.resourcesPath, ".env.desktop"),
+    path.join(process.resourcesPath, ".env.local"),
+    path.join(process.resourcesPath, ".env")
+  );
+}
+
+potentialEnvFiles.push(
   path.join(__dirname, "..", ".env.desktop"),
   path.join(__dirname, "..", ".env.local"),
   path.join(__dirname, "..", ".env")
-];
+);
 
 function hydrateEnv(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return;

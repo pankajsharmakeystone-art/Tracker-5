@@ -56,6 +56,15 @@
       "output": "release",
       "buildResources": "electron/build"
     },
+    "extraResources": [
+      {
+        "from": ".",
+        "to": ".",
+        "filter": [
+          ".env.desktop"
+        ]
+      }
+    ],
     "extraMetadata": {
       "main": "electron/main.js"
     },
