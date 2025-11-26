@@ -13,8 +13,9 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   onRegistered: (cb) => ipcRenderer.on("desktop-registered", (e, data) => cb(data)),
 
   // register/unregister uid (webapp should call registerUid after login)
-  registerUid: (uid) => ipcRenderer.invoke("register-uid", uid),
+  registerUid: (payload) => ipcRenderer.invoke("register-uid", payload),
   unregisterUid: () => ipcRenderer.invoke("unregister-uid"),
+  syncAdminSettings: (settings) => ipcRenderer.invoke("sync-admin-settings", settings),
 
   // allow web to tell desktop about agent status changes
   // supported statuses: 'working', 'on_break'|'break', 'clocked_out'|'offline'

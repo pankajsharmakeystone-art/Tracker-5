@@ -3,6 +3,7 @@ import React from 'react';
 import { HashRouter, Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import { useAuth } from './hooks/useAuth';
+import useDesktopBridge from './hooks/useDesktopBridge';
 import ProtectedRoute from './components/ProtectedRoute';
 import DesktopEvents from './components/DesktopEvents';
 import AutoUpdatePrompt from './components/AutoUpdatePrompt';
@@ -17,7 +18,9 @@ import InvitePage from './pages/InvitePage';
 
 // Inner component to handle loading state logic using the hook
 const AppContent = () => {
-  const { loading } = useAuth();
+  const { loading, user } = useAuth();
+
+  useDesktopBridge({ uid: user?.uid });
 
   // Block the entire UI until Auth check is complete
   if (loading) {

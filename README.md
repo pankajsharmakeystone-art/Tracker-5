@@ -16,11 +16,26 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Cn17wxMG8487klqzHJ60Op
 1. Install dependencies:
    `npm install`
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Copy `.env.example` to `.env.local` and fill in the required `VITE_FIREBASE_*` values.
-   - These values come from **Firebase Console → Project Settings → General → Your apps**.
-   - **Use a newly generated, HTTP-referrer–restricted web API key.** Restrict it to `https://tracker-5.vercel.app` (and any other allowed origins) plus the minimum set of Firebase APIs (Identity Toolkit, Firestore, etc.).
+3. Copy `.env.example` to `.env.local` (web) and, if you run the desktop shell locally, copy `.env.desktop.example` to `.env.desktop`.
+   - Both files use the same Firebase client config (`*_API_KEY`, `*_AUTH_DOMAIN`, etc.) from **Firebase Console → Project Settings → General → Your apps**.
+   - **Use a newly generated, HTTP-referrer–restricted Web API key**. Restrict it to `https://tracker-5.vercel.app` (plus any extra origins you own) along with the minimum set of Firebase APIs (Identity Toolkit, Firestore, etc.).
+   - The Electron process loads `.env.desktop` first, then falls back to `.env.local`, then plain environment variables. Keep `.env.desktop` out of git just like `.env.local`.
 4. Run the app:
    `npm run dev`
+
+## Desktop Firebase Client Setup (no admin keys)
+
+The Electron app now uses the standard Firebase **client SDK** instead of `firebase-admin`, so you never have to ship a service-account JSON to users. After an agent signs into the web dashboard:
+
+1. The renderer requests a custom token via the callable Cloud Function `issueDesktopToken`.
+2. Electron receives `{ uid, desktopToken }`, signs in with `signInWithCustomToken`, and stores desktop-only metadata in Firestore using normal security rules.
+
+To finish the migration:
+
+- Deploy the new callable: `cd functions && npm run build && firebase deploy --only functions:issueDesktopToken`.
+- Ensure your Firestore rules allow the authenticated user to read/write the agent-specific docs already used by the desktop app (no special admin channel required anymore).
+- Keep your Firebase client config in `.env.desktop` or environment variables (see `.env.desktop.example`). The keys are the same ones already required by Vite.
+- Remove any installer scripts that previously copied `firebase-key.json` into `electron/`; they are obsolete.
 
 ## Dropbox Auto Refresh Setup
 
@@ -44,22 +59,21 @@ Add the following secrets to your Vercel project (or `.env` if you run `vercel d
 
 For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_ENDPOINT` to a reachable server that can forward to the new API (for example, `https://<your-vercel-deployment>/api/create-dropbox-session`). Also update your Dropbox app's redirect URI to point to the host you are testing against (e.g., `http://localhost:4173/api/dropbox-callback`).
 
-## Protecting Firebase Credentials
+## Firebase Credentials & Admin Scripts
 
-- **Never commit service-account JSON**: `.gitignore` now blocks `firebase-adminsdk` files, but verify `git status` before pushing.
-- **Store keys outside the repo**: save the JSON someplace like `C:\secrets\tracker-service-account.json` and point tools to it with `FIREBASE_SERVICE_ACCOUNT_PATH` or `FIREBASE_KEY_PATH`.
-- **Electron builds**: before running `npm run electron:release`, set `FIREBASE_KEY_PATH` so the packager bundles the correct file from outside the repo. Delete any copied key after the build completes.
-- **CLI scripts**: utilities such as `components/migrateWorklogTypes.js` now read either `FIREBASE_SERVICE_ACCOUNT_JSON` (inline JSON) or `FIREBASE_SERVICE_ACCOUNT_PATH`.
-- **Rotate leaked keys**: because older commits contained the service account, generate a new key in Firebase Console → Project Settings → Service accounts, update your deployment secrets, and delete the compromised key.
-- **Automate local materialization**: run
+- **Never commit service-account JSON**: `.gitignore` still blocks `firebase-adminsdk` files, but double-check `git status` before pushing.
+- **Desktop builds no longer need service accounts**: the Electron app runs entirely on Firebase’s client SDK and authenticates with per-user custom tokens. Configure it with `.env.desktop` or process env vars and you are done.
+- **Server-side APIs and maintenance scripts may still need admin credentials**: `functions/`, `api/`, and utilities such as `components/migrateWorklogTypes.js` continue to use `firebase-admin`. Store the JSON outside the repo (for example `C:\secrets\tracker-service-account.json`) and reference it with `FIREBASE_SERVICE_ACCOUNT_PATH` or inline via `FIREBASE_SERVICE_ACCOUNT_JSON`.
+- **Rotate leaked keys**: because older commits contained a service account, generate a new key in Firebase Console → Project Settings → Service accounts, update your deployment secrets, and delete the compromised key.
+- **Automate local materialization** (for scripts/functions only):
    ```powershell
    pwsh -File scripts/materialize-firebase-key.ps1 -SourcePath C:\secrets\tracker-service-account.json -SetEnv -Force
    ```
    or feed inline JSON with `-InlineJson "$env:FIREBASE_SERVICE_ACCOUNT_JSON"`. The script copies the key to `%LOCALAPPDATA%\Tracker5\firebase-service-account.json`, optionally sets `FIREBASE_KEY_PATH`, and refuses to overwrite existing files unless `-Force` is provided.
-   If you already store the secret in Vercel, you can pull it directly:
+   If you store the secret in Vercel, you can pull it directly:
    ```powershell
-   pwsh -File scripts/materialize-firebase-key.ps1 \ 
-      -VercelToken $env:VC_TOKEN -VercelProject tracker-5 \ 
+   pwsh -File scripts/materialize-firebase-key.ps1 \
+      -VercelToken $env:VC_TOKEN -VercelProject tracker-5 \
       -VercelEnvKey FIREBASE_SERVICE_ACCOUNT_JSON -SetEnv -Force
    ```
    (The token needs `projects.read` scope.)
@@ -67,14 +81,14 @@ For local Vite development (without `vercel dev`), set `VITE_DROPBOX_SESSION_END
    - `-HttpUrl https://...` plus optional `-HttpHeaders @{ Authorization = "Bearer ..." }` to fetch from any HTTPS secret endpoint.
    - `-ProviderCommand "aws secretsmanager get-secret-value --secret-id tracker-service-account --query SecretString --output text"` to execute any shell command whose stdout is the JSON.
 
-   To run the Electron release and clean up the key automatically:
+   If you still have a workflow that requires materializing the key before packaging (for example, seeding data via `node scripts/...`), you can chain it like this:
    ```powershell
-   pwsh -File scripts/materialize-firebase-key.ps1 \ 
-      -VercelToken $env:VC_TOKEN -VercelProject tracker-5 \ 
-      -SetEnv -Force -RunCommand "npm run electron:release" \ 
+   pwsh -File scripts/materialize-firebase-key.ps1 \
+      -VercelToken $env:VC_TOKEN -VercelProject tracker-5 \
+      -SetEnv -Force -RunCommand "node components/migrateWorklogTypes.js" \
       -Cleanup -RemoveEnvOnCleanup
    ```
-   `-Cleanup` deletes the materialized JSON after the command finishes (even on failure), and `-RemoveEnvOnCleanup` clears `FIREBASE_KEY_PATH` so you don't accidentally reference a deleted file later.
+   `-Cleanup` deletes the materialized JSON after the command finishes (even on failure), and `-RemoveEnvOnCleanup` clears `FIREBASE_KEY_PATH` so you do not accidentally reference a deleted file later.
 
 ## Fresh Clone Automation
 

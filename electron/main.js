@@ -39,59 +39,78 @@ function emitAutoUpdateStatus(event, payload = {}) {
   }
 }
 
-// ---------- FIREBASE ADMIN ----------
-const admin = require("firebase-admin");
-let serviceAccount = null;
-let firebaseKeyPath = process.env.FIREBASE_KEY_PATH;
-try {
-  if (firebaseKeyPath && fs.existsSync(firebaseKeyPath)) {
-    const rawData = fs.readFileSync(firebaseKeyPath, "utf8");
-    serviceAccount = JSON.parse(rawData);
-    log("Loaded Firebase key from FIREBASE_KEY_PATH:", firebaseKeyPath);
-  } else if (fs.existsSync(path.join(__dirname, "firebase-key.json"))) {
-    const rawData = fs.readFileSync(path.join(__dirname, "firebase-key.json"), "utf8");
-    serviceAccount = JSON.parse(rawData);
-    log("Loaded Firebase key from local firebase-key.json");
-  } else {
-    throw new Error("No Firebase service account key found. Set FIREBASE_KEY_PATH or place firebase-key.json in electron/");
+// ---------- LOAD ENV + FIREBASE CLIENT ----------
+const firebase = require("firebase/compat/app");
+require("firebase/compat/auth");
+require("firebase/compat/firestore");
+
+const potentialEnvFiles = [
+  path.join(__dirname, "..", ".env.desktop"),
+  path.join(__dirname, "..", ".env.local"),
+  path.join(__dirname, "..", ".env")
+];
+
+function hydrateEnv(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return;
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    raw.split(/\r?\n/).forEach((line) => {
+      if (!line || /^\s*#/.test(line)) return;
+      const idx = line.indexOf("=");
+      if (idx === -1) return;
+      const key = line.slice(0, idx).trim();
+      if (!key || process.env[key]) return;
+      const value = line.slice(idx + 1).trim().replace(/^"|"$/g, "");
+      process.env[key] = value;
+    });
+  } catch (err) {
+    log("Failed to hydrate env from", filePath, err.message);
   }
-  
-  // Validate service account has required fields
-  if (!serviceAccount || typeof serviceAccount !== "object") {
-    throw new Error("Firebase key file must contain a valid JSON object");
+}
+
+potentialEnvFiles.forEach(hydrateEnv);
+
+const envOr = (...keys) => {
+  for (const key of keys) {
+    if (process.env[key]) return process.env[key];
   }
-  if (!serviceAccount.project_id) {
-    throw new Error("Firebase key file missing required 'project_id' field");
-  }
-  if (!serviceAccount.private_key) {
-    throw new Error("Firebase key file missing required 'private_key' field");
-  }
-  if (!serviceAccount.client_email) {
-    throw new Error("Firebase key file missing required 'client_email' field");
-  }
-  
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
-  log("Firebase Admin SDK initialized successfully");
-} catch (e) {
-  log("FATAL: Could not initialize Firebase Admin SDK:", e.message);
-  if (e.stack) log(e.stack);
-  dialog.showErrorBox(
-    "Firebase Initialization Error",
-    `Could not initialize Firebase Admin SDK:\n\n${e.message}\n\nPlease check:\n1. firebase-key.json exists in electron/ folder\n2. The file contains valid service account JSON\n3. Required fields: project_id, private_key, client_email`
-  );
+  return "";
+};
+
+const firebaseConfig = {
+  apiKey: envOr("FIREBASE_API_KEY", "VITE_FIREBASE_API_KEY"),
+  authDomain: envOr("FIREBASE_AUTH_DOMAIN", "VITE_FIREBASE_AUTH_DOMAIN"),
+  projectId: envOr("FIREBASE_PROJECT_ID", "VITE_FIREBASE_PROJECT_ID"),
+  storageBucket: envOr("FIREBASE_STORAGE_BUCKET", "VITE_FIREBASE_STORAGE_BUCKET"),
+  messagingSenderId: envOr("FIREBASE_MESSAGING_SENDER_ID", "VITE_FIREBASE_MESSAGING_SENDER_ID"),
+  appId: envOr("FIREBASE_APP_ID", "VITE_FIREBASE_APP_ID")
+};
+
+const missingFirebaseKeys = Object.entries(firebaseConfig)
+  .filter(([, value]) => !value)
+  .map(([key]) => key);
+
+if (missingFirebaseKeys.length) {
+  const message = `Missing Firebase client config: ${missingFirebaseKeys.join(", ")}`;
+  log("FATAL:", message);
+  dialog.showErrorBox("Firebase Config Error", `${message}\n\nSet the values via environment variables.`);
   process.exit(1);
 }
 
-let db;
+let firebaseApp;
 try {
-  db = admin.firestore();
+  firebaseApp = firebase.initializeApp(firebaseConfig);
+  log("Firebase client initialized (project:", firebaseConfig.projectId, ")");
 } catch (e) {
-  log("FATAL: Could not get Firestore instance:", e.message);
-  dialog.showErrorBox("Firestore Error", `Could not initialize Firestore: ${e.message}`);
+  log("FATAL: Could not initialize Firebase client:", e.message);
+  dialog.showErrorBox("Firebase Initialization Error", `Could not initialize Firebase client SDK: ${e.message}`);
   process.exit(1);
 }
+
+const clientAuth = firebase.auth();
+const db = firebase.firestore();
+const FieldValue = firebase.firestore.FieldValue;
+const Timestamp = firebase.firestore.Timestamp;
 
 // ---------- CONFIG ----------
 const VERCEL_URL = "https://tracker-5.vercel.app/";
@@ -108,7 +127,6 @@ let tray = null;
 let cachedAdminSettings = {};
 let currentUid = null;
 let commandUnsub = null;
-let adminSettingsUnsub = null;
 let statusInterval = null;
 let lastIdleState = false; // track previous idle state
 let agentClockedIn = false; // only monitor idle when true
@@ -422,55 +440,46 @@ async function fetchDisplayName(uid) {
   }
 }
 
-// ---------- ADMIN SETTINGS WATCH ----------
-function startAdminSettingsWatch() {
-  if (adminSettingsUnsub) return;
-  const ref = db.collection("adminSettings").doc("global");
-  adminSettingsUnsub = ref.onSnapshot(doc => {
-    if (!doc.exists) {
-      cachedAdminSettings = {};
-      return;
-    }
-    cachedAdminSettings = doc.data() || {};
-    log("adminSettings updated:", cachedAdminSettings);
+// ---------- ADMIN SETTINGS SYNC ----------
+function applyAdminSettings(next) {
+  cachedAdminSettings = next || {};
+  log("adminSettings updated:", cachedAdminSettings);
 
-    // Cache Dropbox tokens for refresh logic
-    cachedDropboxRefreshToken = cachedAdminSettings?.dropboxRefreshToken || null;
-    if (cachedDropboxRefreshToken) {
-      log("[dropbox] refresh token cached");
-    }
+  cachedDropboxRefreshToken = cachedAdminSettings?.dropboxRefreshToken || null;
+  if (cachedDropboxRefreshToken) {
+    log("[dropbox] refresh token cached");
+  }
 
-    if (Object.prototype.hasOwnProperty.call(cachedAdminSettings, "dropboxAccessToken")) {
-      cachedDropboxAccessToken = cachedAdminSettings.dropboxAccessToken || null;
-      if (cachedAdminSettings?.dropboxTokenExpiry) {
-        dropboxTokenExpiry = new Date(cachedAdminSettings.dropboxTokenExpiry).getTime();
-      } else {
-        dropboxTokenExpiry = cachedDropboxAccessToken ? Date.now() + (4 * 60 * 60 * 1000) : null;
-      }
-      if (cachedDropboxAccessToken) {
-        log("[dropbox] access token cached");
-      }
-    } else if (!cachedDropboxAccessToken && cachedAdminSettings?.dropboxToken) {
-      cachedDropboxAccessToken = cachedAdminSettings.dropboxToken;
-      dropboxTokenExpiry = null;
-      log("[dropbox] legacy access token cached");
-    }
-
-    // handle login lock
-    if (cachedAdminSettings.requireLoginOnBoot && !currentUid) {
-      if (!lockWindow) createLockWindow();
-      if (mainWindow) mainWindow.hide();
-    }
-
-    if (mainWindow) mainWindow.webContents.send("settings-updated", cachedAdminSettings);
-
-    // Start/stop autoClockOut watcher depending on setting
-    if (cachedAdminSettings?.autoClockOutEnabled) {
-      startAutoClockOutWatcher();
+  if (Object.prototype.hasOwnProperty.call(cachedAdminSettings, "dropboxAccessToken")) {
+    cachedDropboxAccessToken = cachedAdminSettings.dropboxAccessToken || null;
+    if (cachedAdminSettings?.dropboxTokenExpiry) {
+      dropboxTokenExpiry = new Date(cachedAdminSettings.dropboxTokenExpiry).getTime();
     } else {
-      stopAutoClockOutWatcher();
+      dropboxTokenExpiry = cachedDropboxAccessToken ? Date.now() + (4 * 60 * 60 * 1000) : null;
     }
-  });
+    if (cachedDropboxAccessToken) {
+      log("[dropbox] access token cached");
+    }
+  } else if (!cachedDropboxAccessToken && cachedAdminSettings?.dropboxToken) {
+    cachedDropboxAccessToken = cachedAdminSettings.dropboxToken;
+    dropboxTokenExpiry = null;
+    log("[dropbox] legacy access token cached");
+  }
+
+  if (cachedAdminSettings.requireLoginOnBoot && !currentUid) {
+    if (!lockWindow) createLockWindow();
+    if (mainWindow) mainWindow.hide();
+  } else {
+    removeLockWindow();
+  }
+
+  if (mainWindow) mainWindow.webContents.send("settings-updated", cachedAdminSettings);
+
+  if (cachedAdminSettings?.autoClockOutEnabled) {
+    startAutoClockOutWatcher();
+  } else {
+    stopAutoClockOutWatcher();
+  }
 }
 
 // ---------- DESKTOP COMMANDS ----------
@@ -489,7 +498,7 @@ function startCommandsWatch(uid) {
       if (mainWindow) mainWindow.webContents.send("command-start-recording", { uid });
       // mark recording active and notify
       isRecordingActive = true;
-      if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
       showRecordingPopup("Recording started by admin");
       await db.collection("desktopCommands").doc(uid).update({ startRecording: false }).catch(()=>{});
     }
@@ -498,7 +507,7 @@ function startCommandsWatch(uid) {
       log("command stopRecording received");
       if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid });
       isRecordingActive = false;
-      if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
       showRecordingPopup("Recording stopped by admin");
       await db.collection("desktopCommands").doc(uid).update({ stopRecording: false }).catch(()=>{});
     }
@@ -506,7 +515,7 @@ function startCommandsWatch(uid) {
     if (cmd.forceBreak) {
       log("force break cmd");
       await db.collection('agentStatus').doc(uid)
-        .set({ status: "break", lastUpdate: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        .set({ status: "break", lastUpdate: FieldValue.serverTimestamp() }, { merge: true });
       await db.collection("desktopCommands").doc(uid).update({ forceBreak: false }).catch(()=>{});
     }
 
@@ -522,7 +531,7 @@ function startCommandsWatch(uid) {
 
     if (typeof cmd.setAutoLaunch !== "undefined") {
       app.setLoginItemSettings({ openAtLogin: !!cmd.setAutoLaunch });
-      await db.collection("desktopCommands").doc(uid).update({ setAutoLaunch: admin.firestore.FieldValue.delete() }).catch(()=>{});
+      await db.collection("desktopCommands").doc(uid).update({ setAutoLaunch: FieldValue.delete() }).catch(()=>{});
     }
   });
 }
@@ -540,7 +549,7 @@ function startAgentStatusLoop(uid) {
         // Keep a minimal heartbeat so UI shows desktop connected when relevant
         await db.collection("agentStatus").doc(uid).set({
           isDesktopConnected: !!currentUid,
-          lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
+          lastUpdate: FieldValue.serverTimestamp(),
           appVersion: app.getVersion(),
           platform: process.platform,
           machineName: os.hostname()
@@ -632,7 +641,7 @@ function startAgentStatusLoop(uid) {
             status: "break",
             isIdle: true,
             idleSecs,
-            lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
+            lastUpdate: FieldValue.serverTimestamp(),
             appVersion: app.getVersion(),
             platform: process.platform,
             machineName: os.hostname(),
@@ -653,7 +662,7 @@ function startAgentStatusLoop(uid) {
             status: "online",
             isIdle: false,
             idleSecs,
-            lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
+            lastUpdate: FieldValue.serverTimestamp(),
             appVersion: app.getVersion(),
             platform: process.platform,
             machineName: os.hostname(),
@@ -668,7 +677,7 @@ function startAgentStatusLoop(uid) {
           // This prevents the "Already Active" error when returning from idle.
           if (!isRecordingActive) {
               isRecordingActive = true;
-              await db.collection('agentStatus').doc(uid).set({ isRecording: true, lastUpdate: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+              await db.collection('agentStatus').doc(uid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
               showRecordingPopup("Recording resumed");
               
               if (mainWindow && mainWindow.webContents) {
@@ -767,7 +776,7 @@ async function performAutoClockOut() {
       status: 'offline',
       isIdle: false,
       isDesktopConnected: false,
-      lastUpdate: admin.firestore.FieldValue.serverTimestamp()
+      lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(()=>{});
 
     // inform renderer
@@ -793,9 +802,36 @@ async function performAutoClockOut() {
 // ---------- IPC ----------
 ipcMain.handle("ping", () => "pong");
 
-ipcMain.handle("register-uid", async (_, uid) => {
+ipcMain.handle("sync-admin-settings", async (_event, settings) => {
   try {
+    applyAdminSettings(settings || {});
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+ipcMain.handle("register-uid", async (_, payload) => {
+  try {
+    const normalized = typeof payload === "string" ? { uid: payload } : (payload || {});
+    const uid = normalized?.uid;
+    const desktopToken = normalized?.desktopToken;
     if (!uid) return { success: false, error: "no-uid" };
+
+    if (desktopToken) {
+      try {
+        if (clientAuth.currentUser && clientAuth.currentUser.uid !== uid) {
+          await clientAuth.signOut().catch(() => undefined);
+        }
+        await clientAuth.signInWithCustomToken(desktopToken);
+      } catch (authError) {
+        console.error("[register-uid] signInWithCustomToken failed", authError);
+        return { success: false, error: "auth-failed" };
+      }
+    } else if (!clientAuth.currentUser || clientAuth.currentUser.uid !== uid) {
+      return { success: false, error: "missing-token" };
+    }
+
     currentUid = uid;
 
     // fetch and cache displayName for nicer Dropbox folders
@@ -807,7 +843,6 @@ ipcMain.handle("register-uid", async (_, uid) => {
     // don't assume clocked in until web tells us
     agentClockedIn = false;
 
-    startAdminSettingsWatch();
     startCommandsWatch(uid);
     startAgentStatusLoop(uid); // loop will only do idle logic if agentClockedIn === true
 
@@ -824,10 +859,9 @@ ipcMain.handle("register-uid", async (_, uid) => {
 ipcMain.handle("unregister-uid", async () => {
   try {
     if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
-    if (adminSettingsUnsub) { try { adminSettingsUnsub(); } catch(e){} adminSettingsUnsub = null; }
     stopAgentStatusLoop();
     if (currentUid) {
-      await db.collection("agentStatus").doc(currentUid).set({ isDesktopConnected: false, status: 'offline', lastUpdate: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      await db.collection("agentStatus").doc(currentUid).set({ isDesktopConnected: false, status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
     }
 
     // ensure renderer clears local desktop uid to prevent auto login
@@ -840,6 +874,7 @@ ipcMain.handle("unregister-uid", async () => {
     currentUid = null;
     agentClockedIn = false;
     isRecordingActive = false;
+    try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
     return { success: true };
   } catch(e){
     return { success: false, error: e.message };
@@ -859,9 +894,9 @@ ipcMain.handle("set-agent-status", async (_, status) => {
       await db.collection('agentStatus').doc(currentUid).set({
         status: 'break',
         manualBreak: true,
-        breakStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+        breakStartedAt: FieldValue.serverTimestamp(),
         isIdle: false,
-        lastUpdate: admin.firestore.FieldValue.serverTimestamp()
+        lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true }).catch(()=>{});
 
       // Force stop logic for MANUAL break (as requested)
@@ -898,7 +933,7 @@ ipcMain.handle("set-agent-status", async (_, status) => {
         status: 'offline',
         isIdle: false,
         isDesktopConnected: false,
-        lastUpdate: admin.firestore.FieldValue.serverTimestamp()
+        lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true }).catch(()=>{});
       return { success: true };
     }
@@ -932,10 +967,10 @@ ipcMain.handle("set-agent-status", async (_, status) => {
         status: 'online',
         isIdle: false,
         isDesktopConnected: true,
-        lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
+        lastUpdate: FieldValue.serverTimestamp(),
         // clear manualBreak fields if present
         manualBreak: false,
-        breakStartedAt: admin.firestore.FieldValue.delete()
+        breakStartedAt: FieldValue.delete()
       }, { merge: true }).catch(()=>{});
 
       // Clear manualBreak notified flag when user comes online
@@ -961,7 +996,7 @@ ipcMain.handle("set-agent-status", async (_, status) => {
       await db.collection('agentStatus').doc(currentUid).set({
         status: 'break',
         isIdle: true,
-        lastUpdate: admin.firestore.FieldValue.serverTimestamp()
+        lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true }).catch(()=>{});
       return { success: true };
     }
@@ -993,9 +1028,9 @@ ipcMain.handle('end-break-from-desktop', async () => {
     await db.collection('agentStatus').doc(currentUid).set({
       status: 'online',
       manualBreak: false,
-      breakStartedAt: admin.firestore.FieldValue.delete(),
+      breakStartedAt: FieldValue.delete(),
       isIdle: false,
-      lastUpdate: admin.firestore.FieldValue.serverTimestamp()
+      lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(()=>{});
 
     // Optionally inform renderer if it comes back
@@ -1017,7 +1052,7 @@ ipcMain.handle("start-recording", async () => {
     // mark recording active - the renderer should call notify-recording-saved when done
     isRecordingActive = true;
     if (currentUid) {
-      await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
     }
     // show popup if admin enabled notifications
     showRecordingPopup("Recording started");
@@ -1066,7 +1101,7 @@ ipcMain.handle("stop-recording", async () => {
     // called by renderer when it ends recording explicitly
     isRecordingActive = false;
     if (currentUid) {
-      await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
     }
     showRecordingPopup("Recording stopped");
     log("stop-recording invoked");
@@ -1097,7 +1132,7 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer) => {
       log("upload result:", up);
       if (currentUid) {
         await db.collection("agentStatus").doc(currentUid)
-          .set({ lastUpload: admin.firestore.FieldValue.serverTimestamp(), lastUploadResult: up.success ? "ok" : "fail" }, { merge: true });
+          .set({ lastUpload: FieldValue.serverTimestamp(), lastUploadResult: up.success ? "ok" : "fail" }, { merge: true });
       }
       return { success: true, filePath, uploaded: up };
     }
@@ -1150,15 +1185,15 @@ ipcMain.handle("clock-out-and-sign-out", async () => {
         status: 'offline',
         isIdle: false,
         isDesktopConnected: false,
-        lastUpdate: admin.firestore.FieldValue.serverTimestamp()
+        lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true }).catch(()=>{});
 
       // unregister user on desktop
       if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
-      if (adminSettingsUnsub) { try { adminSettingsUnsub(); } catch(e){} adminSettingsUnsub = null; }
       currentUid = null;
       agentClockedIn = false;
       isRecordingActive = false;
+      try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[clock-out-and-sign-out] signOut failed", signOutErr?.message || signOutErr); }
 
       // ensure renderer clears any locally-stored desktop UID to prevent auto login
       try {
@@ -1201,6 +1236,30 @@ ipcMain.handle("set-auto-launch", async (_, enable) => {
   }
 });
 
+ipcMain.handle("auto-install-update", async () => {
+  try {
+    autoUpdater.quitAndInstall();
+    return { success: true };
+  } catch (error) {
+    emitAutoUpdateStatus("error", { message: error?.message || String(error) });
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
+ipcMain.handle("auto-check-updates", async () => {
+  try {
+    if (isDev) {
+      emitAutoUpdateStatus("error", { message: "Auto updates disabled in dev mode" });
+      return { success: false, error: "dev-mode" };
+    }
+    await autoUpdater.checkForUpdates();
+    return { success: true };
+  } catch (error) {
+    emitAutoUpdateStatus("error", { message: error?.message || String(error) });
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
 // ---------- DROPBOX TOKEN REFRESH ----------
 async function refreshDropboxToken() {
   try {
@@ -1213,31 +1272,6 @@ async function refreshDropboxToken() {
     const appSecret = getDropboxAppSecret();
     if (!appKey || !appSecret) {
       log("[dropbox] missing app key/secret for refresh");
-
-      // Auto-update IPC
-      ipcMain.handle("auto-install-update", async () => {
-        try {
-          autoUpdater.quitAndInstall();
-          return { success: true };
-        } catch (error) {
-          emitAutoUpdateStatus("error", { message: error?.message || String(error) });
-          return { success: false, error: error?.message || String(error) };
-        }
-      });
-
-      ipcMain.handle("auto-check-updates", async () => {
-        try {
-          if (isDev) {
-            emitAutoUpdateStatus("error", { message: "Auto updates disabled in dev mode" });
-            return { success: false, error: "dev-mode" };
-          }
-          await autoUpdater.checkForUpdates();
-          return { success: true };
-        } catch (error) {
-          emitAutoUpdateStatus("error", { message: error?.message || String(error) });
-          return { success: false, error: error?.message || String(error) };
-        }
-      });
       return null;
     }
 
@@ -1265,20 +1299,10 @@ async function refreshDropboxToken() {
     dropboxTokenExpiry = Date.now() + (expiresIn * 1000);
     log("[dropbox] token refreshed, expires in", json.expires_in, "seconds");
 
-    // Persist new short-lived token so other desktops get the update
-    try {
-      await db.collection("adminSettings").doc("global").set({
-        dropboxAccessToken: cachedDropboxAccessToken,
-        dropboxTokenExpiry: new Date(dropboxTokenExpiry).toISOString()
-      }, { merge: true });
-    } catch (persistErr) {
-      log("[dropbox] failed to persist refreshed token:", persistErr.message);
-    }
-
     // Update Firebase with new token if needed
     if (currentUid) {
       await db.collection('agentStatus').doc(currentUid)
-        .set({ lastTokenRefresh: admin.firestore.FieldValue.serverTimestamp() }, { merge: true })
+        .set({ lastTokenRefresh: FieldValue.serverTimestamp() }, { merge: true })
         .catch(()=>{});
     }
 
@@ -1384,7 +1408,6 @@ app.whenReady().then(() => {
   createMainWindow();
   createTray();
   buildAppMenu();
-  startAdminSettingsWatch();
 
   if (cachedAdminSettings?.requireLoginOnBoot) {
     createLockWindow();

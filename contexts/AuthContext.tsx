@@ -38,8 +38,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
       if (currentUser) {
         if (typeof window !== "undefined" && currentUser?.uid) {
-            window.currentUserUid = currentUser.uid;
-            window.desktopAPI?.registerUid?.(currentUser.uid);
+          window.currentUserUid = currentUser.uid;
         }
         
         try {

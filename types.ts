@@ -112,7 +112,7 @@ declare global {
         desktopAPI?: {
             onReady: (callback: (data: any) => void) => void;
             onRegistered: (callback: (data: any) => void) => void;
-            registerUid: (uid: string) => Promise<any>;
+            registerUid: (payload: string | { uid: string; desktopToken?: string }) => Promise<any>;
             unregisterUid: () => Promise<any>;
             setAgentStatus: (status: string) => Promise<any>;
             requestScreenSources: () => Promise<any>;
@@ -127,6 +127,7 @@ declare global {
             onCommandStopRecording: (callback: (data: any) => void) => void;
             onCommandForceBreak: (callback: (data: any) => void) => void;
             onSettingsUpdated: (callback: (data: any) => void) => void;
+            syncAdminSettings?: (settings: AdminSettingsType | null) => Promise<any>;
             onAutoClockOut: (callback: (data: any) => void) => void;
             onAutoUpdateStatus?: (callback: (data: { event: string; version?: string; percent?: number; message?: string }) => void) => (() => void) | void;
             requestImmediateUpdateCheck?: () => Promise<any>;

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.autoClockOutAtShiftEnd = exports.dailyMidnightCleanup = exports.dropboxOauthCallback = exports.dropboxOauthStart = exports.createDropboxOauthSession = void 0;
+exports.autoClockOutAtShiftEnd = exports.dailyMidnightCleanup = exports.dropboxOauthCallback = exports.dropboxOauthStart = exports.createDropboxOauthSession = exports.issueDesktopToken = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const scheduler_1 = require("firebase-functions/v2/scheduler");
@@ -62,6 +62,33 @@ const parseBearerToken = (header) => {
 const sendHtml = (res, content, status = 200) => {
     res.status(status).set("Content-Type", "text/html; charset=utf-8").send(`<!doctype html><html><head><title>Dropbox Authorization</title><style>body{font-family:Arial,sans-serif;background:#f7f7f7;margin:0;padding:40px;color:#111;} .card{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;box-shadow:0 10px 35px rgba(0,0,0,0.08);} h1{font-size:22px;margin-bottom:18px;} p{line-height:1.5;margin:12px 0;} .success{color:#0f9d58;} .error{color:#d93025;} a{color:#1a73e8;} button{border:none;background:#1a73e8;color:#fff;padding:12px 18px;border-radius:8px;font-size:15px;cursor:pointer;margin-top:20px;}</style></head><body><div class="card">${content}</div></body></html>`);
 };
+exports.issueDesktopToken = functions
+    .region(FUNCTIONS_REGION)
+    .https.onCall(async (_data, context) => {
+    if (!context.auth || !context.auth.uid) {
+        throw new functions.https.HttpsError("unauthenticated", "Authentication required.");
+    }
+    const uid = context.auth.uid;
+    try {
+        const userSnap = await db.collection("users").doc(uid).get();
+        if (!userSnap.exists) {
+            throw new functions.https.HttpsError("permission-denied", "User profile not found.");
+        }
+        const user = userSnap.data() || {};
+        if (user.desktopDisabled === true) {
+            throw new functions.https.HttpsError("permission-denied", "Desktop access disabled for this user.");
+        }
+        const token = await admin.auth().createCustomToken(uid, { desktop: true });
+        return { token };
+    }
+    catch (err) {
+        console.error("issueDesktopToken error", err);
+        if (err instanceof functions.https.HttpsError) {
+            throw err;
+        }
+        throw new functions.https.HttpsError("internal", "Unable to issue desktop token.");
+    }
+});
 exports.createDropboxOauthSession = functions.https.onRequest(async (req, res) => {
     allowCors(res);
     if (req.method === "OPTIONS") {

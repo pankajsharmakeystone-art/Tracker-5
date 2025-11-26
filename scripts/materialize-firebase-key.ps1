@@ -108,6 +108,20 @@ if (-not $InlineJson -and -not $SourcePath) {
     throw "Unable to resolve Firebase service account JSON from provided inputs."
 }
 
+# Some providers return base64-encoded payloads. Attempt to decode if it doesn't
+# look like raw JSON so downstream consumers get the actual object.
+if ($InlineJson -and ($InlineJson.Trim().StartsWith('{') -eq $false)) {
+    try {
+        $rawBytes = [Convert]::FromBase64String($InlineJson.Trim())
+        $decoded = [System.Text.Encoding]::UTF8.GetString($rawBytes)
+        if ($decoded.Trim().StartsWith('{')) {
+            $InlineJson = $decoded
+        }
+    } catch {
+        # not base64 — ignore and keep original string
+    }
+}
+
 $destinationDir = Split-Path $DestinationPath -Parent
 if (-not (Test-Path $destinationDir)) {
     New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
