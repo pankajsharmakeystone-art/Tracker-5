@@ -20,6 +20,7 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Cn17wxMG8487klqzHJ60Op
    - Both files use the same Firebase client config (`*_API_KEY`, `*_AUTH_DOMAIN`, etc.) from **Firebase Console → Project Settings → General → Your apps**.
    - **Use a newly generated, HTTP-referrer–restricted Web API key**. Restrict it to `https://tracker-5.vercel.app` (plus any extra origins you own) along with the minimum set of Firebase APIs (Identity Toolkit, Firestore, etc.).
    - The Electron process loads `.env.desktop` first, then falls back to `.env.local`, then plain environment variables. Keep `.env.desktop` out of git just like `.env.local`.
+   - `npm run electron:build` / `npm run electron:release` now run `vite build --mode desktop`, so the renderer also reads `.env.desktop` instead of `.env.local`. This lets you keep a referer-restricted key for the hosted web app while shipping an unrestricted desktop-only key in `.env.desktop`.
 4. Run the app:
    `npm run dev`
 

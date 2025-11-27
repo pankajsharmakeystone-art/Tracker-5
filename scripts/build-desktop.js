@@ -25,12 +25,22 @@ function loadEnvFile(filePath) {
 
 loadEnvFile(envDesktopPath);
 
-const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const result = spawnSync(npmCmd, ['run', 'build'], {
+const isWindows = process.platform === 'win32';
+const npmCmd = isWindows ? 'cmd.exe' : 'npm';
+const npmArgs = isWindows
+  ? ['/c', 'npm', 'run', 'build:renderer:desktop']
+  : ['run', 'build:renderer:desktop'];
+
+console.log('[build-desktop] running npm run build:renderer:desktop');
+const result = spawnSync(npmCmd, npmArgs, {
   cwd: repoRoot,
   stdio: 'inherit',
   env: process.env
 });
+
+if (result.error) {
+  console.error('[build-desktop] failed to spawn npm:', result.error.message);
+}
 
 if (result.status !== 0) {
   process.exit(result.status || 1);

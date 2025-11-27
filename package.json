@@ -14,6 +14,7 @@
     "start": "vite",
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:renderer:desktop": "tsc && vite build --mode desktop",
     "build:desktop": "node scripts/build-desktop.mjs",
     "preview": "vite preview",
     "electron:serve": "cross-env ELECTRON_DEV=true electron electron/main.js",
