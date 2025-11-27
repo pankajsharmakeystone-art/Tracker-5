@@ -14,10 +14,11 @@
     "start": "vite",
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:desktop": "node scripts/build-desktop.mjs",
     "preview": "vite preview",
     "electron:serve": "cross-env ELECTRON_DEV=true electron electron/main.js",
-    "electron:build": "npm run build && electron-builder",
-    "electron:release": "npm run build && electron-builder --publish always",
+    "electron:build": "npm run build:desktop && electron-builder",
+    "electron:release": "npm run build:desktop && electron-builder --publish always",
     "sync:version": "node ./scripts/sync-electron-version.cjs",
     "postversion": "npm run sync:version"
   },
