@@ -1,6 +1,6 @@
 {
   "name": "electron-app",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "",
   "main": "main.js",
   "scripts": {

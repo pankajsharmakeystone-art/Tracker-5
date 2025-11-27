@@ -5,7 +5,7 @@
 // 2. ADDED a check (!isRecordingActive) in the "Return from Idle" block. (Prevents "Already Active" error if recording never stopped).
 // 3. ADDED a check (!isRecordingActive) in the Manual "End Break" handler. (Safety check to prevent double-start errors).
 
-const { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, Tray, Menu, nativeImage, screen, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, Tray, Menu, nativeImage, screen, dialog, globalShortcut } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -80,6 +80,8 @@ function hydrateEnv(filePath) {
 
 potentialEnvFiles.forEach(hydrateEnv);
 
+const devToolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
+
 const envOr = (...keys) => {
   for (const key of keys) {
     if (process.env[key]) return process.env[key];
@@ -123,7 +125,6 @@ const FieldValue = firebase.firestore.FieldValue;
 const Timestamp = firebase.firestore.Timestamp;
 
 // ---------- CONFIG ----------
-const VERCEL_URL = "https://tracker-5.vercel.app/";
 const RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings");
 if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 
@@ -132,7 +133,6 @@ const POPUP_ICON_PATH = "/mnt/data/a35a616b-074d-4238-a09e-5dcb70efb649.png";
 
 // ---------- GLOBALS ----------
 let mainWindow = null;
-let lockWindow = null;
 let tray = null;
 let cachedAdminSettings = {};
 let currentUid = null;
@@ -179,6 +179,30 @@ function hasDropboxCredentials() {
 }
 
 // ---------- CREATE MAIN WINDOW ----------
+function registerDevtoolsShortcuts(windowInstance) {
+  if (!devToolsEnabled || !windowInstance) return;
+  const toggleDevtools = () => {
+    const target = windowInstance?.webContents;
+    if (!target) return;
+    if (target.isDevToolsOpened()) {
+      target.closeDevTools();
+    } else {
+      target.openDevTools({ mode: "detach" });
+    }
+  };
+  try {
+    globalShortcut.register("CommandOrControl+Shift+I", toggleDevtools);
+    globalShortcut.register("F12", toggleDevtools);
+  } catch (shortcutError) {
+    log("Failed to register devtools shortcuts", shortcutError.message);
+  }
+
+  windowInstance.on("closed", () => {
+    globalShortcut.unregister("CommandOrControl+Shift+I");
+    globalShortcut.unregister("F12");
+  });
+}
+
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -208,46 +232,21 @@ function createMainWindow() {
     if (!cachedAdminSettings?.requireLoginOnBoot) {
       mainWindow.show();
     }
+    if (devToolsEnabled) {
+      try {
+        mainWindow.webContents.openDevTools({ mode: "detach" });
+      } catch (devtoolsError) {
+        log("Failed to open devtools", devtoolsError.message);
+      }
+    }
   });
 
   mainWindow.on("closed", () => { mainWindow = null; });
+
+  registerDevtoolsShortcuts(mainWindow);
 }
 
 // ---------- LOCK WINDOW ----------
-function createLockWindow() {
-  if (lockWindow) return;
-
-  lockWindow = new BrowserWindow({
-    width: 600,
-    height: 700,
-    parent: mainWindow || null,
-    modal: true,
-    frame: false,
-    show: false,
-    alwaysOnTop: true,
-    skipTaskbar: false,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, "preload.js")
-    }
-  });
-
-  lockWindow.loadURL(`${VERCEL_URL}`);
-  lockWindow.once("ready-to-show", () => lockWindow.show());
-  lockWindow.on("closed", () => { lockWindow = null; });
-}
-
-function removeLockWindow() {
-  try {
-    if (lockWindow) {
-      lockWindow.close();
-      lockWindow = null;
-    }
-    if (mainWindow && !mainWindow.isVisible()) mainWindow.show();
-  } catch(e) {}
-}
-
 // ---------- TRAY ----------
 function createTray() {
   try {
@@ -477,10 +476,7 @@ function applyAdminSettings(next) {
   }
 
   if (cachedAdminSettings.requireLoginOnBoot && !currentUid) {
-    if (!lockWindow) createLockWindow();
-    if (mainWindow) mainWindow.hide();
-  } else {
-    removeLockWindow();
+    log("requireLoginOnBoot enabled, but lock window is disabled in this build");
   }
 
   if (mainWindow) mainWindow.webContents.send("settings-updated", cachedAdminSettings);
@@ -855,8 +851,6 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     startCommandsWatch(uid);
     startAgentStatusLoop(uid); // loop will only do idle logic if agentClockedIn === true
-
-    removeLockWindow();
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
     log("Registered uid:", uid);
@@ -1419,17 +1413,18 @@ app.whenReady().then(() => {
   createTray();
   buildAppMenu();
 
-  if (cachedAdminSettings?.requireLoginOnBoot) {
-    createLockWindow();
-  } else {
-    if (mainWindow && !mainWindow.isVisible()) mainWindow.show();
-  }
+  if (mainWindow && !mainWindow.isVisible()) mainWindow.show();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
   });
 
   scheduleAutoUpdateCheck();
+});
+
+app.on("will-quit", () => {
+  globalShortcut.unregister("CommandOrControl+Shift+I");
+  globalShortcut.unregister("F12");
 });
 
 app.on("window-all-closed", () => {
