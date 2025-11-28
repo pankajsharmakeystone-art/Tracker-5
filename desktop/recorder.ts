@@ -47,7 +47,11 @@ const sanitizeName = (name: string) => {
   return name.replace(/[^a-z0-9_\-]/gi, '_');
 };
 
-const startRecorderForSource = async (sourceId: string, sourceName: string, resolution?: { width: number; height: number }) => {
+const startRecorderForSource = async (
+  sourceId: string,
+  sourceName: string,
+  resolution?: { width: number; height: number }
+): Promise<boolean> => {
   if (sessions.has(sourceId)) {
     await waitForPreviousSession(sourceId);
   }
@@ -74,6 +78,10 @@ const startRecorderForSource = async (sourceId: string, sourceName: string, reso
       if (event.data && event.data.size > 0) {
         recordedChunks.push(event.data);
       }
+    };
+
+    mediaRecorder.onerror = (event) => {
+      console.error(`Recorder error for ${sourceName}:`, event?.error || event);
     };
 
     mediaRecorder.onstop = async () => {
@@ -107,8 +115,10 @@ const startRecorderForSource = async (sourceId: string, sourceName: string, reso
 
     mediaRecorder.start(1000);
     console.log(`MediaRecorder started for ${sourceName} (${sourceId})`);
+    return true;
   } catch (err) {
     console.error(`Error starting recording for ${sourceName}:`, err);
+    return false;
   }
 };
 
@@ -121,8 +131,29 @@ export const startDesktopRecording = async (sourceId: string | string[], sourceN
   const ids = Array.isArray(sourceId) ? sourceId : [sourceId];
   const names = Array.isArray(sourceName) ? sourceName : [sourceName];
 
-  const starters = ids.map((id, idx) => startRecorderForSource(id, names[idx] || names[0], resolution));
-  await Promise.allSettled(starters);
+  const results: { id: string; success: boolean }[] = [];
+
+  for (let idx = 0; idx < ids.length; idx += 1) {
+    const id = ids[idx];
+    const name = names[idx] || names[0] || 'screen';
+    const success = await startRecorderForSource(id, name, resolution);
+    results.push({ id, success });
+  }
+
+  const successCount = results.filter((r) => r.success).length;
+
+  if (successCount === 0) {
+    console.error('Failed to start recording for all requested desktop sources. Informing desktop to reset.');
+    try {
+      if (window.desktopAPI?.stopRecording) {
+        await window.desktopAPI.stopRecording();
+      }
+    } catch (stopErr) {
+      console.error('Failed to notify desktop about recording failure:', stopErr);
+    }
+  } else if (successCount < results.length) {
+    console.warn('Only a subset of desktop sources started recording:', results);
+  }
 };
 
 export const stopDesktopRecording = () => {

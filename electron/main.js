@@ -154,6 +154,7 @@ let dropboxTokenExpiry = null;
 
 // track manual-break timeout notifications per uid to avoid repeat spam
 const manualBreakNotified = new Map();
+const pendingAgentStatuses = [];
 
 autoUpdater.on("checking-for-update", () => emitAutoUpdateStatus("checking"));
 autoUpdater.on("update-available", (info) => emitAutoUpdateStatus("available", { version: info?.version }));
@@ -851,6 +852,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     startCommandsWatch(uid);
     startAgentStatusLoop(uid); // loop will only do idle logic if agentClockedIn === true
+    await flushPendingAgentStatuses();
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
     log("Registered uid:", uid);
@@ -864,6 +866,7 @@ ipcMain.handle("unregister-uid", async () => {
   try {
     if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
     stopAgentStatusLoop();
+    pendingAgentStatuses.length = 0;
     if (currentUid) {
       await db.collection("agentStatus").doc(currentUid).set({ isDesktopConnected: false, status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
     }
@@ -886,126 +889,128 @@ ipcMain.handle("unregister-uid", async () => {
 });
 
 // New IPC: allow web to tell desktop about agent status changes
+async function applyAgentStatus(status) {
+  if (!currentUid) {
+    throw new Error('no-uid');
+  }
+
+  // Accept 'manual_break' from web/renderer when user starts a manual break
+  if (status === 'manual_break') {
+    agentClockedIn = true;
+    await db.collection('agentStatus').doc(currentUid).set({
+      status: 'break',
+      manualBreak: true,
+      breakStartedAt: FieldValue.serverTimestamp(),
+      isIdle: false,
+      lastUpdate: FieldValue.serverTimestamp()
+    }, { merge: true }).catch(()=>{});
+
+    const wasRecording = isRecordingActive;
+    isRecordingActive = false;
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
+
+    if (wasRecording) showRecordingPopup('Recording paused (break)');
+    if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
+
+    manualBreakNotified.delete(currentUid);
+    return { success: true };
+  }
+
+  if (status === 'clocked_out' || status === 'offline') {
+    agentClockedIn = false;
+    stopAgentStatusLoop();
+
+    const wasRecording = isRecordingActive;
+    isRecordingActive = false;
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
+
+    if (wasRecording) showRecordingPopup('Recording stopped');
+    if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
+
+    await db.collection('agentStatus').doc(currentUid).set({
+      status: 'offline',
+      isIdle: false,
+      isDesktopConnected: false,
+      lastUpdate: FieldValue.serverTimestamp()
+    }, { merge: true }).catch(()=>{});
+    return { success: true };
+  }
+
+  if (status === 'working' || status === 'online') {
+    agentClockedIn = true;
+    startAgentStatusLoop(currentUid);
+
+    const safeSettings = cachedAdminSettings || {};
+    const allowRecording = safeSettings.allowRecording !== false;
+    const recordingMode = safeSettings.recordingMode || 'auto';
+
+    if (recordingMode === 'auto' && allowRecording) {
+      if (!isRecordingActive) {
+        isRecordingActive = true;
+        await db.collection('agentStatus').doc(currentUid).set({ isRecording: true }, { merge: true }).catch(()=>{});
+        showRecordingPopup('Recording started');
+        if (mainWindow) mainWindow.webContents.send('command-start-recording', { uid: currentUid });
+      } else {
+        log('Online signal received, but recording is already active (ignoring)');
+      }
+    }
+
+    await db.collection('agentStatus').doc(currentUid).set({
+      status: 'online',
+      isIdle: false,
+      isDesktopConnected: true,
+      lastUpdate: FieldValue.serverTimestamp(),
+      manualBreak: false,
+      breakStartedAt: FieldValue.delete()
+    }, { merge: true }).catch(()=>{});
+
+    manualBreakNotified.delete(currentUid);
+    return { success: true };
+  }
+
+  if (status === 'on_break' || status === 'break') {
+    agentClockedIn = true;
+
+    const wasRecording = isRecordingActive;
+    isRecordingActive = false;
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
+
+    if (wasRecording) showRecordingPopup('Recording paused (break)');
+    if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
+
+    await db.collection('agentStatus').doc(currentUid).set({
+      status: 'break',
+      isIdle: true,
+      lastUpdate: FieldValue.serverTimestamp()
+    }, { merge: true }).catch(()=>{});
+    return { success: true };
+  }
+
+  return { success: true };
+}
+
+async function flushPendingAgentStatuses() {
+  if (!currentUid || pendingAgentStatuses.length === 0) return;
+  const queued = pendingAgentStatuses.splice(0, pendingAgentStatuses.length);
+  for (const status of queued) {
+    try {
+      await applyAgentStatus(status);
+    } catch (err) {
+      log('Failed to apply queued agent status', status, err?.message || err);
+    }
+  }
+}
+
 ipcMain.handle("set-agent-status", async (_, status) => {
   try {
     log("set-agent-status received:", status); 
-    if (!currentUid) return { success: false, error: 'no-uid' };
-
-    // Accept 'manual_break' from web/renderer when user starts a manual break
-    if (status === 'manual_break') {
-      agentClockedIn = true;
-      // mark as break and set manualBreak flag — web will also update worklog
-      await db.collection('agentStatus').doc(currentUid).set({
-        status: 'break',
-        manualBreak: true,
-        breakStartedAt: FieldValue.serverTimestamp(),
-        isIdle: false,
-        lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true }).catch(()=>{});
-
-      // Force stop logic for MANUAL break (as requested)
-      const wasRecording = isRecordingActive;
-      isRecordingActive = false;
-      await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
-      
-      if (wasRecording) showRecordingPopup("Recording paused (break)");
-      
-      // ALWAYS tell renderer to stop
-      if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid: currentUid });
-
-      // reset manual-break notified bucket
-      manualBreakNotified.delete(currentUid);
-      return { success: true };
+    if (!currentUid) {
+      log('Desktop not registered yet. Queuing status:', status);
+      pendingAgentStatuses.push(status);
+      return { success: true, queued: true };
     }
 
-    if (status === 'clocked_out' || status === 'offline') {
-      // stop idle monitoring and mark offline
-      agentClockedIn = false;
-      stopAgentStatusLoop();
-      
-      // Force stop logic
-      const wasRecording = isRecordingActive;
-      isRecordingActive = false;
-      await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
-      
-      if (wasRecording) showRecordingPopup("Recording stopped");
-      
-      // ALWAYS tell renderer to stop
-      if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid: currentUid });
-
-      await db.collection('agentStatus').doc(currentUid).set({
-        status: 'offline',
-        isIdle: false,
-        isDesktopConnected: false,
-        lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true }).catch(()=>{});
-      return { success: true };
-    }
-
-    // Accept BOTH 'working' AND 'online' as triggers to resume recording
-    if (status === 'working' || status === 'online') {
-      // resume monitoring
-      agentClockedIn = true;
-      startAgentStatusLoop(currentUid);
-      
-      // auto-start recording if allowed and mode=auto
-      const safeSettings = cachedAdminSettings || {};
-      // Default to true if allowRecording is not explicitly false
-      const allowRecording = safeSettings.allowRecording !== false;
-      const recordingMode = safeSettings.recordingMode || 'auto';
-      
-      if (recordingMode === 'auto' && allowRecording) {
-        
-        // ⚡ FIX: Check if ALREADY active to prevent "Already Active" error
-        if (!isRecordingActive) {
-            isRecordingActive = true;
-            await db.collection('agentStatus').doc(currentUid).set({ isRecording: true }, { merge: true }).catch(()=>{});
-            showRecordingPopup("Recording started");
-            // notify renderer to start recording
-            if (mainWindow) mainWindow.webContents.send("command-start-recording", { uid: currentUid });
-        } else {
-            log("Online signal received, but recording is already active (ignoring)");
-        }
-      }
-      await db.collection('agentStatus').doc(currentUid).set({
-        status: 'online',
-        isIdle: false,
-        isDesktopConnected: true,
-        lastUpdate: FieldValue.serverTimestamp(),
-        // clear manualBreak fields if present
-        manualBreak: false,
-        breakStartedAt: FieldValue.delete()
-      }, { merge: true }).catch(()=>{});
-
-      // Clear manualBreak notified flag when user comes online
-      manualBreakNotified.delete(currentUid);
-      return { success: true };
-    }
-
-    if (status === 'on_break' || status === 'break') {
-      // set break state; keep agentClockedIn true
-      agentClockedIn = true;
-      
-      // Force stop logic
-      const wasRecording = isRecordingActive;
-      isRecordingActive = false;
-      await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
-      
-      if (wasRecording) showRecordingPopup("Recording paused (break)");
-      
-      // ALWAYS tell renderer to stop
-      if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid: currentUid });
-
-      // Do not force manualBreak flags — web will set manualBreak when it's a manual break.
-      await db.collection('agentStatus').doc(currentUid).set({
-        status: 'break',
-        isIdle: true,
-        lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true }).catch(()=>{});
-      return { success: true };
-    }
-
-    return { success: true };
+    return await applyAgentStatus(status);
   } catch (e) {
     return { success: false, error: e.message };
   }
