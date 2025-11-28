@@ -33,15 +33,48 @@ const addIceCandidateSafely = async (pc: RTCPeerConnection, candidate: LiveSessi
   }
 };
 
+export interface RemoteFeed {
+  id: string;
+  stream: MediaStream;
+  label?: string;
+}
+
 export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) => {
   const { userData } = useAuth();
   const [state, setState] = useState<ViewerState>('idle');
   const [error, setError] = useState<string | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const unsubscribeRef = useRef<null | (() => void)>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const processedAgentCandidates = useRef<Set<string>>(new Set());
+  const remoteFeedsRef = useRef<Map<string, RemoteFeed>>(new Map());
+  const [remoteFeeds, setRemoteFeeds] = useState<RemoteFeed[]>([]);
+
+  const addRemoteFeed = useCallback((stream: MediaStream | undefined, trackLabel?: string) => {
+    if (!stream) return;
+    if (remoteFeedsRef.current.has(stream.id)) return;
+    const label = trackLabel || stream.id;
+    const displayLabel = label?.toLowerCase().startsWith('screen:')
+      ? `Screen ${label.split(':')[1] ?? ''}`
+      : label || 'Screen';
+    remoteFeedsRef.current.set(stream.id, { id: stream.id, stream, label: displayLabel });
+    setRemoteFeeds(Array.from(remoteFeedsRef.current.values()));
+    setState('streaming');
+  }, []);
+
+  const clearRemoteFeeds = useCallback(() => {
+    remoteFeedsRef.current.forEach(({ stream }) => {
+      stream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (err) {
+          console.warn('Failed to stop remote track', err);
+        }
+      });
+    });
+    remoteFeedsRef.current.clear();
+    setRemoteFeeds([]);
+  }, []);
 
   const cleanup = useCallback(async (reason: 'viewer_closed' | 'agent_closed' | 'error') => {
     if (unsubscribeRef.current) {
@@ -62,16 +95,7 @@ export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) =>
     }
 
     processedAgentCandidates.current.clear();
-    const videoEl = videoRef.current;
-    if (videoEl) {
-      const currentStream = videoEl.srcObject as MediaStream | null;
-      if (currentStream) {
-        currentStream.getTracks().forEach((track) => {
-          try { track.stop(); } catch (err) { console.warn('Failed to stop remote track', err); }
-        });
-      }
-      videoEl.srcObject = null;
-    }
+    clearRemoteFeeds();
 
     if (reason === 'viewer_closed' && activeRequestIdRef.current && agent) {
       try {
@@ -88,7 +112,7 @@ export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) =>
     } else if (reason === 'error') {
       setState('error');
     }
-  }, [agent]);
+  }, [agent, clearRemoteFeeds]);
 
   useEffect(() => {
     if (!isOpen || !agent) {
@@ -134,10 +158,7 @@ export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) =>
               const pc = new RTCPeerConnection(getRtcConfiguration());
               pcRef.current = pc;
               pc.ontrack = (event) => {
-                if (videoRef.current && event.streams[0]) {
-                  videoRef.current.srcObject = event.streams[0];
-                  setState('streaming');
-                }
+                addRemoteFeed(event.streams[0], event.track?.label);
               };
               pc.onicecandidate = async (evt) => {
                 if (!evt.candidate) return;
@@ -190,12 +211,12 @@ export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) =>
     return () => {
       cleanup('viewer_closed');
     };
-  }, [agent, isOpen, userData?.uid, cleanup]);
+  }, [agent, isOpen, userData?.uid, cleanup, addRemoteFeed]);
 
   const endSession = useCallback(async () => {
     await cleanup('viewer_closed');
     setState('ended');
   }, [cleanup]);
 
-  return { videoRef, state, error, endSession };
+  return { remoteFeeds, state, error, endSession };
 };

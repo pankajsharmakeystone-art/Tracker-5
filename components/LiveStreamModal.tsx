@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { useLiveScreenViewer } from '../hooks/useLiveScreenViewer';
+import React, { useEffect, useRef } from 'react';
+import { useLiveScreenViewer, type RemoteFeed } from '../hooks/useLiveScreenViewer';
 import type { ViewerState } from '../hooks/useLiveScreenViewer';
 
 interface LiveStreamModalProps {
@@ -22,8 +22,33 @@ const STATE_COPY: Record<ViewerState, { title: string; description: string }> = 
   error: { title: 'Error', description: 'Unable to establish the live session.' }
 };
 
+const LiveFeedTile: React.FC<{ feed: RemoteFeed; index: number }> = ({ feed, index }) => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.srcObject = feed.stream;
+    }
+  }, [feed.stream]);
+
+  return (
+    <div className="relative aspect-video rounded-2xl border border-white/10 bg-black overflow-hidden">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="w-full h-full object-contain"
+      />
+      <div className="absolute bottom-2 left-2 text-xs uppercase tracking-wide bg-black/60 px-2 py-1 rounded text-white">
+        {feed.label || `Screen ${index + 1}`}
+      </div>
+    </div>
+  );
+};
+
 const LiveStreamModal: React.FC<LiveStreamModalProps> = ({ isOpen, agent, onClose }) => {
-  const { videoRef, state, error, endSession } = useLiveScreenViewer(agent, isOpen);
+  const { remoteFeeds, state, error, endSession } = useLiveScreenViewer(agent, isOpen);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -59,16 +84,16 @@ const LiveStreamModal: React.FC<LiveStreamModalProps> = ({ isOpen, agent, onClos
           </button>
         </header>
 
-        <div className="bg-black relative aspect-video">
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className={`w-full h-full object-contain transition-opacity duration-300 ${state === 'streaming' ? 'opacity-100' : 'opacity-0'}`}
-          />
+        <div className="bg-black relative min-h-[320px]">
+          {remoteFeeds.length > 0 && (
+            <div className={`grid gap-4 p-4 ${remoteFeeds.length > 1 ? 'md:grid-cols-2' : 'grid-cols-1'}`}>
+              {remoteFeeds.map((feed, idx) => (
+                <LiveFeedTile key={feed.id} feed={feed} index={idx} />
+              ))}
+            </div>
+          )}
 
-          {state !== 'streaming' && (
+          {(state !== 'streaming' || remoteFeeds.length === 0) && (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-8">
               <div className="w-16 h-16 border-4 border-white/20 border-t-white rounded-full animate-spin mb-6" aria-hidden />
               <h3 className="text-xl font-semibold mb-2">{copy?.title ?? 'Preparing Stream'}</h3>

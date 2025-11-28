@@ -73,12 +73,13 @@ const AdminSettings: React.FC = () => {
     const [success, setSuccess] = useState<string | null>(null);
     const [tokenGenerating, setTokenGenerating] = useState(false);
     const [tokenMessage, setTokenMessage] = useState<string | null>(null);
+    const [showDropboxChecklist, setShowDropboxChecklist] = useState(false);
     const dropboxSessionEndpoint = useMemo(() => resolveDropboxSessionEndpoint(), []);
-    const dropboxCallbackUrl = useMemo(() => {
+    const dropboxCallbackHint = useMemo(() => {
         if (typeof window !== 'undefined' && window.location) {
             return `${window.location.origin}/api/dropbox-callback`;
         }
-        return 'https://tracker-5.vercel.app/api/dropbox-callback';
+        return 'https://your-domain/api/dropbox-callback';
     }, []);
     const { currentUser } = useAuth();
     const canAutoGenerate = Boolean(settings.dropboxAppKey && settings.dropboxAppSecret);
@@ -186,28 +187,6 @@ const AdminSettings: React.FC = () => {
                 These settings apply globally to all users and teams, primarily for the desktop application.
             </p>
 
-            <div className="mb-8 rounded-lg border border-blue-200 bg-blue-50 p-5 text-sm text-gray-800 dark:border-blue-900/40 dark:bg-blue-900/20 dark:text-blue-50">
-                <h4 className="text-base font-semibold text-blue-900 dark:text-blue-100 mb-3">Dropbox setup checklist</h4>
-                <ol className="list-decimal list-inside space-y-2">
-                    <li>
-                        Sign in to the <a className="text-blue-700 underline dark:text-blue-200" href="https://www.dropbox.com/developers/apps" target="_blank" rel="noreferrer">Dropbox App Console</a>, create or select an app, and copy the <strong>App key</strong> and <strong>App secret</strong> from the <em>Settings</em> tab.
-                    </li>
-                    <li>
-                        Still in the console, open the <em>Permissions</em> tab and enable at least <code>files.content.write</code> and <code>files.metadata.write</code> so uploads are allowed.
-                    </li>
-                    <li>
-                        Add <code>{dropboxCallbackUrl}</code> (or your own domain) to the app&apos;s <em>Redirect URIs</em> list so Dropbox can send the authorization code back to this dashboard.
-                    </li>
-                    <li>
-                        Paste the App key + secret below and click <strong>Save Settings</strong>. These values stay in Firestore and are used by both the dashboard and desktop app.
-                    </li>
-                    <li>
-                        Click <strong>Generate Refresh Token</strong>. Approve the popup, and once Dropbox shows “Connected” the refresh/access tokens update automatically here.
-                    </li>
-                </ol>
-                <p className="mt-3 text-xs text-gray-600 dark:text-blue-200">Tip: if you deploy under a different domain, update both the Dropbox redirect URI and the <code>VITE_DROPBOX_SESSION_ENDPOINT</code> env var (if needed) before re-running the flow.</p>
-            </div>
-            
             {error && <p className="text-sm text-red-500 mb-4 p-3 bg-red-100 dark:bg-red-900/50 rounded-md">{error}</p>}
             
             <form onSubmit={handleSave}>
@@ -301,6 +280,41 @@ const AdminSettings: React.FC = () => {
                         onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, autoUpload: e.target.checked }))}
                     />
                 </FormField>
+
+                <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-gray-800 dark:border-blue-900/40 dark:bg-blue-900/20 dark:text-blue-50">
+                    <button
+                        type="button"
+                        onClick={() => setShowDropboxChecklist((prev) => !prev)}
+                        className="flex w-full items-center justify-between text-left font-semibold text-blue-900 dark:text-blue-100"
+                    >
+                        <span>Dropbox setup checklist</span>
+                        <span>{showDropboxChecklist ? '− Hide' : '+ Show'}</span>
+                    </button>
+                    {showDropboxChecklist && (
+                        <div className="mt-3 space-y-2">
+                            <ol className="list-decimal list-inside space-y-2">
+                                <li>
+                                    Sign in to the <a className="text-blue-700 underline dark:text-blue-200" href="https://www.dropbox.com/developers/apps" target="_blank" rel="noreferrer">Dropbox App Console</a>, create/select an app, and copy the <strong>App key</strong> and <strong>App secret</strong> from the Settings tab.
+                                </li>
+                                <li>
+                                    On the Permissions tab, enable at least <code>files.content.write</code> and <code>files.metadata.write</code> so uploads are allowed.
+                                </li>
+                                <li>
+                                    From your hosting provider (Vercel, Netlify, custom DNS, etc.) copy the exact domain where this dashboard is deployed. Append <code>/api/dropbox-callback</code> and add that full URL to Dropbox → Redirect URIs. Example based on this window: <code>{dropboxCallbackHint}</code>.
+                                </li>
+                                <li>
+                                    Paste the App key + secret in the fields below and click <strong>Save Settings</strong> so the desktop + dashboard use the same credentials.
+                                </li>
+                                <li>
+                                    Click <strong>Generate Refresh Token</strong>, approve the popup, and wait for the success screen—tokens update in Firestore automatically.
+                                </li>
+                            </ol>
+                            <p className="text-xs text-gray-600 dark:text-blue-200">
+                                Need to change domains later? Update the redirect URI within Dropbox and, if applicable, adjust <code>VITE_DROPBOX_SESSION_ENDPOINT</code> before rerunning the flow.
+                            </p>
+                        </div>
+                    )}
+                </div>
 
                 <FormField label="Dropbox Refresh Token" description="Click Generate to run the Dropbox OAuth popup or paste an existing refresh token manually.">
                     <div className="flex flex-col gap-3">

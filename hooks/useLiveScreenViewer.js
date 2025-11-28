@@ -28,11 +28,38 @@ export const useLiveScreenViewer = (agent, isOpen) => {
     const { userData } = useAuth();
     const [state, setState] = useState('idle');
     const [error, setError] = useState(null);
-    const videoRef = useRef(null);
     const pcRef = useRef(null);
     const unsubscribeRef = useRef(null);
     const activeRequestIdRef = useRef(null);
     const processedAgentCandidates = useRef(new Set());
+        const remoteFeedsRef = useRef(new Map());
+        const [remoteFeeds, setRemoteFeeds] = useState([]);
+        const addRemoteFeed = useCallback((stream, trackLabel) => {
+            if (!stream)
+                return;
+            if (remoteFeedsRef.current.has(stream.id))
+                return;
+            const label = (trackLabel || stream.id || 'Screen').toLowerCase().startsWith('screen:')
+                ? `Screen ${trackLabel?.split(':')[1] ?? ''}`
+                : trackLabel || stream.id || 'Screen';
+            remoteFeedsRef.current.set(stream.id, { id: stream.id, stream, label });
+            setRemoteFeeds(Array.from(remoteFeedsRef.current.values()));
+            setState('streaming');
+        }, []);
+        const clearRemoteFeeds = useCallback(() => {
+            remoteFeedsRef.current.forEach(({ stream }) => {
+                stream.getTracks().forEach((track) => {
+                    try {
+                        track.stop();
+                    }
+                    catch (err) {
+                        console.warn('Failed to stop remote track', err);
+                    }
+                });
+            });
+            remoteFeedsRef.current.clear();
+            setRemoteFeeds([]);
+        }, []);
     const cleanup = useCallback(async (reason) => {
         if (unsubscribeRef.current) {
             unsubscribeRef.current();
@@ -51,21 +78,7 @@ export const useLiveScreenViewer = (agent, isOpen) => {
             pcRef.current = null;
         }
         processedAgentCandidates.current.clear();
-        const videoEl = videoRef.current;
-        if (videoEl) {
-            const currentStream = videoEl.srcObject;
-            if (currentStream) {
-                currentStream.getTracks().forEach((track) => {
-                    try {
-                        track.stop();
-                    }
-                    catch (err) {
-                        console.warn('Failed to stop remote track', err);
-                    }
-                });
-            }
-            videoEl.srcObject = null;
-        }
+            clearRemoteFeeds();
         if (reason === 'viewer_closed' && activeRequestIdRef.current && agent) {
             try {
                 await endLiveSession(getLiveSessionRef(agent.uid), 'viewer_closed');
@@ -81,7 +94,7 @@ export const useLiveScreenViewer = (agent, isOpen) => {
         else if (reason === 'error') {
             setState('error');
         }
-    }, [agent]);
+    }, [agent, clearRemoteFeeds]);
     useEffect(() => {
         if (!isOpen || !agent) {
             return () => undefined;
@@ -120,10 +133,7 @@ export const useLiveScreenViewer = (agent, isOpen) => {
                         const pc = new RTCPeerConnection(getRtcConfiguration());
                         pcRef.current = pc;
                         pc.ontrack = (event) => {
-                            if (videoRef.current && event.streams[0]) {
-                                videoRef.current.srcObject = event.streams[0];
-                                setState('streaming');
-                            }
+                            addRemoteFeed(event.streams[0], event.track?.label);
                         };
                         pc.onicecandidate = async (evt) => {
                             if (!evt.candidate)
@@ -176,10 +186,10 @@ export const useLiveScreenViewer = (agent, isOpen) => {
         return () => {
             cleanup('viewer_closed');
         };
-    }, [agent, isOpen, userData?.uid, cleanup]);
+    }, [agent, isOpen, userData?.uid, cleanup, addRemoteFeed]);
     const endSession = useCallback(async () => {
         await cleanup('viewer_closed');
         setState('ended');
     }, [cleanup]);
-    return { videoRef, state, error, endSession };
+    return { remoteFeeds, state, error, endSession };
 };

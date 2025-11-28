@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useAuth } from './useAuth';
-import { captureDesktopStreamForLive, stopMediaStreamTracks } from '../desktop/liveStream';
+import { captureDesktopStreamsForLive, stopMediaStreamTracks } from '../desktop/liveStream';
 import { appendCandidate, endLiveSession, getLiveSessionRef, markStreaming, setOffer, type LiveSessionCandidate, type LiveSessionDoc } from '../services/liveSessions';
 import { getRtcConfiguration } from '../utils/liveStream';
 import { onSnapshot } from 'firebase/firestore';
@@ -29,7 +29,7 @@ const addIceCandidateSafely = async (pc: RTCPeerConnection, candidate: LiveSessi
 export const useAgentLiveStream = () => {
   const { userData } = useAuth();
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const streamRefs = useRef<MediaStream[]>([]);
   const activeRequestIdRef = useRef<string | null>(null);
   const processedViewerCandidates = useRef<Set<string>>(new Set());
   const endRequestedRef = useRef(false);
@@ -54,8 +54,8 @@ export const useAgentLiveStream = () => {
         }
         pcRef.current = null;
       }
-      stopMediaStreamTracks(streamRef.current);
-      streamRef.current = null;
+      stopMediaStreamTracks(streamRefs.current);
+      streamRefs.current = [];
 
       if (reason === 'agent_closed' && activeRequestIdRef.current) {
         try {
@@ -70,11 +70,13 @@ export const useAgentLiveStream = () => {
 
     const startBroadcast = async (requestId: string) => {
       try {
-        const capture = await captureDesktopStreamForLive();
-        if (!capture) return;
+        const captures = await captureDesktopStreamsForLive();
+        if (!captures.length) return;
         const pc = new RTCPeerConnection(getRtcConfiguration());
-        capture.stream.getTracks().forEach((track) => pc.addTrack(track, capture.stream));
-        streamRef.current = capture.stream;
+        captures.forEach((capture) => {
+          capture.stream.getTracks().forEach((track) => pc.addTrack(track, capture.stream));
+        });
+        streamRefs.current = captures.map((c) => c.stream);
         pcRef.current = pc;
         processedViewerCandidates.current = new Set();
         activeRequestIdRef.current = requestId;

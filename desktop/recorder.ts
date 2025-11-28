@@ -5,9 +5,22 @@ interface RecordingSession {
   recordedChunks: Blob[];
   stream: MediaStream;
   sourceName: string;
+  finalizePromise: Promise<void>;
 }
 
 const sessions = new Map<string, RecordingSession>();
+
+const waitForPreviousSession = async (sourceId: string) => {
+  const existing = sessions.get(sourceId);
+  if (!existing) return;
+
+  console.warn(`Recording already active for ${sourceId}, waiting for cleanup`);
+  try {
+    await existing.finalizePromise;
+  } catch (err) {
+    console.error(`Error while waiting for recorder cleanup (${sourceId}):`, err);
+  }
+};
 
 const buildConstraints = (sourceId: string, resolution?: { width: number; height: number }) => {
   const mandatoryConfig: any = {
@@ -36,8 +49,7 @@ const sanitizeName = (name: string) => {
 
 const startRecorderForSource = async (sourceId: string, sourceName: string, resolution?: { width: number; height: number }) => {
   if (sessions.has(sourceId)) {
-    console.warn(`Recording already active for ${sourceId}`);
-    return;
+    await waitForPreviousSession(sourceId);
   }
 
   try {
@@ -51,7 +63,12 @@ const startRecorderForSource = async (sourceId: string, sourceName: string, reso
     const recordedChunks: Blob[] = [];
     const mediaRecorder = new MediaRecorder(stream, options);
 
-    sessions.set(sourceId, { mediaRecorder, recordedChunks, stream, sourceName });
+    let finalizeResolve: (() => void) | null = null;
+    const finalizePromise = new Promise<void>((resolve) => {
+      finalizeResolve = resolve;
+    });
+
+    sessions.set(sourceId, { mediaRecorder, recordedChunks, stream, sourceName, finalizePromise });
 
     mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
@@ -62,7 +79,10 @@ const startRecorderForSource = async (sourceId: string, sourceName: string, reso
     mediaRecorder.onstop = async () => {
       console.log(`Recorder stopped for ${sourceName}`);
       const session = sessions.get(sourceId);
-      if (!session) return;
+      if (!session) {
+        finalizeResolve?.();
+        return;
+      }
 
       try {
         const blob = new Blob(session.recordedChunks, { type: 'video/webm' });
@@ -81,6 +101,7 @@ const startRecorderForSource = async (sourceId: string, sourceName: string, reso
       } finally {
         session.stream.getTracks().forEach((track) => track.stop());
         sessions.delete(sourceId);
+        finalizeResolve?.();
       }
     };
 
