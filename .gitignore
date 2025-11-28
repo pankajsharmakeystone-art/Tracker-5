@@ -31,3 +31,5 @@ tracker-5-firebase-adminsdk-*.json
 *.njsproj
 *.sln
 *.sw?
+
+.vercel

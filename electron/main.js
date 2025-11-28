@@ -1353,40 +1353,45 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
 
     const content = fs.readFileSync(filePath);
     const arg = { path: dropboxPath, mode: "add", autorename: true };
-    const res = await fetch("https://content.dropboxapi.com/2/files/upload", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${validToken}`,
-        "Dropbox-API-Arg": JSON.stringify(arg),
-        "Content-Type": "application/octet-stream"
-      },
-      body: content
-    });
-    const json = await res.json();
-    
-    // If 401 (unauthorized), token expired, try refreshing
-    if (res.status === 401) {
+
+    const callDropboxUpload = async (token) => {
+      const response = await fetch("https://content.dropboxapi.com/2/files/upload", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Dropbox-API-Arg": JSON.stringify(arg),
+          "Content-Type": "application/octet-stream"
+        },
+        body: content
+      });
+
+      const raw = await response.text();
+      let parsed = null;
+      try {
+        parsed = raw ? JSON.parse(raw) : null;
+      } catch (parseErr) {
+        parsed = { raw, parseError: parseErr?.message || "invalid-json" };
+      }
+
+      return { response, body: parsed };
+    };
+
+    let { response, body } = await callDropboxUpload(validToken);
+
+    if (response.status === 401) {
       log("[dropbox] got 401, attempting token refresh");
       const newToken = await refreshDropboxToken();
       if (newToken) {
-        // Retry with new token
-        const retryRes = await fetch("https://content.dropboxapi.com/2/files/upload", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${newToken}`,
-            "Dropbox-API-Arg": JSON.stringify(arg),
-            "Content-Type": "application/octet-stream"
-          },
-          body: content
-        });
-        const retryJson = await retryRes.json();
-        if (!retryRes.ok) return { success: false, error: retryJson };
-        return { success: true, meta: retryJson };
+        ({ response, body } = await callDropboxUpload(newToken));
       }
     }
 
-    if (!res.ok) return { success: false, error: json };
-    return { success: true, meta: json };
+    if (!response.ok) {
+      log("[dropbox] upload failed", response.status, body);
+      return { success: false, error: body || { status: response.status } };
+    }
+
+    return { success: true, meta: body };
   } catch (e) {
     return { success: false, error: e.message };
   }

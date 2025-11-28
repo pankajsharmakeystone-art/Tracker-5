@@ -9,53 +9,12 @@ import AdminPanel from '../components/AdminPanel';
 import AgentPanel from '../components/AgentPanel';
 import ManagerPanel from '../components/ManagerPanel';
 
-interface SignOutModalProps {
-    isOpen: boolean;
-    onClose: () => void;
-    onSignOutOnly: () => void;
-    onClockOutAndSignOut: () => void;
-}
-
-const SignOutModal: React.FC<SignOutModalProps> = ({ isOpen, onClose, onSignOutOnly, onClockOutAndSignOut }) => {
-    if (!isOpen) return null;
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60 p-4" aria-modal="true" role="dialog">
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6 border dark:border-gray-700">
-                <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-2">You are still clocked in</h2>
-                <p className="text-gray-600 dark:text-gray-300 mb-6">
-                    Do you want to Sign Out only, or Clock Out & Sign Out to end your shift?
-                </p>
-                <div className="flex flex-col gap-3">
-                    <button 
-                        onClick={onSignOutOnly}
-                        className="w-full px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 dark:bg-gray-700 dark:text-gray-200 dark:border-gray-600 dark:hover:bg-gray-600"
-                    >
-                        Sign Out Only
-                    </button>
-                    <button 
-                        onClick={onClockOutAndSignOut}
-                        className="w-full px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700"
-                    >
-                        Clock Out & Sign Out
-                    </button>
-                    <button 
-                        onClick={onClose}
-                        className="w-full px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
-                    >
-                        Cancel
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-};
-
 const DashboardPage: React.FC = () => {
     const { user, userData, loading } = useAuth();
     const navigate = useNavigate();
     const [showError, setShowError] = useState(false);
-    const [showSignOutModal, setShowSignOutModal] = useState(false);
     const [autoClockOutMessage, setAutoClockOutMessage] = useState<string | null>(null);
+    const currentUid = userData?.uid || user?.uid || null;
     
     useEffect(() => {
         let timer: number;
@@ -84,10 +43,10 @@ const DashboardPage: React.FC = () => {
     }, []);
 
     const performLogout = async () => {
-        if (userData?.uid) {
+        if (currentUid) {
             try {
                 // Update Firestore agentStatus to offline and isDesktopConnected: false
-                await updateAgentStatus(userData.uid, 'offline', { isDesktopConnected: false });
+                await updateAgentStatus(currentUid, 'offline', { isDesktopConnected: false });
             } catch (e) {
                 console.error("Failed to update agent status during logout:", e);
             }
@@ -97,21 +56,14 @@ const DashboardPage: React.FC = () => {
     };
 
     const handleSignOutClick = async () => {
-        // If desktop API is available, check clock-in status
         if (window.desktopAPI && window.desktopAPI.requestSignOut) {
             try {
-                const response = await window.desktopAPI.requestSignOut();
-                if (response.clockedIn) {
-                    setShowSignOutModal(true);
-                    return;
-                }
+                await window.desktopAPI.requestSignOut();
             } catch (error) {
                 console.error("Error requesting sign out status:", error);
-                // Fallthrough to normal logout on error
             }
         }
-        // Standard logout if not on desktop or not clocked in
-        performLogout();
+        await handleClockOutAndSignOut();
     };
 
     const handleClockOutAndSignOut = async () => {
@@ -125,16 +77,15 @@ const DashboardPage: React.FC = () => {
         }
         
         // 2. Perform DB updates (Worklog, AgentStatus, UserDoc)
-        if (userData?.uid) {
+        if (currentUid) {
              try {
-                 await performClockOut(userData.uid);
+                 await performClockOut(currentUid);
              } catch (e) {
                  console.error("Error performing DB clock out:", e);
              }
         }
 
-        setShowSignOutModal(false);
-        performLogout();
+        await performLogout();
     };
 
     if (showError) {
@@ -146,7 +97,7 @@ const DashboardPage: React.FC = () => {
                         We couldn't load your user profile. This can happen if your account data is missing. Please sign out and try signing in again.
                     </p>
                     <button
-                        onClick={performLogout}
+                        onClick={handleSignOutClick}
                         className="mt-6 w-full inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium text-center text-white bg-red-600 rounded-lg hover:bg-red-700 focus:ring-4 focus:ring-red-300 dark:focus:ring-red-900">
                         Sign Out
                     </button>
@@ -200,13 +151,6 @@ const DashboardPage: React.FC = () => {
                     </div>
                 </div>
             )}
-
-            <SignOutModal 
-                isOpen={showSignOutModal} 
-                onClose={() => setShowSignOutModal(false)}
-                onSignOutOnly={() => { setShowSignOutModal(false); performLogout(); }}
-                onClockOutAndSignOut={handleClockOutAndSignOut}
-            />
 
             <div className="w-full max-w-7xl bg-white rounded-lg shadow-xl dark:border p-6 sm:p-8 dark:bg-gray-800 dark:border-gray-700">
                  <div className="flex flex-col sm:flex-row justify-between sm:items-center mb-6 gap-4">
