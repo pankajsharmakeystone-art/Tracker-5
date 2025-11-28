@@ -1,6 +1,11 @@
 import { getFirebaseServices } from './_lib/firebaseAdmin.js';
 import { DROPBOX_SESSIONS_COLLECTION, isSessionRecent, buildCallbackUrl } from './_lib/dropbox.js';
 
+const DROPBOX_SCOPES = [
+  'files.content.write',
+  'files.metadata.write',
+].join(' ');
+
 const allowOnlyGet = (req, res) => {
   if (req.method === 'OPTIONS') {
     res.status(204).end();
@@ -43,6 +48,7 @@ export default async function handler(req, res) {
     dropboxAuthorizeUrl.searchParams.set('token_access_type', 'offline');
     dropboxAuthorizeUrl.searchParams.set('redirect_uri', buildCallbackUrl(req));
     dropboxAuthorizeUrl.searchParams.set('state', `${sessionId}|${session.stateSecret}`);
+    dropboxAuthorizeUrl.searchParams.set('scope', DROPBOX_SCOPES);
 
     res.writeHead(302, { Location: dropboxAuthorizeUrl.toString() });
     res.end();
