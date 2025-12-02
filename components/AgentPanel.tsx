@@ -52,6 +52,15 @@ const AgentPanel: React.FC = () => {
     const [breakStartedAt, setBreakStartedAt] = useState<number | null>(null);
 
     const workLogRef = useRef<WorkLog | null>(null);
+    const notifyDesktopStatus = useCallback(async (status: 'working' | 'clocked_out' | 'manual_break') => {
+        try {
+            const desktopApi = (window as any).desktopAPI;
+            if (!desktopApi?.setAgentStatus) return;
+            await desktopApi.setAgentStatus(status);
+        } catch (err) {
+            console.error('[AgentPanel] Failed to notify desktop about status change', status, err);
+        }
+    }, []);
     useEffect(() => { workLogRef.current = workLog; }, [workLog]);
 
     const getMillis = useCallback((ts: any): number => {
@@ -242,7 +251,7 @@ const AgentPanel: React.FC = () => {
         setLoading(true);
         try {
             await performClockIn(userData.uid, activeTeamId, userData.displayName || 'Agent');
-            if ((window as any).desktopAPI?.setAgentStatus) (window as any).desktopAPI.setAgentStatus("working");
+            await notifyDesktopStatus('working');
         } catch (e) { setError('Clock in failed'); console.error(e); }
         finally { setLoading(false); }
     };
@@ -253,7 +262,7 @@ const AgentPanel: React.FC = () => {
         try {
             await performClockOut(userData.uid);
             setWorkLog(null);
-            if ((window as any).desktopAPI?.setAgentStatus) (window as any).desktopAPI.setAgentStatus("clocked_out");
+            await notifyDesktopStatus('clocked_out');
         } catch (e) { setError('Clock out failed'); }
         finally { setLoading(false); }
     };
@@ -261,36 +270,50 @@ const AgentPanel: React.FC = () => {
     const handleStartBreak = async () => {
         if (!workLog || !userData) return;
         setLoading(true);
-        const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
-        const newBreaks = [...(workLog.breaks || [])];
-        newBreaks.push({ startTime: Timestamp.now(), endTime: null });
+        try {
+            const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
+            const newBreaks = [...(workLog.breaks || [])];
+            newBreaks.push({ startTime: Timestamp.now(), endTime: null });
 
-        await updateWorkLog(workLog.id, {
-            status: 'on_break',
-            totalWorkSeconds: increment(dur),
-            lastEventTimestamp: serverTimestamp(),
-            breaks: newBreaks
-        });
-        await updateAgentStatus(userData.uid, 'break', { manualBreak: true, breakStartedAt: serverTimestamp() });
-        setLoading(false);
+            await updateWorkLog(workLog.id, {
+                status: 'on_break',
+                totalWorkSeconds: increment(dur),
+                lastEventTimestamp: serverTimestamp(),
+                breaks: newBreaks
+            });
+            await updateAgentStatus(userData.uid, 'break', { manualBreak: true, breakStartedAt: serverTimestamp() });
+            await notifyDesktopStatus('manual_break');
+        } catch (e) {
+            setError('Failed to start break');
+            console.error(e);
+        } finally {
+            setLoading(false);
+        }
     };
 
     const handleEndBreak = async () => {
         if (!workLog || !userData) return;
         setLoading(true);
         setShowTimeoutModal(false);
-        const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
-        const newBreaks = [...(workLog.breaks || [])];
-        if(newBreaks.length > 0) newBreaks[newBreaks.length - 1].endTime = Timestamp.now();
+        try {
+            const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
+            const newBreaks = [...(workLog.breaks || [])];
+            if(newBreaks.length > 0) newBreaks[newBreaks.length - 1].endTime = Timestamp.now();
 
-        await updateWorkLog(workLog.id, {
-            status: 'working',
-            totalBreakSeconds: increment(dur),
-            lastEventTimestamp: serverTimestamp(),
-            breaks: newBreaks
-        });
-        await updateAgentStatus(userData.uid, 'online', { manualBreak: false, breakStartedAt: deleteField() });
-        setLoading(false);
+            await updateWorkLog(workLog.id, {
+                status: 'working',
+                totalBreakSeconds: increment(dur),
+                lastEventTimestamp: serverTimestamp(),
+                breaks: newBreaks
+            });
+            await updateAgentStatus(userData.uid, 'online', { manualBreak: false, breakStartedAt: deleteField() });
+            await notifyDesktopStatus('working');
+        } catch (e) {
+            setError('Failed to end break');
+            console.error(e);
+        } finally {
+            setLoading(false);
+        }
     };
 
     if (loading && !workLog) return <Spinner />;

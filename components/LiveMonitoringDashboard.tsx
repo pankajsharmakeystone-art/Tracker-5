@@ -5,7 +5,6 @@ import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleS
 import { useAuth } from '../hooks/useAuth';
 import type { WorkLog } from '../types';
 import Spinner from './Spinner';
-import ActivitySheet from './ActivitySheet';
 import LiveStreamModal from './LiveStreamModal';
 
 interface Props {
@@ -39,24 +38,6 @@ const toDatetimeLocal = (timestamp: Timestamp | null | undefined) => {
     const pad = (n: number) => n.toString().padStart(2, '0');
     // Includes seconds for precision editing
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-};
-
-const ViewLogModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) => {
-    return (
-        <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex justify-center items-center p-4" aria-modal="true" role="dialog">
-            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] flex flex-col">
-                <div className="flex justify-between items-center mb-4 pb-4 border-b dark:border-gray-700">
-                    <h3 className="text-lg font-bold text-gray-900 dark:text-white">
-                        Activity Log: {log.userDisplayName}
-                    </h3>
-                    <button onClick={onClose} className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 text-2xl leading-none">&times;</button>
-                </div>
-                <div className="overflow-y-auto">
-                    <ActivitySheet workLog={log} />
-                </div>
-            </div>
-        </div>
-    );
 };
 
 const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) => {
@@ -189,7 +170,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const { userData } = useAuth();
     const [rawLogs, setRawLogs] = useState<WorkLog[]>([]);
     const [loading, setLoading] = useState(true);
-    const [selectedLog, setSelectedLog] = useState<WorkLog | null>(null);
     const [editingLog, setEditingLog] = useState<WorkLog | null>(null);
     const [liveStreamAgent, setLiveStreamAgent] = useState<{ uid: string; displayName: string; teamId?: string } | null>(null);
     const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
@@ -343,7 +323,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                     onClose={closeLiveStreamModal}
                 />
             )}
-            {selectedLog && <ViewLogModal log={selectedLog} onClose={() => setSelectedLog(null)} />}
             {editingLog && <EditTimeModal log={editingLog} onClose={() => setEditingLog(null)} />}
             
             <div className="mb-4 flex flex-col sm:flex-row justify-between items-center gap-4 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border dark:border-gray-700">
@@ -408,12 +387,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                     {formatDuration(agent.displayBreak)}
                                 </td>
                                 <td className="py-4 px-6 flex gap-2 items-center">
-                                    <button
-                                        onClick={() => setSelectedLog(agent)}
-                                        className="font-medium text-blue-600 dark:text-blue-500 hover:underline"
-                                    >
-                                        View
-                                    </button>
                                     <button
                                         onClick={() => setEditingLog(agent)}
                                         className="font-medium text-indigo-600 dark:text-indigo-400 hover:underline"

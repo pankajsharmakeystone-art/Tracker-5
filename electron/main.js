@@ -134,6 +134,7 @@ const POPUP_ICON_PATH = "/mnt/data/a35a616b-074d-4238-a09e-5dcb70efb649.png";
 // ---------- GLOBALS ----------
 let mainWindow = null;
 let tray = null;
+let isQuiting = false;
 let cachedAdminSettings = {};
 let currentUid = null;
 let commandUnsub = null;
@@ -243,6 +244,13 @@ function createMainWindow() {
   });
 
   mainWindow.on("closed", () => { mainWindow = null; });
+  mainWindow.on("close", (event) => {
+    if (!isQuiting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
+  });
 
   registerDevtoolsShortcuts(mainWindow);
 }
@@ -255,8 +263,8 @@ function createTray() {
     const image = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
     tray = new Tray(image || undefined);
     const menu = Menu.buildFromTemplate([
-      { label: "Open App", click: () => { if (mainWindow) mainWindow.show(); } },
-      { label: "Quit", click: () => app.quit() }
+      { label: "Open App", click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+      { label: "Quit", click: () => { isQuiting = true; app.quit(); } }
     ]);
     tray.setToolTip("Workforce Desktop");
     tray.setContextMenu(menu);
@@ -1430,6 +1438,10 @@ app.whenReady().then(() => {
   });
 
   scheduleAutoUpdateCheck();
+});
+
+app.on("before-quit", () => {
+  isQuiting = true;
 });
 
 app.on("will-quit", () => {

@@ -2,7 +2,7 @@
 import { doc, setDoc, getDoc, serverTimestamp, collection, query, where, getDocs, addDoc, limit, updateDoc, Timestamp, arrayUnion, increment, onSnapshot, deleteDoc, deleteField, orderBy } from 'firebase/firestore';
 import { db } from './firebase';
 import type { User as FirebaseUser } from 'firebase/auth';
-import type { UserData, Role, Team, WorkLog, MonthlySchedule, TeamSettings, AdminSettingsType, ShiftTime } from '../types';
+import type { UserData, Role, Team, WorkLog, MonthlySchedule, TeamSettings, AdminSettingsType, ShiftTime, ShiftEntry } from '../types';
 
 // --- User Management ---
 
@@ -633,10 +633,98 @@ export const streamScheduleForMonth = (teamId: string, year: number, month: numb
     return unsubscribe;
 };
 
+const isShiftEntryObject = (entry: ShiftEntry | undefined): entry is ShiftTime => {
+    return Boolean(entry && typeof entry === 'object' && 'startTime' in entry);
+};
+
+const normalizeShiftKey = (entry: ShiftEntry | undefined): string => {
+    if (!isShiftEntryObject(entry)) return '__NO_SHIFT__';
+    return `${entry.startTime}|${entry.endTime}`;
+};
+
+const getDateFromTimestampLike = (value: any): Date | null => {
+    if (!value) return null;
+    try {
+        if (value instanceof Timestamp) return value.toDate();
+        if (typeof value.toDate === 'function') return value.toDate();
+        if (value instanceof Date) return value;
+        return new Date(value);
+    } catch {
+        return null;
+    }
+};
+
+const computeLateMinutes = (shiftStart: string, clockIn: Timestamp | null | undefined): number => {
+    if (!shiftStart || !clockIn) return 0;
+    const clockInDate = getDateFromTimestampLike(clockIn);
+    if (!clockInDate) return 0;
+    const [hour, minute] = shiftStart.split(':').map(Number);
+    if (Number.isNaN(hour) || Number.isNaN(minute)) return 0;
+    const scheduledMinutes = hour * 60 + minute;
+    const actualMinutes = clockInDate.getHours() * 60 + clockInDate.getMinutes();
+    return Math.max(0, actualMinutes - scheduledMinutes);
+};
+
+const collectChangedScheduleSlots = (previous: MonthlySchedule | undefined, next: MonthlySchedule) => {
+    const changes: Array<{ userId: string; date: string; entry: ShiftEntry | undefined }> = [];
+    const userIds = new Set([
+        ...Object.keys(previous || {}),
+        ...Object.keys(next || {})
+    ]);
+
+    userIds.forEach((userId) => {
+        const prevDays = previous?.[userId] || {};
+        const nextDays = next?.[userId] || {};
+        const dates = new Set([
+            ...Object.keys(prevDays),
+            ...Object.keys(nextDays)
+        ]);
+
+        dates.forEach((date) => {
+            const prevEntry = prevDays[date];
+            const nextEntry = nextDays[date];
+            if (normalizeShiftKey(prevEntry) !== normalizeShiftKey(nextEntry)) {
+                changes.push({ userId, date, entry: nextEntry });
+            }
+        });
+    });
+
+    return changes;
+};
+
+const recalculateLateMinutesForSlot = async (userId: string, date: string, entry: ShiftEntry | undefined) => {
+    const logId = `${userId}-${date}`;
+    const logRef = doc(db, 'worklogs', logId);
+    const snapshot = await getDoc(logRef);
+    if (!snapshot.exists()) return;
+    const logData = snapshot.data() as WorkLog;
+    const updates: Record<string, any> = {};
+    if (isShiftEntryObject(entry)) {
+        updates.scheduledStart = entry.startTime;
+        updates.scheduledEnd = entry.endTime ?? null;
+        updates.lateMinutes = computeLateMinutes(entry.startTime, logData.clockInTime as Timestamp | undefined);
+    } else {
+        updates.scheduledStart = null;
+        updates.scheduledEnd = null;
+        updates.lateMinutes = 0;
+    }
+    await updateDoc(logRef, updates);
+};
+
+const reconcileLateMinutesForScheduleChanges = async (previous: MonthlySchedule | undefined, next: MonthlySchedule) => {
+    const changes = collectChangedScheduleSlots(previous, next);
+    for (const change of changes) {
+        await recalculateLateMinutesForSlot(change.userId, change.date, change.entry);
+    }
+};
+
 export const updateScheduleForMonth = async (teamId: string, year: number, month: number, scheduleData: MonthlySchedule) => {
     const monthStr = `${year}-${String(month).padStart(2, '0')}`;
     const scheduleDocRef = doc(db, 'schedules', `${teamId}-${monthStr}`);
+    const previousSnapshot = await getDoc(scheduleDocRef);
+    const previousData = previousSnapshot.exists() ? (previousSnapshot.data() as MonthlySchedule) : undefined;
     await setDoc(scheduleDocRef, scheduleData, { merge: true });
+    await reconcileLateMinutesForScheduleChanges(previousData, scheduleData);
 }
 
 export const streamGlobalAdminSettings = (callback: (settings: AdminSettingsType | null) => void) => {
