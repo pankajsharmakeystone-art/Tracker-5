@@ -2,10 +2,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useAgentLiveStream } from '../hooks/useAgentLiveStream';
-import { updateWorkLog, getTeamById, streamActiveWorkLog, updateAgentStatus, streamGlobalAdminSettings, streamScheduleForMonth, updateAgentAutoClockOut, performClockOut, performClockIn, isSessionStale, closeStaleSession } from '../services/db';
+import { updateWorkLog, getTeamById, streamActiveWorkLog, updateAgentStatus, streamGlobalAdminSettings, performClockOut, performClockIn, isSessionStale, closeStaleSession } from '../services/db';
 import { serverTimestamp, increment, Timestamp, doc, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import type { WorkLog, Team, TeamSettings, AdminSettingsType, MonthlySchedule } from '../types';
+import type { WorkLog, Team, TeamSettings, AdminSettingsType } from '../types';
 import Spinner from './Spinner';
 import ActivitySheet from './ActivitySheet';
 import AgentScheduleView from './AgentScheduleView';
@@ -43,7 +43,6 @@ const AgentPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useState('timeClock');
 
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
-    const [monthlySchedule, setMonthlySchedule] = useState<MonthlySchedule>({});
     const [activeTeamId, setActiveTeamId] = useState<string | null>(null);
     const [availableTeams, setAvailableTeams] = useState<Team[]>([]);
 
@@ -114,34 +113,6 @@ const AgentPanel: React.FC = () => {
     // Global Settings
     useEffect(() => streamGlobalAdminSettings(setAdminSettings), []);
 
-    // Schedule Sync
-    useEffect(() => {
-        if (!activeTeamId) return;
-        const today = new Date();
-        return streamScheduleForMonth(activeTeamId, today.getFullYear(), today.getMonth() + 1, setMonthlySchedule);
-    }, [activeTeamId]);
-
-    // Auto Clock Out Sync
-    useEffect(() => {
-        if (!userData || !adminSettings) return;
-        const syncAutoClockOut = async () => {
-             const today = new Date();
-             const dateString = today.toISOString().split('T')[0];
-             const userSchedule = monthlySchedule[userData.uid];
-             let shiftEndTime = "";
-             let shouldEnable = false;
-
-             if (adminSettings.autoClockOutEnabled && userSchedule) {
-                 const todayShift = userSchedule[dateString];
-                 if (todayShift && typeof todayShift === 'object' && 'endTime' in todayShift) {
-                     shiftEndTime = todayShift.endTime;
-                     shouldEnable = true;
-                 }
-             }
-             await updateAgentAutoClockOut(userData.uid, { enabled: shouldEnable, shiftEndTime });
-        };
-        syncAutoClockOut();
-    }, [userData, adminSettings, monthlySchedule]);
 
     // Local Timer Calculation
     useEffect(() => {

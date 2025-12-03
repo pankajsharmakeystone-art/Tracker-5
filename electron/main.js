@@ -146,7 +146,11 @@ let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 
 let autoClockOutInterval = null;
-let lastAutoClockOutDate = null; // YYYY-MM-DD to prevent multiple auto clockouts per day
+let lastAutoClockOutTargetKey = null;
+let agentStatusUnsub = null; // remote Firestore watch for agentStatus
+let autoClockConfigUnsub = null;
+let autoClockSlots = {};
+let currentShiftDate = null;
 
 // Dropbox token management
 let cachedDropboxAccessToken = null;
@@ -715,6 +719,115 @@ function stopAgentStatusLoop() {
   if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
 }
 
+function stopAgentStatusWatch() {
+  if (agentStatusUnsub) {
+    try { agentStatusUnsub(); } catch (e) { log("agentStatus watch cleanup failed", e?.message || e); }
+    agentStatusUnsub = null;
+  }
+}
+
+function startAgentStatusWatch(uid) {
+  try {
+    stopAgentStatusWatch();
+    if (!uid) return;
+    const docRef = db.collection('agentStatus').doc(uid);
+    agentStatusUnsub = docRef.onSnapshot((snap) => {
+      if (!snap.exists) return;
+      if (snap.metadata?.hasPendingWrites) return; // skip local echoes
+      const data = snap.data() || {};
+      const remoteStatus = data.status;
+      if (!remoteStatus) return;
+
+      if ((remoteStatus === 'offline' || remoteStatus === 'clocked_out') && (agentClockedIn || isRecordingActive)) {
+        log('[agentStatusWatch] remote status is', remoteStatus, '- forcing local stop');
+        applyAgentStatus(remoteStatus === 'clocked_out' ? 'clocked_out' : 'offline').catch((err) => {
+          console.error('[agentStatusWatch] failed to apply remote status', err?.message || err);
+        });
+      }
+    }, (error) => {
+      console.error('[agentStatusWatch] listener error', error?.message || error);
+    });
+  } catch (e) {
+    console.error('[startAgentStatusWatch] failed', e?.message || e);
+  }
+}
+
+function stopAutoClockConfigWatch() {
+  if (autoClockConfigUnsub) {
+    try { autoClockConfigUnsub(); } catch (e) { log("autoClockConfig watch cleanup failed", e?.message || e); }
+    autoClockConfigUnsub = null;
+  }
+}
+
+function startAutoClockConfigWatch(uid) {
+  try {
+    stopAutoClockConfigWatch();
+    if (!uid) return;
+    const docRef = db.collection('autoClockConfigs').doc(uid);
+    autoClockConfigUnsub = docRef.onSnapshot((snap) => {
+      autoClockSlots = snap.exists ? (snap.data() || {}) : {};
+      lastAutoClockOutTargetKey = null;
+    }, (error) => {
+      console.error('[autoClockConfigWatch] listener error', error?.message || error);
+    });
+  } catch (e) {
+    console.error('[startAutoClockConfigWatch] failed', e?.message || e);
+  }
+}
+
+const toScheduleDateKey = (date = new Date()) => date.toISOString().split('T')[0];
+
+const parseTimeString = (timeStr) => {
+  if (!timeStr) return null;
+  const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  return { hour, minute };
+};
+
+const dateKeyToLocalDate = (key) => {
+  if (!key) return null;
+  const parts = key.split('-').map(Number);
+  if (parts.length !== 3 || parts.some((p) => Number.isNaN(p))) return null;
+  return new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0);
+};
+
+const buildDateFromSlot = (slot, dateKey) => {
+  if (!slot?.shiftEndTime) return null;
+  const timeParts = parseTimeString(slot.shiftEndTime);
+  if (!timeParts) return null;
+  const base = dateKeyToLocalDate(dateKey);
+  if (!base) return null;
+  if (slot.isOvernightShift) base.setDate(base.getDate() + 1);
+  base.setHours(timeParts.hour, timeParts.minute, 0, 0);
+  return base;
+};
+
+const buildDateFromTime = (now, timeStr) => {
+  const timeParts = parseTimeString(timeStr);
+  if (!timeParts) return null;
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), timeParts.hour, timeParts.minute, 0, 0);
+};
+
+function getAutoClockTargetDate(now = new Date()) {
+  if (!cachedAdminSettings?.autoClockOutEnabled) return null;
+  if (!currentUid || !agentClockedIn) return null;
+
+  if (currentShiftDate) {
+    const slot = autoClockSlots?.[currentShiftDate];
+    const slotTarget = buildDateFromSlot(slot, currentShiftDate);
+    if (slotTarget) return slotTarget;
+  }
+
+  if (cachedAdminSettings?.autoClockOutTime) {
+    return buildDateFromTime(now, cachedAdminSettings.autoClockOutTime);
+  }
+
+  return null;
+}
+
 // ---------- AUTO CLOCK-OUT WATCHER ----------
 function startAutoClockOutWatcher() {
   try {
@@ -722,32 +835,14 @@ function startAutoClockOutWatcher() {
     // check every 60 seconds
     autoClockOutInterval = setInterval(async () => {
       try {
-        if (!cachedAdminSettings?.autoClockOutEnabled) return;
-        if (!cachedAdminSettings?.autoClockOutTime) return;
-        if (!currentUid) return;
-        if (!agentClockedIn) return;
-
-        // parse admin time "HH:mm" (24h)
-        const t = String(cachedAdminSettings.autoClockOutTime || '').trim();
-        if (!/^\d{1,2}:\d{2}$/.test(t)) return;
-        const parts = t.split(':');
-        const hr = Number(parts[0]);
-        const min = Number(parts[1]);
-        if (isNaN(hr) || isNaN(min)) return;
-
+        const target = getAutoClockTargetDate();
+        if (!target) return;
         const now = new Date();
-        const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hr, min, 0, 0);
-
-        // allow trigger if now >= target
         if (now >= target) {
-          const todayStr = now.toISOString().split('T')[0];
-          if (lastAutoClockOutDate === todayStr) {
-            // already auto clocked out today
-            return;
-          }
-          // perform auto clock out
+          const key = target.toISOString();
+          if (lastAutoClockOutTargetKey === key) return;
           await performAutoClockOut();
-          lastAutoClockOutDate = todayStr;
+          lastAutoClockOutTargetKey = key;
         }
       } catch (e) {
         console.error("[autoClockOutWatcher] error", e);
@@ -808,6 +903,8 @@ async function performAutoClockOut() {
     // keep currentUid as-is but mark agentClockedIn false
     agentClockedIn = false;
     stopAgentStatusLoop();
+    currentShiftDate = null;
+    lastAutoClockOutTargetKey = null;
 
   } catch (e) {
     console.error("[performAutoClockOut] error", e);
@@ -848,6 +945,8 @@ ipcMain.handle("register-uid", async (_, payload) => {
     }
 
     currentUid = uid;
+    currentShiftDate = null;
+    lastAutoClockOutTargetKey = null;
 
     // fetch and cache displayName for nicer Dropbox folders
     try {
@@ -860,6 +959,8 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     startCommandsWatch(uid);
     startAgentStatusLoop(uid); // loop will only do idle logic if agentClockedIn === true
+    startAgentStatusWatch(uid);
+    startAutoClockConfigWatch(uid);
     await flushPendingAgentStatuses();
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
@@ -874,6 +975,8 @@ ipcMain.handle("unregister-uid", async () => {
   try {
     if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
     stopAgentStatusLoop();
+    stopAgentStatusWatch();
+    stopAutoClockConfigWatch();
     pendingAgentStatuses.length = 0;
     if (currentUid) {
       await db.collection("agentStatus").doc(currentUid).set({ isDesktopConnected: false, status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
@@ -889,6 +992,8 @@ ipcMain.handle("unregister-uid", async () => {
     currentUid = null;
     agentClockedIn = false;
     isRecordingActive = false;
+    currentShiftDate = null;
+    lastAutoClockOutTargetKey = null;
     try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
     return { success: true };
   } catch(e){
@@ -927,6 +1032,8 @@ async function applyAgentStatus(status) {
   if (status === 'clocked_out' || status === 'offline') {
     agentClockedIn = false;
     stopAgentStatusLoop();
+    currentShiftDate = null;
+    lastAutoClockOutTargetKey = null;
 
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
@@ -946,6 +1053,11 @@ async function applyAgentStatus(status) {
 
   if (status === 'working' || status === 'online') {
     agentClockedIn = true;
+    const dateKey = toScheduleDateKey();
+    if (currentShiftDate !== dateKey) {
+      currentShiftDate = dateKey;
+      lastAutoClockOutTargetKey = null;
+    }
     startAgentStatusLoop(currentUid);
 
     const safeSettings = cachedAdminSettings || {};
@@ -1207,9 +1319,13 @@ ipcMain.handle("clock-out-and-sign-out", async () => {
 
       // unregister user on desktop
       if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
+      stopAgentStatusWatch();
+      stopAutoClockConfigWatch();
       currentUid = null;
       agentClockedIn = false;
       isRecordingActive = false;
+      currentShiftDate = null;
+      lastAutoClockOutTargetKey = null;
       try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[clock-out-and-sign-out] signOut failed", signOutErr?.message || signOutErr); }
 
       // ensure renderer clears any locally-stored desktop UID to prevent auto login

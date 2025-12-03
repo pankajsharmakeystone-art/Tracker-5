@@ -665,6 +665,26 @@ const computeLateMinutes = (shiftStart: string, clockIn: Timestamp | null | unde
     return Math.max(0, actualMinutes - scheduledMinutes);
 };
 
+const computeIsOvernightShift = (entry: ShiftEntry | undefined): boolean => {
+    if (!isShiftEntryObject(entry)) return false;
+    if (!entry.endTime) return false;
+    return entry.endTime < entry.startTime;
+};
+
+const persistAutoClockSlot = async (userId: string, date: string, entry: ShiftEntry | undefined) => {
+    const ref = doc(db, 'autoClockConfigs', userId);
+    if (isShiftEntryObject(entry)) {
+        const slot = {
+            shiftStartTime: entry.startTime,
+            shiftEndTime: entry.endTime ?? null,
+            isOvernightShift: computeIsOvernightShift(entry)
+        };
+        await setDoc(ref, { [date]: slot }, { merge: true });
+    } else {
+        await setDoc(ref, { [date]: deleteField() }, { merge: true });
+    }
+};
+
 const collectChangedScheduleSlots = (previous: MonthlySchedule | undefined, next: MonthlySchedule) => {
     const changes: Array<{ userId: string; date: string; entry: ShiftEntry | undefined }> = [];
     const userIds = new Set([
@@ -703,10 +723,12 @@ const recalculateLateMinutesForSlot = async (userId: string, date: string, entry
         updates.scheduledStart = entry.startTime;
         updates.scheduledEnd = entry.endTime ?? null;
         updates.lateMinutes = computeLateMinutes(entry.startTime, logData.clockInTime as Timestamp | undefined);
+        updates.isOvernightShift = computeIsOvernightShift(entry);
     } else {
         updates.scheduledStart = null;
         updates.scheduledEnd = null;
         updates.lateMinutes = 0;
+        updates.isOvernightShift = false;
     }
     await updateDoc(logRef, updates);
 };
@@ -715,6 +737,7 @@ const reconcileLateMinutesForScheduleChanges = async (previous: MonthlySchedule 
     const changes = collectChangedScheduleSlots(previous, next);
     for (const change of changes) {
         await recalculateLateMinutesForSlot(change.userId, change.date, change.entry);
+        await persistAutoClockSlot(change.userId, change.date, change.entry);
     }
 };
 
@@ -741,11 +764,6 @@ export const streamGlobalAdminSettings = (callback: (settings: AdminSettingsType
 export const updateGlobalAdminSettings = async (settings: Partial<AdminSettingsType>) => {
     const settingsRef = doc(db, 'adminSettings', 'global');
     await setDoc(settingsRef, settings, { merge: true });
-};
-
-export const updateAgentAutoClockOut = async (uid: string, config: { enabled: boolean, shiftEndTime: string }) => {
-    const docRef = doc(db, 'adminSettings', 'agents');
-    await setDoc(docRef, { [uid]: { autoClockOut: config } }, { merge: true });
 };
 
 export const updateAgentStatus = async (uid: string, status: 'online' | 'break' | 'offline', additionalData: Record<string, any> = {}) => {
