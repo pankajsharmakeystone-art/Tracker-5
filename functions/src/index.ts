@@ -5,9 +5,25 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import fetch from "node-fetch";
 import * as crypto from "crypto";
 import type { Response } from "express";
+import { DateTime } from "luxon";
 
 admin.initializeApp();
 const db = admin.firestore();
+const SHIFT_TIMEZONE = "Asia/Kolkata";
+
+const buildShiftBoundary = (logStartDate: Date, timeStr: string | undefined, useOvernight: boolean) => {
+  if (!timeStr) return null;
+  const [hour, minute] = timeStr.split(":").map(Number);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+
+  const base = DateTime.fromJSDate(logStartDate, { zone: SHIFT_TIMEZONE });
+  const referenceDay = useOvernight ? base.plus({ days: 1 }) : base;
+
+  return referenceDay
+    .set({ hour, minute, second: 0, millisecond: 0 })
+    .toUTC()
+    .toJSDate();
+};
 
 const inferProjectId = (): string => {
   if (process.env.GCLOUD_PROJECT) return process.env.GCLOUD_PROJECT;
@@ -23,6 +39,17 @@ const inferProjectId = (): string => {
   return admin.app().options.projectId || "tracker-5";
 };
 
+      const autoClockConfigCache = new Map<string, Record<string, any>>();
+
+      const getAutoClockSlot = async (userId: string, dateKey: string) => {
+        if (!userId) return null;
+        if (!autoClockConfigCache.has(userId)) {
+          const snap = await db.collection("autoClockConfigs").doc(userId).get();
+          autoClockConfigCache.set(userId, snap.exists ? (snap.data() as Record<string, any>) : {});
+        }
+        const config = autoClockConfigCache.get(userId) || {};
+        return config?.[dateKey] || null;
+      };
 const PROJECT_ID = inferProjectId();
 const FUNCTIONS_REGION = "us-central1";
 const FUNCTION_BASE_URL = `https://${FUNCTIONS_REGION}-${PROJECT_ID}.cloudfunctions.net`;
@@ -31,48 +58,53 @@ const DROPBOX_CALLBACK_URL = `${FUNCTION_BASE_URL}/dropboxOauthCallback`;
 const allowCors = (res: Response) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
-};
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data();
+        if (!data?.date) continue;
 
-const DROPBOX_SESSIONS_COLLECTION = "dropboxOauthSessions";
+        const logStartDate: Date = data.date.toDate();
+        const dateKey = logStartDate.toISOString().split('T')[0];
+        const slot = await getAutoClockSlot(data.userId, dateKey);
+        const shiftEndTime: string | undefined = slot?.shiftEndTime || data.scheduledEnd;
+        if (!shiftEndTime) continue;
 
-interface DropboxSessionDoc {
-  uid: string;
-  appKey: string;
-  appSecret: string;
-  stateSecret: string;
-  createdAt: admin.firestore.Timestamp;
-  status: "pending" | "complete" | "error";
-  completedAt?: admin.firestore.Timestamp;
-}
+        const useOvernight = slot?.isOvernightShift ?? shouldTreatAsOvernight(data);
+        const shiftEndDate = buildShiftBoundary(logStartDate, shiftEndTime, useOvernight);
+        if (!shiftEndDate) continue;
 
-const isRecent = (timestamp: admin.firestore.Timestamp | undefined, maxMinutes = 15) => {
-  if (!timestamp) return false;
-  const created = timestamp.toDate().getTime();
-  return Date.now() - created < maxMinutes * 60 * 1000;
-};
+        if (now > shiftEndDate) {
+          console.log(`Auto-clocking out ${docSnap.id}. End: ${shiftEndDate.toISOString()}`);
 
-const ensureAdminUser = async (uid: string) => {
-  const userSnap = await db.collection("users").doc(uid).get();
-  if (!userSnap.exists) {
-    throw new functions.https.HttpsError("permission-denied", "User profile not found.");
-  }
-  const data = userSnap.data();
-  if (data?.role !== "admin") {
-    throw new functions.https.HttpsError("permission-denied", "Admin privileges required.");
-  }
-  return data;
-};
+          batch.update(db.collection("worklogs").doc(docSnap.id), {
+            status: "clocked_out",
+            clockOutTime: admin.firestore.Timestamp.fromDate(shiftEndDate),
+            lastEventTimestamp: admin.firestore.FieldValue.serverTimestamp()
+          });
 
-const parseBearerToken = (header?: string | string[]) => {
-  if (!header) return null;
-  const value = Array.isArray(header) ? header[0] : header;
-  const match = value.match(/^Bearer (.*)$/i);
-  return match ? match[1] : null;
-};
+          batch.update(db.collection("agentStatus").doc(data.userId), {
+          status: "offline",
+          manualBreak: false,
+          breakStartedAt: admin.firestore.FieldValue.delete()
+          });
 
+          batch.update(db.collection("users").doc(data.userId), {
+          isLoggedIn: false,
+          activeSession: admin.firestore.FieldValue.delete()
+          });
+
+          count++;
+        }
+      }
 const sendHtml = (res: Response, content: string, status = 200) => {
   res.status(status).set("Content-Type", "text/html; charset=utf-8").send(`<!doctype html><html><head><title>Dropbox Authorization</title><style>body{font-family:Arial,sans-serif;background:#f7f7f7;margin:0;padding:40px;color:#111;} .card{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;box-shadow:0 10px 35px rgba(0,0,0,0.08);} h1{font-size:22px;margin-bottom:18px;} p{line-height:1.5;margin:12px 0;} .success{color:#0f9d58;} .error{color:#d93025;} a{color:#1a73e8;} button{border:none;background:#1a73e8;color:#fff;padding:12px 18px;border-radius:8px;font-size:15px;cursor:pointer;margin-top:20px;}</style></head><body><div class="card">${content}</div></body></html>`);
+};
+
+const shouldTreatAsOvernight = (logData: any): boolean => {
+  if (logData?.isOvernightShift === true) return true;
+  const start = typeof logData?.scheduledStart === "string" ? logData.scheduledStart : "";
+  const end = typeof logData?.scheduledEnd === "string" ? logData.scheduledEnd : "";
+  if (!start || !end) return false;
+  return end < start;
 };
 
 export const issueDesktopToken = functions
@@ -297,7 +329,7 @@ export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
       
       // Rule N1 Exception: Overnight shifts are allowed to cross midnight.
       // They will be closed by `autoClockOutAtShiftEnd` or manual action.
-      if (data.isOvernightShift === true) {
+        if (shouldTreatAsOvernight(data)) {
           console.log(`Skipping overnight shift: ${doc.id}`);
           return; 
       }
@@ -349,28 +381,16 @@ export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async (event
       const batch = db.batch();
       let count = 0;
       
-      const parseTime = (dateObj: Date, timeStr: string) => {
-          const [hh, mm] = timeStr.split(":").map(Number);
-          const newDate = new Date(dateObj);
-          newDate.setHours(hh, mm, 0, 0);
-          return newDate;
-      };
-
       snapshot.docs.forEach((doc) => {
           const data = doc.data();
-          if (!data.scheduledEnd || !data.date) return;
+            if (!data.scheduledEnd || !data.date) return;
 
-          let shiftEndDate: Date;
-          const logStartDate = data.date.toDate();
+            const logStartDate = data.date.toDate();
+            const scheduledEnd = data.scheduledEnd as string;
 
-          // Correctly calculate end time based on shift type
-          if (data.isOvernightShift) {
-              const nextDay = new Date(logStartDate);
-              nextDay.setDate(nextDay.getDate() + 1);
-              shiftEndDate = parseTime(nextDay, data.scheduledEnd);
-          } else {
-              shiftEndDate = parseTime(logStartDate, data.scheduledEnd);
-          }
+            // Correctly calculate end time based on shift type
+            const shiftEndDate = buildShiftBoundary(logStartDate, scheduledEnd, shouldTreatAsOvernight(data));
+            if (!shiftEndDate) return;
 
           // Buffer: Allow 15 mins past shift end? Strict for now.
           if (now > shiftEndDate) {
