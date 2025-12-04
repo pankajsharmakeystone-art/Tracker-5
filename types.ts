@@ -36,6 +36,7 @@ export interface WorkLog {
     lateMinutes?: number;
     scheduledStart?: string | null;
     scheduledEnd?: string | null;
+    isOvernightShift?: boolean;
 }
 
 export interface TeamSettings {

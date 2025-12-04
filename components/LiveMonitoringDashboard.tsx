@@ -93,19 +93,31 @@ const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
     return { manualSeconds, idleSeconds };
 };
 
-const calculateLateMinutes = (scheduledStart?: string | null, startDate?: Date | null, timezone?: string) => {
+const OVERNIGHT_THRESHOLD_MINUTES = 12 * 60;
+
+const calculateLateMinutes = (
+    scheduledStart?: string | null,
+    startDate?: Date | null,
+    timezone?: string,
+    isOvernightShift?: boolean
+) => {
     if (!scheduledStart || !startDate) return 0;
     try {
         const [hour, minute] = scheduledStart.split(':').map(Number);
         if (Number.isNaN(hour) || Number.isNaN(minute)) return 0;
         const zone = timezone || 'UTC';
         const actual = DateTime.fromJSDate(startDate).setZone(zone, { keepLocalTime: false });
-        let scheduled = actual.set({ hour, minute, second: 0, millisecond: 0 });
-        if (actual < scheduled) {
-            scheduled = scheduled.minus({ days: 1 });
+        const scheduledSameDay = actual.set({ hour, minute, second: 0, millisecond: 0 });
+
+        if (actual < scheduledSameDay) {
+            if (!isOvernightShift) return 0;
+            const leadMinutes = scheduledSameDay.diff(actual, 'minutes').minutes;
+            if (leadMinutes <= OVERNIGHT_THRESHOLD_MINUTES) return 0;
+            const previousDayStart = scheduledSameDay.minus({ days: 1 });
+            return Math.max(0, actual.diff(previousDayStart, 'minutes').minutes);
         }
-        const diff = actual.diff(scheduled, 'minutes').minutes;
-        return Math.max(0, diff);
+
+        return Math.max(0, actual.diff(scheduledSameDay, 'minutes').minutes);
     } catch {
         return 0;
     }
@@ -182,7 +194,12 @@ const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) 
             updates.totalBreakSeconds = newTotalBreakSeconds;
 
             if (log.scheduledStart) {
-                updates.lateMinutes = calculateLateMinutes(log.scheduledStart, startDate, timezone);
+                updates.lateMinutes = calculateLateMinutes(
+                    log.scheduledStart,
+                    startDate,
+                    timezone,
+                    log.isOvernightShift === true
+                );
             }
 
             // If we are setting an end time, ensure status is clocked_out

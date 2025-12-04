@@ -370,7 +370,7 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
             }
 
             if (scheduledStart) {
-                lateMinutes = calculateLateMinutesForDateTime(scheduledStart, nowZoned);
+                lateMinutes = calculateLateMinutesForDateTime(scheduledStart, nowZoned, isOvernightShift);
             }
         }
     } catch (e) {
@@ -676,21 +676,40 @@ const getDateFromTimestampLike = (value: any): Date | null => {
     }
 };
 
-const calculateLateMinutesForDateTime = (shiftStart: string, dateTime: DateTime | null): number => {
+const OVERNIGHT_THRESHOLD_MINUTES = 12 * 60;
+
+const calculateLateMinutesForDateTime = (
+    shiftStart: string,
+    dateTime: DateTime | null,
+    isOvernightShift = false
+): number => {
     if (!shiftStart || !dateTime) return 0;
     const [hour, minute] = shiftStart.split(':').map(Number);
     if (Number.isNaN(hour) || Number.isNaN(minute)) return 0;
-    const scheduledMinutes = hour * 60 + minute;
-    const actualMinutes = dateTime.hour * 60 + dateTime.minute;
-    return Math.max(0, actualMinutes - scheduledMinutes);
+    const scheduledSameDay = dateTime.set({ hour, minute, second: 0, millisecond: 0 });
+
+    if (dateTime < scheduledSameDay) {
+        if (!isOvernightShift) return 0;
+        const leadMinutes = scheduledSameDay.diff(dateTime, 'minutes').minutes;
+        if (leadMinutes <= OVERNIGHT_THRESHOLD_MINUTES) return 0;
+        const previousDayStart = scheduledSameDay.minus({ days: 1 });
+        return Math.max(0, dateTime.diff(previousDayStart, 'minutes').minutes);
+    }
+
+    return Math.max(0, dateTime.diff(scheduledSameDay, 'minutes').minutes);
 };
 
-const computeLateMinutes = (shiftStart: string, clockIn: Timestamp | null | undefined, timezone: string): number => {
+const computeLateMinutes = (
+    shiftStart: string,
+    clockIn: Timestamp | null | undefined,
+    timezone: string,
+    isOvernightShift = false
+): number => {
     if (!shiftStart || !clockIn) return 0;
     const clockInDate = getDateFromTimestampLike(clockIn);
     if (!clockInDate) return 0;
     const zoned = DateTime.fromJSDate(clockInDate).setZone(timezone, { keepLocalTime: false });
-    return calculateLateMinutesForDateTime(shiftStart, zoned);
+    return calculateLateMinutesForDateTime(shiftStart, zoned, isOvernightShift);
 };
 
 const computeIsOvernightShift = (entry: ShiftEntry | undefined): boolean => {
@@ -749,10 +768,16 @@ const recalculateLateMinutesForSlot = async (userId: string, date: string, entry
     const logData = snapshot.data() as WorkLog;
     const updates: Record<string, any> = {};
     if (isShiftEntryObject(entry)) {
+        const overnight = computeIsOvernightShift(entry);
         updates.scheduledStart = entry.startTime;
         updates.scheduledEnd = entry.endTime ?? null;
-        updates.lateMinutes = computeLateMinutes(entry.startTime, logData.clockInTime as Timestamp | undefined, timezone);
-        updates.isOvernightShift = computeIsOvernightShift(entry);
+        updates.lateMinutes = computeLateMinutes(
+            entry.startTime,
+            logData.clockInTime as Timestamp | undefined,
+            timezone,
+            overnight
+        );
+        updates.isOvernightShift = overnight;
     } else {
         updates.scheduledStart = null;
         updates.scheduledEnd = null;
