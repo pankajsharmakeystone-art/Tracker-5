@@ -4,6 +4,22 @@ import { db } from './firebase';
 import type { User as FirebaseUser } from 'firebase/auth';
 import type { UserData, Role, Team, WorkLog, MonthlySchedule, TeamSettings, AdminSettingsType, ShiftTime, ShiftEntry } from '../types';
 
+const DEFAULT_ORGANIZATION_TIMEZONE = 'Asia/Kolkata';
+
+const readOrganizationTimezone = async (): Promise<string> => {
+    try {
+        const settingsRef = doc(db, 'adminSettings', 'global');
+        const snap = await getDoc(settingsRef);
+        if (snap.exists()) {
+            const data = snap.data() as AdminSettingsType;
+            return data.organizationTimezone || DEFAULT_ORGANIZATION_TIMEZONE;
+        }
+    } catch (error) {
+        console.error('Failed to load organization timezone', error);
+    }
+    return DEFAULT_ORGANIZATION_TIMEZONE;
+};
+
 // --- User Management ---
 
 export const createUserDocument = async (userAuth: FirebaseUser, additionalData: { displayName?: string; role: Role; teamId?: string; teamIds?: string[] }) => {
@@ -671,13 +687,14 @@ const computeIsOvernightShift = (entry: ShiftEntry | undefined): boolean => {
     return entry.endTime < entry.startTime;
 };
 
-const persistAutoClockSlot = async (userId: string, date: string, entry: ShiftEntry | undefined) => {
+const persistAutoClockSlot = async (userId: string, date: string, entry: ShiftEntry | undefined, timezone: string) => {
     const ref = doc(db, 'autoClockConfigs', userId);
     if (isShiftEntryObject(entry)) {
         const slot = {
             shiftStartTime: entry.startTime,
             shiftEndTime: entry.endTime ?? null,
-            isOvernightShift: computeIsOvernightShift(entry)
+            isOvernightShift: computeIsOvernightShift(entry),
+            timezone
         };
         await setDoc(ref, { [date]: slot }, { merge: true });
     } else {
@@ -733,28 +750,39 @@ const recalculateLateMinutesForSlot = async (userId: string, date: string, entry
     await updateDoc(logRef, updates);
 };
 
-const reconcileLateMinutesForScheduleChanges = async (previous: MonthlySchedule | undefined, next: MonthlySchedule) => {
+const reconcileLateMinutesForScheduleChanges = async (previous: MonthlySchedule | undefined, next: MonthlySchedule, timezone: string) => {
     const changes = collectChangedScheduleSlots(previous, next);
     for (const change of changes) {
         await recalculateLateMinutesForSlot(change.userId, change.date, change.entry);
-        await persistAutoClockSlot(change.userId, change.date, change.entry);
+        await persistAutoClockSlot(change.userId, change.date, change.entry, timezone);
     }
 };
 
-export const updateScheduleForMonth = async (teamId: string, year: number, month: number, scheduleData: MonthlySchedule) => {
+export const updateScheduleForMonth = async (
+    teamId: string,
+    year: number,
+    month: number,
+    scheduleData: MonthlySchedule,
+    options: { timezone?: string } = {}
+) => {
     const monthStr = `${year}-${String(month).padStart(2, '0')}`;
     const scheduleDocRef = doc(db, 'schedules', `${teamId}-${monthStr}`);
     const previousSnapshot = await getDoc(scheduleDocRef);
     const previousData = previousSnapshot.exists() ? (previousSnapshot.data() as MonthlySchedule) : undefined;
     await setDoc(scheduleDocRef, scheduleData, { merge: true });
-    await reconcileLateMinutesForScheduleChanges(previousData, scheduleData);
+    const timezone = options.timezone || await readOrganizationTimezone();
+    await reconcileLateMinutesForScheduleChanges(previousData, scheduleData, timezone);
 }
 
 export const streamGlobalAdminSettings = (callback: (settings: AdminSettingsType | null) => void) => {
     const settingsRef = doc(db, 'adminSettings', 'global');
     return onSnapshot(settingsRef, (docSnap) => {
         if (docSnap.exists()) {
-            callback(docSnap.data() as AdminSettingsType);
+            const data = docSnap.data() as AdminSettingsType;
+            callback({
+                ...data,
+                organizationTimezone: data.organizationTimezone || DEFAULT_ORGANIZATION_TIMEZONE
+            });
         } else {
             callback(null);
         }
@@ -763,7 +791,13 @@ export const streamGlobalAdminSettings = (callback: (settings: AdminSettingsType
 
 export const updateGlobalAdminSettings = async (settings: Partial<AdminSettingsType>) => {
     const settingsRef = doc(db, 'adminSettings', 'global');
-    await setDoc(settingsRef, settings, { merge: true });
+    const payload: Partial<AdminSettingsType> = { ...settings };
+    if (Object.prototype.hasOwnProperty.call(payload, 'organizationTimezone')) {
+        if (!payload.organizationTimezone) {
+            payload.organizationTimezone = DEFAULT_ORGANIZATION_TIMEZONE;
+        }
+    }
+    await setDoc(settingsRef, payload, { merge: true });
 };
 
 export const updateAgentStatus = async (uid: string, status: 'online' | 'break' | 'offline', additionalData: Record<string, any> = {}) => {

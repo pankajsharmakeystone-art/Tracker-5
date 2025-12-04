@@ -51,6 +51,7 @@ const AgentPanel: React.FC = () => {
     const [breakStartedAt, setBreakStartedAt] = useState<number | null>(null);
 
     const workLogRef = useRef<WorkLog | null>(null);
+    const lastDesktopSyncRef = useRef<'working' | 'clocked_out' | 'manual_break' | null>(null);
     const notifyDesktopStatus = useCallback(async (status: 'working' | 'clocked_out' | 'manual_break') => {
         try {
             const desktopApi = (window as any).desktopAPI;
@@ -61,6 +62,21 @@ const AgentPanel: React.FC = () => {
         }
     }, []);
     useEffect(() => { workLogRef.current = workLog; }, [workLog]);
+
+    useEffect(() => {
+        if (loading) return;
+        const status: 'working' | 'clocked_out' | 'manual_break' = (() => {
+            if (!workLog) return 'clocked_out';
+            const normalized = (workLog.status || '').toLowerCase();
+            if (normalized === 'working') return 'working';
+            if (normalized === 'on_break' || normalized === 'break') return 'manual_break';
+            return 'clocked_out';
+        })();
+
+        if (lastDesktopSyncRef.current === status) return;
+        lastDesktopSyncRef.current = status;
+        notifyDesktopStatus(status);
+    }, [loading, workLog, notifyDesktopStatus]);
 
     const getMillis = useCallback((ts: any): number => {
         if (!ts) return Date.now();

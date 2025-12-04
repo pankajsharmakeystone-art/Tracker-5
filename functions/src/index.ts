@@ -9,14 +9,36 @@ import { DateTime } from "luxon";
 
 admin.initializeApp();
 const db = admin.firestore();
-const SHIFT_TIMEZONE = "Asia/Kolkata";
+const DEFAULT_TIMEZONE = "Asia/Kolkata";
+let cachedTimezone = DEFAULT_TIMEZONE;
+let lastTimezoneFetch = 0;
 
-const buildShiftBoundary = (logStartDate: Date, timeStr: string | undefined, useOvernight: boolean) => {
+const getOrganizationTimezone = async (): Promise<string> => {
+  const now = Date.now();
+  const cacheIsFresh = now - lastTimezoneFetch < 5 * 60 * 1000;
+  if (cacheIsFresh) return cachedTimezone;
+  try {
+    const snap = await db.collection("adminSettings").doc("global").get();
+    if (snap.exists) {
+      const data = snap.data() as { organizationTimezone?: string };
+      cachedTimezone = data?.organizationTimezone || DEFAULT_TIMEZONE;
+    } else {
+      cachedTimezone = DEFAULT_TIMEZONE;
+    }
+  } catch (error) {
+    console.error("Failed to load organization timezone", error);
+    cachedTimezone = DEFAULT_TIMEZONE;
+  }
+  lastTimezoneFetch = now;
+  return cachedTimezone;
+};
+
+const buildShiftBoundary = (logStartDate: Date, timeStr: string | undefined, useOvernight: boolean, timezone: string) => {
   if (!timeStr) return null;
   const [hour, minute] = timeStr.split(":").map(Number);
   if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
 
-  const base = DateTime.fromJSDate(logStartDate, { zone: SHIFT_TIMEZONE });
+  const base = DateTime.fromJSDate(logStartDate, { zone: timezone || DEFAULT_TIMEZONE });
   const referenceDay = useOvernight ? base.plus({ days: 1 }) : base;
 
   return referenceDay
@@ -69,7 +91,7 @@ const allowCors = (res: Response) => {
         if (!shiftEndTime) continue;
 
         const useOvernight = slot?.isOvernightShift ?? shouldTreatAsOvernight(data);
-        const shiftEndDate = buildShiftBoundary(logStartDate, shiftEndTime, useOvernight);
+        const shiftEndDate = buildShiftBoundary(logStartDate, shiftEndTime, useOvernight, slot?.timezone || cachedTimezone);
         if (!shiftEndDate) continue;
 
         if (now > shiftEndDate) {
@@ -373,7 +395,8 @@ export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
  * Enforces schedule limits.
  */
 export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async (event) => {
-      const now = new Date();
+  const now = new Date();
+  const organizationTimezone = await getOrganizationTimezone();
       const snapshot = await db.collection("worklogs")
         .where("status", "in", ["working", "on_break", "break"])
         .get();
@@ -389,7 +412,7 @@ export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async (event
             const scheduledEnd = data.scheduledEnd as string;
 
             // Correctly calculate end time based on shift type
-            const shiftEndDate = buildShiftBoundary(logStartDate, scheduledEnd, shouldTreatAsOvernight(data));
+            const shiftEndDate = buildShiftBoundary(logStartDate, scheduledEnd, shouldTreatAsOvernight(data), organizationTimezone);
             if (!shiftEndDate) return;
 
           // Buffer: Allow 15 mins past shift end? Strict for now.

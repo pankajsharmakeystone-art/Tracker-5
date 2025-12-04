@@ -39,7 +39,31 @@ const AgentPanel = () => {
     const [dismissedTimeout, setDismissedTimeout] = useState(false);
     const [breakStartedAt, setBreakStartedAt] = useState(null);
     const workLogRef = useRef(null);
+    const lastDesktopSyncRef = useRef(null);
     useEffect(() => { workLogRef.current = workLog; }, [workLog]);
+    useEffect(() => {
+        if (loading)
+            return;
+        const status = (() => {
+            if (!workLog)
+                return 'clocked_out';
+            const normalized = (workLog.status || '').toLowerCase();
+            if (normalized === 'working')
+                return 'working';
+            if (normalized === 'on_break' || normalized === 'break')
+                return 'manual_break';
+            return 'clocked_out';
+        })();
+        if (lastDesktopSyncRef.current === status)
+            return;
+        lastDesktopSyncRef.current = status;
+        try {
+            window.desktopAPI?.setAgentStatus?.(status);
+        }
+        catch (err) {
+            console.error('[AgentPanel] Failed to sync desktop status from worklog stream', status, err);
+        }
+    }, [loading, workLog]);
     const getMillis = useCallback((ts) => {
         if (!ts)
             return Date.now();

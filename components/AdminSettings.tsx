@@ -64,6 +64,7 @@ const AdminSettings: React.FC = () => {
         recordingQuality: '720p',
         autoClockOutEnabled: false,
         manualBreakTimeoutMinutes: 30,
+        organizationTimezone: 'Asia/Kolkata',
     };
     
     const [settings, setSettings] = useState<AdminSettingsType>(defaultSettings);
@@ -82,6 +83,16 @@ const AdminSettings: React.FC = () => {
         return 'https://your-domain/api/dropbox-callback';
     }, []);
     const { currentUser } = useAuth();
+    const timezoneOptions = useMemo(() => {
+        if (typeof Intl !== 'undefined' && typeof (Intl as any).supportedValuesOf === 'function') {
+            try {
+                return (Intl as any).supportedValuesOf('timeZone');
+            } catch {
+                // fall through to fallback list
+            }
+        }
+        return ['UTC', 'Asia/Kolkata', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin'];
+    }, []);
     const canAutoGenerate = Boolean(settings.dropboxAppKey && settings.dropboxAppSecret);
 
     useEffect(() => {
@@ -249,6 +260,22 @@ const AdminSettings: React.FC = () => {
                         className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
                         placeholder="e.g., 300"
                     />
+                </FormField>
+
+                <FormField
+                    label="Organization Timezone"
+                    description="Schedules, desktop reminders, and auto clock-out logic run in this timezone."
+                >
+                    <select
+                        name="organizationTimezone"
+                        value={settings.organizationTimezone || 'Asia/Kolkata'}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                    >
+                        {timezoneOptions.map((tz) => (
+                            <option key={tz} value={tz}>{tz}</option>
+                        ))}
+                    </select>
                 </FormField>
 
                  <FormField label="Auto Clock-Out" description="Enable automatic clock-out based on the agent's scheduled shift end time.">

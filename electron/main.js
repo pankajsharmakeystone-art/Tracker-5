@@ -11,6 +11,7 @@ const fs = require("fs");
 const os = require("os");
 const fetch = require("node-fetch");
 const electronLog = require("electron-log");
+const { DateTime } = require("luxon");
 
 // auto-updater
 const { autoUpdater } = require("electron-updater");
@@ -123,6 +124,7 @@ const clientAuth = firebase.auth();
 const db = firebase.firestore();
 const FieldValue = firebase.firestore.FieldValue;
 const Timestamp = firebase.firestore.Timestamp;
+const DEFAULT_ORGANIZATION_TIMEZONE = "Asia/Kolkata";
 
 // ---------- CONFIG ----------
 const RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings");
@@ -136,6 +138,7 @@ let mainWindow = null;
 let tray = null;
 let isQuiting = false;
 let cachedAdminSettings = {};
+const getOrganizationTimezone = () => cachedAdminSettings?.organizationTimezone || DEFAULT_ORGANIZATION_TIMEZONE;
 let currentUid = null;
 let commandUnsub = null;
 let statusInterval = null;
@@ -253,7 +256,6 @@ function createMainWindow() {
       event.preventDefault();
       mainWindow.hide();
     }
-  });
   });
 
   registerDevtoolsShortcuts(mainWindow);
@@ -493,6 +495,14 @@ function applyAdminSettings(next) {
   }
 
   if (mainWindow) mainWindow.webContents.send("settings-updated", cachedAdminSettings);
+
+  if (agentClockedIn) {
+    const updatedDateKey = toScheduleDateKey();
+    if (currentShiftDate !== updatedDateKey) {
+      currentShiftDate = updatedDateKey;
+      lastAutoClockOutTargetKey = null;
+    }
+  }
 
   if (cachedAdminSettings?.autoClockOutEnabled) {
     startAutoClockOutWatcher();
@@ -775,40 +785,30 @@ function startAutoClockConfigWatch(uid) {
   }
 }
 
-const toScheduleDateKey = (date = new Date()) => date.toISOString().split('T')[0];
-
-const parseTimeString = (timeStr) => {
-  if (!timeStr) return null;
-  const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) return null;
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
-  return { hour, minute };
+const toScheduleDateKey = (date = new Date()) => {
+  const timezone = getOrganizationTimezone();
+  return DateTime.fromJSDate(date).setZone(timezone).toFormat('yyyy-MM-dd');
 };
 
-const dateKeyToLocalDate = (key) => {
-  if (!key) return null;
-  const parts = key.split('-').map(Number);
-  if (parts.length !== 3 || parts.some((p) => Number.isNaN(p))) return null;
-  return new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0);
+const buildDateFromComponents = (dateKey, timeStr, timezone, isOvernight) => {
+  if (!dateKey || !timeStr) return null;
+  const base = DateTime.fromISO(`${dateKey}T${timeStr}`, { zone: timezone, setZone: true });
+  if (!base.isValid) return null;
+  const target = isOvernight ? base.plus({ days: 1 }) : base;
+  return target.toJSDate();
 };
 
 const buildDateFromSlot = (slot, dateKey) => {
   if (!slot?.shiftEndTime) return null;
-  const timeParts = parseTimeString(slot.shiftEndTime);
-  if (!timeParts) return null;
-  const base = dateKeyToLocalDate(dateKey);
-  if (!base) return null;
-  if (slot.isOvernightShift) base.setDate(base.getDate() + 1);
-  base.setHours(timeParts.hour, timeParts.minute, 0, 0);
-  return base;
+  const timezone = slot.timezone || getOrganizationTimezone();
+  return buildDateFromComponents(dateKey, slot.shiftEndTime, timezone, Boolean(slot.isOvernightShift));
 };
 
 const buildDateFromTime = (now, timeStr) => {
-  const timeParts = parseTimeString(timeStr);
-  if (!timeParts) return null;
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), timeParts.hour, timeParts.minute, 0, 0);
+  if (!timeStr) return null;
+  const timezone = getOrganizationTimezone();
+  const dateKey = DateTime.fromJSDate(now).setZone(timezone).toFormat('yyyy-MM-dd');
+  return buildDateFromComponents(dateKey, timeStr, timezone, false);
 };
 
 function getAutoClockTargetDate(now = new Date()) {

@@ -105,6 +105,7 @@ export interface AdminSettingsType {
     manualBreakTimeoutMinutes?: number;
     allowRecording?: boolean;
     recordingQuality?: "480p" | "720p" | "1080p";
+    organizationTimezone?: string;
 }
 
 declare global {

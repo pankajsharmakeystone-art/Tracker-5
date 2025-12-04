@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { streamScheduleForMonth, updateScheduleForMonth, streamUsersByTeam } from '../services/db';
-import type { MonthlySchedule, UserData, ShiftTime, ShiftEntry } from '../types';
+import { streamScheduleForMonth, updateScheduleForMonth, streamUsersByTeam, streamGlobalAdminSettings } from '../services/db';
+import type { MonthlySchedule, UserData, ShiftTime, ShiftEntry, AdminSettingsType } from '../types';
 import Spinner from './Spinner';
 
 interface Props {
@@ -13,6 +13,7 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
     const [schedule, setSchedule] = useState<MonthlySchedule>({});
     const [currentDate, setCurrentDate] = useState(new Date());
     const [loading, setLoading] = useState(true);
+    const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
     
     // Spreadsheet-like state
     const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
@@ -43,9 +44,12 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
             setLoading(false);
         });
 
+        const unsubscribeSettings = streamGlobalAdminSettings(setAdminSettings);
+
         return () => {
             unsubscribeUsers();
             unsubscribeSchedule();
+            unsubscribeSettings();
         };
     }, [teamId, year, month]);
 
@@ -64,7 +68,9 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
         // Optimistic update
         setSchedule(newSchedule);
         try {
-            await updateScheduleForMonth(teamId, year, month + 1, newSchedule);
+            await updateScheduleForMonth(teamId, year, month + 1, newSchedule, {
+                timezone: adminSettings?.organizationTimezone
+            });
         } catch (error) {
             console.error("Failed to update schedule", error);
             // In a real app, we might revert state here, but the stream will likely correct it or we re-fetch
