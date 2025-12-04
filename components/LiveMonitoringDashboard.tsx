@@ -23,14 +23,24 @@ const formatDuration = (totalSeconds: number): string => {
         .join(':');
 };
 
-const formatDateTime = (timestamp: Timestamp | null | undefined): string => {
-    if (!timestamp) return 'N/A';
-    return timestamp.toDate().toLocaleString([], { 
-        month: 'numeric', 
-        day: 'numeric', 
-        hour: '2-digit', 
-        minute: '2-digit' 
-    });
+const toDateSafe = (value: any): Date | null => {
+    if (!value) return null;
+    try {
+        if (value instanceof Timestamp) return value.toDate();
+        if (typeof value.toDate === 'function') return value.toDate();
+        if (value instanceof Date) return value;
+        if (typeof value === 'number') return new Date(value);
+        return null;
+    } catch {
+        return null;
+    }
+};
+
+const formatDateTime = (timestamp: Timestamp | null | undefined, timezone?: string): string => {
+    const date = toDateSafe(timestamp);
+    if (!date) return 'N/A';
+    const zone = timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return DateTime.fromJSDate(date).setZone(zone, { keepLocalTime: false }).toFormat('MM/dd, hh:mm a');
 };
 
 // Helper for datetime-local input
@@ -123,20 +133,26 @@ const calculateLateMinutes = (
     }
 };
 
-const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) => {
+const deriveLateMinutesForLog = (log: WorkLog, timezone?: string): number | null => {
+    if (!log?.scheduledStart) return null;
+    const startDate = toDateSafe(log.clockInTime ?? log.startTime);
+    if (!startDate) return null;
+    const late = calculateLateMinutes(
+        log.scheduledStart,
+        startDate,
+        timezone,
+        log.isOvernightShift === true
+    );
+    if (!Number.isFinite(late)) return null;
+    return Math.round(late);
+};
+
+const EditTimeModal = ({ log, onClose, timezone }: { log: WorkLog, onClose: () => void, timezone: string }) => {
     const [startTime, setStartTime] = useState(toDatetimeLocal(log.clockInTime));
     const [endTime, setEndTime] = useState(toDatetimeLocal(log.clockOutTime));
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [timezone, setTimezone] = useState<string>('UTC');
-
-    useEffect(() => {
-        let mounted = true;
-        readOrganizationTimezone()
-            .then((tz) => { if (mounted && tz) setTimezone(tz); })
-            .catch(() => {/* ignore, default UTC */});
-        return () => { mounted = false; };
-    }, []);
+    const effectiveTimezone = timezone || 'UTC';
 
     const handleSave = async () => {
         if (!startTime) {
@@ -197,7 +213,7 @@ const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) 
                 updates.lateMinutes = calculateLateMinutes(
                     log.scheduledStart,
                     startDate,
-                    timezone,
+                    effectiveTimezone,
                     log.isOvernightShift === true
                 );
             }
@@ -271,7 +287,7 @@ const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) 
     );
 };
 
-const TimeEntriesModal = ({ log, onClose }: { log: WorkLog; onClose: () => void }) => {
+const TimeEntriesModal = ({ log, onClose, timezone }: { log: WorkLog; onClose: () => void, timezone: string }) => {
     const readableDate = log?.date?.toDate ? log.date.toDate().toLocaleDateString() : 'N/A';
 
     return (
@@ -291,7 +307,7 @@ const TimeEntriesModal = ({ log, onClose }: { log: WorkLog; onClose: () => void 
                     </button>
                 </div>
                 <div className="mt-4 overflow-y-auto pr-1">
-                    <ActivitySheet workLog={log} />
+                    <ActivitySheet workLog={log} timezone={timezone} />
                 </div>
             </div>
         </div>
@@ -306,6 +322,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [viewingLog, setViewingLog] = useState<WorkLog | null>(null);
     const [liveStreamAgent, setLiveStreamAgent] = useState<{ uid: string; displayName: string; teamId?: string } | null>(null);
     const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
+    const [organizationTimezone, setOrganizationTimezone] = useState<string>('UTC');
     
     const [selectedDate, setSelectedDate] = useState(() => {
         const d = new Date();
@@ -320,6 +337,14 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     useEffect(() => {
         const interval = setInterval(() => setNow(Date.now()), 1000);
         return () => clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
+        let mounted = true;
+        readOrganizationTimezone()
+            .then((tz) => { if (mounted && tz) setOrganizationTimezone(tz); })
+            .catch(() => {/* ignore */});
+        return () => { mounted = false; };
     }, []);
 
     const isToday = useMemo(() => {
@@ -387,6 +412,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 }
             }
 
+            const computedLateMinutes = deriveLateMinutesForLog(log, organizationTimezone);
+            const lateMinutes = typeof computedLateMinutes === 'number'
+                ? computedLateMinutes
+                : (typeof log.lateMinutes === 'number' ? Math.round(log.lateMinutes) : 0);
+
             return {
                 ...log,
                 displayWork: totalWork,
@@ -394,10 +424,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 manualBreakSeconds: manualSeconds,
                 idleBreakSeconds: idleSeconds,
                 isZombie,
-                isOvernight
+                isOvernight,
+                lateMinutes
             };
         });
-    }, [rawLogs, now, selectedDate]);
+    }, [rawLogs, now, selectedDate, organizationTimezone]);
 
     const handleForceClose = async (log: WorkLog) => {
         if (window.confirm("Force close this session? This marks it as clocked out at the last active time.")) {
@@ -459,8 +490,20 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                     onClose={closeLiveStreamModal}
                 />
             )}
-            {editingLog && <EditTimeModal log={editingLog} onClose={() => setEditingLog(null)} />}
-            {viewingLog && <TimeEntriesModal log={viewingLog} onClose={() => setViewingLog(null)} />}
+            {editingLog && (
+                <EditTimeModal
+                    log={editingLog}
+                    onClose={() => setEditingLog(null)}
+                    timezone={organizationTimezone}
+                />
+            )}
+            {viewingLog && (
+                <TimeEntriesModal
+                    log={viewingLog}
+                    onClose={() => setViewingLog(null)}
+                    timezone={organizationTimezone}
+                />
+            )}
             
             <div className="mb-4 flex flex-col sm:flex-row justify-between items-center gap-4 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border dark:border-gray-700">
                 <h3 className="text-lg font-medium text-gray-900 dark:text-white">
@@ -509,11 +552,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                     )}
                                 </td>
                                 <td className="py-4 px-6 text-center font-mono whitespace-nowrap text-xs">
-                                    {formatDateTime(agent.clockInTime)}
+                                    {formatDateTime(agent.clockInTime, organizationTimezone)}
                                 </td>
                                 <td className="py-4 px-6 text-center font-mono whitespace-nowrap text-xs">
                                     {agent.status === 'clocked_out' ? (
-                                        formatDateTime(agent.clockOutTime)
+                                        formatDateTime(agent.clockOutTime, organizationTimezone)
                                     ) : (
                                         <span className="text-blue-500 animate-pulse">Active...</span>
                                     )}

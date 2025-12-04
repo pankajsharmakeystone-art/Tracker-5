@@ -376,7 +376,9 @@ const AgentPanel: React.FC = () => {
                 </div>
             )}
             {activeTab === 'mySchedule' && userData && activeTeamId && <AgentScheduleView userId={userData.uid} teamId={activeTeamId} />}
-            {activeTab === 'activityLog' && workLog && <ActivitySheet workLog={workLog} />}
+            {activeTab === 'activityLog' && workLog && (
+                <ActivitySheet workLog={workLog} timezone={adminSettings?.organizationTimezone || undefined} />
+            )}
         </div>
     );
 };

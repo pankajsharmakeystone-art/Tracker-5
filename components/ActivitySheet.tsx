@@ -113,11 +113,13 @@ export function transformFirestoreWorklog(docData: any): Array<{
 }
 
 import React from 'react';
+import { DateTime } from 'luxon';
 import { Timestamp } from 'firebase/firestore';
 import type { WorkLog } from '../types';
 
 interface Props {
     workLog: WorkLog;
+    timezone?: string;
 }
 
 interface Segment {
@@ -145,13 +147,10 @@ const toDate = (ts: any): Date | null => {
     return null;
 };
 
-const formatTime = (date: Date | null): string => {
+const formatTime = (date: Date | null, timezone?: string): string => {
     if (!date) return 'N/A';
-    return date.toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-    });
+    const zone = timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return DateTime.fromJSDate(date).setZone(zone, { keepLocalTime: false }).toFormat('hh:mm:ss a');
 };
 
 const formatDuration = (seconds: number): string => {
@@ -164,7 +163,7 @@ const formatDuration = (seconds: number): string => {
 
 
 // Usage: Instead of passing workLog.activities/breaks, use transformFirestoreWorklog(workLog)
-const ActivitySheet: React.FC<{ workLog: any }> = ({ workLog }) => {
+const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog, timezone }) => {
     // If workLog is already in the expected format, skip transform
     const timeline = (Array.isArray(workLog) ? workLog : transformFirestoreWorklog(workLog)).slice().reverse();
 
@@ -204,12 +203,12 @@ const ActivitySheet: React.FC<{ workLog: any }> = ({ workLog }) => {
                             </td>
 
                             {/* Start time */}
-                            <td className="py-4 px-6">{formatTime(seg.startTime)}</td>
+                            <td className="py-4 px-6">{formatTime(seg.startTime, timezone)}</td>
 
                             {/* End time */}
                             <td className="py-4 px-6">
                                 {seg.endTime ? (
-                                    formatTime(seg.endTime)
+                                    formatTime(seg.endTime, timezone)
                                 ) : (
                                     <span className="text-blue-600 dark:text-blue-400 font-semibold animate-pulse">
                                         Ongoing
