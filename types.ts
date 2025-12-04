@@ -3,6 +3,7 @@ import type { User as FirebaseAuthUser } from 'firebase/auth';
 export interface BreakEntry {
     startTime: any;
     endTime: any;
+    cause?: 'manual' | 'idle';
 }
 
 export interface ActivityEntry {

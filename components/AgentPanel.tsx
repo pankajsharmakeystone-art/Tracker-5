@@ -51,6 +51,8 @@ const AgentPanel: React.FC = () => {
     const [breakStartedAt, setBreakStartedAt] = useState<number | null>(null);
 
     const workLogRef = useRef<WorkLog | null>(null);
+    const manualBreakRef = useRef(false);
+    const idleBreakActiveRef = useRef(false);
     const lastDesktopSyncRef = useRef<'working' | 'clocked_out' | 'manual_break' | null>(null);
     const notifyDesktopStatus = useCallback(async (status: 'working' | 'clocked_out' | 'manual_break') => {
         try {
@@ -65,15 +67,17 @@ const AgentPanel: React.FC = () => {
 
     useEffect(() => {
         if (loading) return;
-        const status: 'working' | 'clocked_out' | 'manual_break' = (() => {
+        const status: 'working' | 'clocked_out' | 'manual_break' | null = (() => {
             if (!workLog) return 'clocked_out';
             const normalized = (workLog.status || '').toLowerCase();
             if (normalized === 'working') return 'working';
-            if (normalized === 'on_break' || normalized === 'break') return 'manual_break';
+            if (normalized === 'on_break' || normalized === 'break') {
+                return manualBreakRef.current ? 'manual_break' : null;
+            }
             return 'clocked_out';
         })();
 
-        if (lastDesktopSyncRef.current === status) return;
+        if (!status || lastDesktopSyncRef.current === status) return;
         lastDesktopSyncRef.current = status;
         notifyDesktopStatus(status);
     }, [loading, workLog, notifyDesktopStatus]);
@@ -166,9 +170,12 @@ const AgentPanel: React.FC = () => {
     // Listen for remote status/idle changes
     useEffect(() => {
         if (!userData?.uid) return;
-        const unsubscribe = onSnapshot(doc(db, "agentStatus", userData.uid), (snap) => {
+        const uid = userData.uid;
+        const unsubscribe = onSnapshot(doc(db, "agentStatus", uid), (snap) => {
             if (snap.exists()) {
                 const data = snap.data();
+                manualBreakRef.current = !!data.manualBreak;
+                if (data.manualBreak) idleBreakActiveRef.current = false;
                 
                 // Track break start
                 if (data.manualBreak && data.breakStartedAt) {
@@ -185,9 +192,10 @@ const AgentPanel: React.FC = () => {
 
                     // Auto-Break on Idle
                     if (data.isIdle === true && currentLog.status === 'working') {
+                        idleBreakActiveRef.current = true;
                         const wDur = getDuration(currentLog.lastEventTimestamp);
                         const newBreaks = [...(currentLog.breaks || [])];
-                        newBreaks.push({ startTime: Timestamp.now(), endTime: null });
+                        newBreaks.push({ startTime: Timestamp.now(), endTime: null, cause: 'idle' });
                         updateWorkLog(currentLog.id, {
                             status: 'on_break',
                             totalWorkSeconds: increment(wDur),
@@ -196,7 +204,8 @@ const AgentPanel: React.FC = () => {
                         });
                     }
                     // Auto-Resume
-                    else if (data.isIdle === false && (currentLog.status === 'on_break' || currentLog.status === 'break' as any)) {
+                    else if (data.isIdle === false && (idleBreakActiveRef.current || currentLog.status === 'on_break' || (currentLog.status as any) === 'break')) {
+                        idleBreakActiveRef.current = false;
                         // Don't auto-resume if it was a manual break (handled by manualBreak check above generally, but good to be safe)
                         const bDur = getDuration(currentLog.lastEventTimestamp);
                         const newBreaks = [...(currentLog.breaks || [])];
@@ -209,12 +218,18 @@ const AgentPanel: React.FC = () => {
                             lastEventTimestamp: serverTimestamp(),
                             breaks: newBreaks,
                         });
+                        updateAgentStatus(uid, 'online', {
+                            manualBreak: false,
+                            breakStartedAt: deleteField(),
+                            isIdle: false
+                        }).catch((err) => console.error('[AgentPanel] failed to sync agent status after idle resume', err));
+                        notifyDesktopStatus('working').catch((err) => console.error('[AgentPanel] failed to notify desktop of idle resume', err));
                     }
                 }
             }
         });
         return () => unsubscribe();
-    }, [userData?.uid, getMillis]);
+    }, [userData?.uid, getMillis, notifyDesktopStatus]);
 
     // Manual Break Timeout
     useEffect(() => {
@@ -260,7 +275,7 @@ const AgentPanel: React.FC = () => {
         try {
             const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
             const newBreaks = [...(workLog.breaks || [])];
-            newBreaks.push({ startTime: Timestamp.now(), endTime: null });
+            newBreaks.push({ startTime: Timestamp.now(), endTime: null, cause: 'manual' });
 
             await updateWorkLog(workLog.id, {
                 status: 'on_break',

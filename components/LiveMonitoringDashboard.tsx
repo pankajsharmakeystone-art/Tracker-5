@@ -40,6 +40,57 @@ const toDatetimeLocal = (timestamp: Timestamp | null | undefined) => {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
 
+const getMillis = (value: any): number | null => {
+    if (!value) return null;
+    try {
+        if (value instanceof Timestamp) return value.toMillis();
+        if (typeof value.toMillis === 'function') return value.toMillis();
+        if (typeof value.toDate === 'function') return value.toDate().getTime();
+        if (value instanceof Date) return value.getTime();
+        if (typeof value === 'number') return value;
+    } catch (error) {
+        console.warn('[LiveMonitoringDashboard] Failed to normalize timestamp', error);
+    }
+    return null;
+};
+
+const normalizeBreakCause = (entry: any): 'manual' | 'idle' => {
+    const raw = (entry?.cause || entry?.reason || entry?.type || entry?.source || '').toString().toLowerCase();
+    if (raw.includes('idle')) return 'idle';
+    if (entry?.auto === true || entry?.isIdle === true) return 'idle';
+    return 'manual';
+};
+
+const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
+    const breaks = Array.isArray((log as any)?.breaks) ? (log as any).breaks : [];
+    let manualSeconds = 0;
+    let idleSeconds = 0;
+    let accounted = false;
+
+    breaks.forEach((entry: any) => {
+        const startMs = getMillis(entry?.startTime);
+        if (startMs == null) return;
+        const endMs = entry?.endTime ? getMillis(entry.endTime) : null;
+        const effectiveEnd = endMs ?? nowMs;
+        if (effectiveEnd <= startMs) return;
+        accounted = true;
+        const duration = (effectiveEnd - startMs) / 1000;
+        if (normalizeBreakCause(entry) === 'idle') idleSeconds += duration;
+        else manualSeconds += duration;
+    });
+
+    if (!accounted) {
+        manualSeconds = typeof log.totalBreakSeconds === 'number' ? log.totalBreakSeconds : 0;
+        const isOnBreak = log.status === 'on_break' || (log.status as any) === 'break';
+        const lastEventMs = getMillis(log.lastEventTimestamp as any);
+        if (isOnBreak && lastEventMs != null && nowMs > lastEventMs) {
+            manualSeconds += (nowMs - lastEventMs) / 1000;
+        }
+    }
+
+    return { manualSeconds, idleSeconds };
+};
+
 const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) => {
     const [startTime, setStartTime] = useState(toDatetimeLocal(log.clockInTime));
     const [endTime, setEndTime] = useState(toDatetimeLocal(log.clockOutTime));
@@ -228,7 +279,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             const isZombie = isSessionStale(log) && isActive;
             
             let totalWork = log.totalWorkSeconds;
-            let totalBreak = log.totalBreakSeconds;
 
             // If currently active (and not stale), add live elapsed time
             if (isActive && !isZombie && log.lastEventTimestamp) {
@@ -239,8 +289,10 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 const elapsed = Math.max(0, (now - lastTime) / 1000);
                 
                 if (log.status === 'working') totalWork += elapsed;
-                else if (log.status === 'on_break' || (log.status as any) === 'break') totalBreak += elapsed;
             }
+
+            const { manualSeconds, idleSeconds } = aggregateBreakSeconds(log, now);
+            const totalBreak = manualSeconds + idleSeconds;
             
             // Check if this log started on a previous day
             let isOvernight = false;
@@ -257,6 +309,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 ...log,
                 displayWork: totalWork,
                 displayBreak: totalBreak,
+                manualBreakSeconds: manualSeconds,
+                idleBreakSeconds: idleSeconds,
                 isZombie,
                 isOvernight
             };
@@ -351,7 +405,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                             <th scope="col" className="py-3 px-6 text-center">Clock In</th>
                             <th scope="col" className="py-3 px-6 text-center">Clock Out</th>
                             <th scope="col" className="py-3 px-6">Work Duration</th>
-                            <th scope="col" className="py-3 px-6">Break Duration</th>
+                            <th scope="col" className="py-3 px-6">Manual Break</th>
+                            <th scope="col" className="py-3 px-6">Idle Break</th>
                             <th scope="col" className="py-3 px-6">Actions</th>
                         </tr>
                     </thead>
@@ -383,8 +438,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                 <td className="py-4 px-6 font-mono font-bold text-gray-700 dark:text-gray-200">
                                     {formatDuration(agent.displayWork)}
                                 </td>
-                                <td className="py-4 px-6 font-mono">
-                                    {formatDuration(agent.displayBreak)}
+                                <td className="py-4 px-6 font-mono text-gray-700 dark:text-gray-200">
+                                    {formatDuration(agent.manualBreakSeconds ?? agent.displayBreak)}
+                                </td>
+                                <td className="py-4 px-6 font-mono text-gray-600 dark:text-gray-300">
+                                    {formatDuration(agent.idleBreakSeconds ?? 0)}
                                 </td>
                                 <td className="py-4 px-6 flex gap-2 items-center">
                                     <button
@@ -416,7 +474,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                             </tr>
                         )) : (
                             <tr>
-                                <td colSpan={8} className="py-4 px-6 text-center text-gray-500 dark:text-gray-400">
+                                <td colSpan={9} className="py-4 px-6 text-center text-gray-500 dark:text-gray-400">
                                     No activity found.
                                 </td>
                             </tr>
