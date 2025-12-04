@@ -272,7 +272,7 @@ const AdminSettings: React.FC = () => {
                         onChange={handleInputChange}
                         className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
                     >
-                        {timezoneOptions.map((tz) => (
+                        {timezoneOptions.map((tz: string) => (
                             <option key={tz} value={tz}>{tz}</option>
                         ))}
                     </select>
