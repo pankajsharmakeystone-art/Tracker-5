@@ -31,6 +31,43 @@ const TabButton = ({ tabName, title, activeTab, setActiveTab }: { tabName: strin
     </button>
 );
 
+const deriveBreakCause = (entry: any): 'manual' | 'idle' => {
+    const raw = (entry?.cause || entry?.reason || entry?.type || entry?.source || '').toString().toLowerCase();
+    if (raw.includes('idle')) return 'idle';
+    if (entry?.auto === true || entry?.isIdle === true) return 'idle';
+    return 'manual';
+};
+
+const deriveBreakDurations = (log: WorkLog, nowMs: number, getMillis: (ts: any) => number) => {
+    const breaks = Array.isArray((log as any)?.breaks) ? (log as any).breaks : [];
+    let manualSeconds = 0;
+    let idleSeconds = 0;
+    let accounted = false;
+
+    breaks.forEach((entry: any) => {
+        const startMs = entry?.startTime ? getMillis(entry.startTime) : null;
+        if (startMs == null) return;
+        const endMs = entry?.endTime ? getMillis(entry.endTime) : null;
+        const effectiveEnd = endMs ?? nowMs;
+        if (effectiveEnd <= startMs) return;
+        accounted = true;
+        const duration = (effectiveEnd - startMs) / 1000;
+        if (deriveBreakCause(entry) === 'idle') idleSeconds += duration;
+        else manualSeconds += duration;
+    });
+
+    if (!accounted) {
+        manualSeconds = typeof log.totalBreakSeconds === 'number' ? log.totalBreakSeconds : 0;
+        const isOnBreak = log.status === 'on_break' || (log.status as any) === 'break';
+        const lastEvent = log.lastEventTimestamp ? getMillis(log.lastEventTimestamp) : null;
+        if (isOnBreak && lastEvent && nowMs > lastEvent) {
+            manualSeconds += (nowMs - lastEvent) / 1000;
+        }
+    }
+
+    return { manualSeconds, idleSeconds };
+};
+
 const AgentPanel: React.FC = () => {
     const { userData } = useAuth();
     useAgentLiveStream();
@@ -142,28 +179,27 @@ const AgentPanel: React.FC = () => {
             return;
         }
 
-        // Initialize with stored totals
-        setDisplayWorkSeconds(workLog.totalWorkSeconds);
-        setDisplayBreakSeconds(workLog.totalBreakSeconds);
-
-        // If active, add the elapsed time since last event
-        let interval: number | null = null;
-        const isActive = workLog.status !== 'clocked_out';
-
-        if (isActive && workLog.lastEventTimestamp) {
-            interval = window.setInterval(() => {
-                const lastEventTime = getMillis(workLog.lastEventTimestamp);
-                const now = Date.now();
+        const updateDisplays = () => {
+            const now = Date.now();
+            const lastEventTime = workLog.lastEventTimestamp ? getMillis(workLog.lastEventTimestamp) : null;
+            if (lastEventTime && workLog.status === 'working') {
                 const elapsed = Math.max(0, (now - lastEventTime) / 1000);
-                
-                if (workLog.status === 'working') {
-                    setDisplayWorkSeconds(workLog.totalWorkSeconds + elapsed);
-                } else if (workLog.status === 'on_break' || (workLog.status as any) === 'break') {
-                    setDisplayBreakSeconds(workLog.totalBreakSeconds + elapsed);
-                }
-            }, 1000);
+                setDisplayWorkSeconds(workLog.totalWorkSeconds + elapsed);
+            } else {
+                setDisplayWorkSeconds(workLog.totalWorkSeconds);
+            }
+
+            const { manualSeconds, idleSeconds } = deriveBreakDurations(workLog, now, getMillis);
+            setDisplayBreakSeconds(manualSeconds + idleSeconds);
+        };
+
+        updateDisplays();
+
+        let interval: number | null = null;
+        if (workLog.status !== 'clocked_out' && workLog.lastEventTimestamp) {
+            interval = window.setInterval(updateDisplays, 1000);
         }
-        
+
         return () => { if (interval) clearInterval(interval); };
     }, [workLog, getMillis]);
 

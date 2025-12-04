@@ -37,57 +37,90 @@ export function transformFirestoreWorklog(docData: any): Array<{
 
     // If it has a breaks array, use that structure
     if (Array.isArray(docData.breaks)) {
-        const segments = [] as any[];
-        const clockOutForTimeline = normalizeClockOutTime(docData.clockOutTime, docData.clockInTime);
+        const segments: Array<{
+            type: 'Working' | 'On Break';
+            startTime: Date;
+            endTime: Date | null;
+            durationSeconds: number;
+        }> = [];
 
-        // Build events timeline similar to older logic
-        const events: { time: any; type: 'START_BREAK' | 'END_BREAK' | 'CLOCK_OUT' }[] = [];
-        (docData.breaks || []).forEach((b: any) => {
-            if (b.startTime) events.push({ time: b.startTime, type: 'START_BREAK' });
-            if (b.endTime) events.push({ time: b.endTime, type: 'END_BREAK' });
-        });
-        if (clockOutForTimeline) events.push({ time: clockOutForTimeline, type: 'CLOCK_OUT' });
+        const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
+        const nowMs = nowDate.getTime();
+        const sessionStart = toDate(docData.clockInTime);
+        let cursor = sessionStart;
 
-        events.sort((a, b) => {
-            const aMs = getMillis(a.time);
-            const bMs = getMillis(b.time);
-            return aMs - bMs;
-        });
+        const pushWorkingSegment = (start: Date | null, end: Date | null) => {
+            if (!start || !end) return;
+            const startMs = start.getTime();
+            const endMs = end.getTime();
+            if (!isFinite(startMs) || !isFinite(endMs) || endMs <= startMs) return;
+            segments.push({
+                type: 'Working',
+                startTime: start,
+                endTime: end,
+                durationSeconds: (endMs - startMs) / 1000,
+            });
+        };
 
-        let cursor = docData.clockInTime;
-        let currentStatus: 'Working' | 'On Break' = 'Working';
+        type BreakWithIndex = { entry: any; index: number };
 
-        for (const ev of events) {
-            const cursorMs = getMillis(cursor);
-            const evMs = getMillis(ev.time);
-            if (evMs > cursorMs) {
-                segments.push({
-                    type: currentStatus,
-                    startTime: toDate(cursor)!,
-                    endTime: toDate(ev.time),
-                    durationSeconds: (evMs - cursorMs) / 1000,
-                });
+        const sortedBreaks = (docData.breaks || [])
+            .map((entry: any, index: number): BreakWithIndex => ({ entry, index }))
+            .filter(({ entry }: BreakWithIndex) => entry && entry.startTime)
+            .sort((a: BreakWithIndex, b: BreakWithIndex) => {
+                const diff = getMillis(a.entry.startTime) - getMillis(b.entry.startTime);
+                return diff !== 0 ? diff : a.index - b.index;
+            })
+            .map(({ entry }: BreakWithIndex) => entry);
+
+        sortedBreaks.forEach((breakEntry: any) => {
+            const breakStart = toDate(breakEntry.startTime);
+            if (!breakStart) return;
+
+            if (cursor && breakStart.getTime() > cursor.getTime()) {
+                pushWorkingSegment(cursor, breakStart);
             }
-            cursor = ev.time;
-            if (ev.type === 'START_BREAK') currentStatus = 'On Break';
-            else if (ev.type === 'END_BREAK') currentStatus = 'Working';
+
+            const breakEnd = toDate(breakEntry.endTime);
+            let durationSeconds = 0;
+
+            if (breakEnd) {
+                const diff = breakEnd.getTime() - breakStart.getTime();
+                if (diff > 0) durationSeconds = diff / 1000;
+            } else if (nowMs > breakStart.getTime()) {
+                durationSeconds = (nowMs - breakStart.getTime()) / 1000;
+            }
+
+            segments.push({
+                type: 'On Break',
+                startTime: breakStart,
+                endTime: breakEnd ?? null,
+                durationSeconds,
+            });
+
+            cursor = breakEnd ?? null;
+        });
+
+        const resolveSessionEnd = (): Date | null => {
+            if (docData.status === 'clocked_out') {
+                const normalized = normalizeClockOutTime(docData.clockOutTime, docData.clockInTime);
+                return toDate(normalized);
+            }
+
+            if (docData.status === 'on_break' || docData.status === 'break') {
+                return null;
+            }
+
+            return nowDate;
+        };
+
+        const sessionEnd = resolveSessionEnd();
+
+        if (cursor && sessionEnd && sessionEnd.getTime() > cursor.getTime()) {
+            pushWorkingSegment(cursor, sessionEnd);
         }
 
-        if (docData.status !== 'clocked_out') {
-            const now = typeof Timestamp !== 'undefined' ? Timestamp.now() : new Date();
-            const cursorMs = getMillis(cursor);
-            const nowMs = getMillis(now);
-            if (nowMs > cursorMs) {
-                segments.push({
-                    type: docData.status === 'working' ? 'Working' : 'On Break',
-                    startTime: toDate(cursor)!,
-                    endTime: null,
-                    durationSeconds: (nowMs - cursorMs) / 1000,
-                });
-            }
-        }
-
-        return segments.sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0));
+        return segments;
     }
 
     // Fallback for numeric keyed structure
