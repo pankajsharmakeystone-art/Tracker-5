@@ -21,11 +21,24 @@ export function transformFirestoreWorklog(docData: any): Array<{
         return new Date(ts).getTime();
     };
 
+    const normalizeClockOutTime = (clockOut: any, clockIn: any) => {
+        if (!clockOut) return null;
+        const startMs = getMillis(clockIn);
+        const endMs = getMillis(clockOut);
+        if (!startMs || !endMs) return clockOut;
+        if (endMs > startMs) return clockOut;
+        const MAX_ROLL_THRESHOLD_MS = 6 * 60 * 60 * 1000; // tolerate small rounding or edits
+        if ((startMs - endMs) <= MAX_ROLL_THRESHOLD_MS) return clockOut;
+        const DAY_MS = 24 * 60 * 60 * 1000;
+        const diff = startMs - endMs;
+        const increments = Math.floor(diff / DAY_MS) + 1;
+        return new Date(endMs + increments * DAY_MS);
+    };
+
     // If it has a breaks array, use that structure
     if (Array.isArray(docData.breaks)) {
         const segments = [] as any[];
-        const mainStart = toDate(docData.startTime);
-        const mainEnd = toDate(docData.endTime);
+        const clockOutForTimeline = normalizeClockOutTime(docData.clockOutTime, docData.clockInTime);
 
         // Build events timeline similar to older logic
         const events: { time: any; type: 'START_BREAK' | 'END_BREAK' | 'CLOCK_OUT' }[] = [];
@@ -33,7 +46,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
             if (b.startTime) events.push({ time: b.startTime, type: 'START_BREAK' });
             if (b.endTime) events.push({ time: b.endTime, type: 'END_BREAK' });
         });
-        if (docData.clockOutTime) events.push({ time: docData.clockOutTime, type: 'CLOCK_OUT' });
+        if (clockOutForTimeline) events.push({ time: clockOutForTimeline, type: 'CLOCK_OUT' });
 
         events.sort((a, b) => {
             const aMs = getMillis(a.time);

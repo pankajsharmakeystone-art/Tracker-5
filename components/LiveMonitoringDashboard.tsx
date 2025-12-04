@@ -1,7 +1,8 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
-import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog } from '../services/db';
+import { DateTime } from 'luxon';
+import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone } from '../services/db';
 import { useAuth } from '../hooks/useAuth';
 import type { WorkLog } from '../types';
 import Spinner from './Spinner';
@@ -92,11 +93,38 @@ const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
     return { manualSeconds, idleSeconds };
 };
 
+const calculateLateMinutes = (scheduledStart?: string | null, startDate?: Date | null, timezone?: string) => {
+    if (!scheduledStart || !startDate) return 0;
+    try {
+        const [hour, minute] = scheduledStart.split(':').map(Number);
+        if (Number.isNaN(hour) || Number.isNaN(minute)) return 0;
+        const zone = timezone || 'UTC';
+        const actual = DateTime.fromJSDate(startDate).setZone(zone, { keepLocalTime: false });
+        let scheduled = actual.set({ hour, minute, second: 0, millisecond: 0 });
+        if (actual < scheduled) {
+            scheduled = scheduled.minus({ days: 1 });
+        }
+        const diff = actual.diff(scheduled, 'minutes').minutes;
+        return Math.max(0, diff);
+    } catch {
+        return 0;
+    }
+};
+
 const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) => {
     const [startTime, setStartTime] = useState(toDatetimeLocal(log.clockInTime));
     const [endTime, setEndTime] = useState(toDatetimeLocal(log.clockOutTime));
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [timezone, setTimezone] = useState<string>('UTC');
+
+    useEffect(() => {
+        let mounted = true;
+        readOrganizationTimezone()
+            .then((tz) => { if (mounted && tz) setTimezone(tz); })
+            .catch(() => {/* ignore, default UTC */});
+        return () => { mounted = false; };
+    }, []);
 
     const handleSave = async () => {
         if (!startTime) {
@@ -105,11 +133,15 @@ const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) 
         }
 
         const startDate = new Date(startTime);
-        const endDate = endTime ? new Date(endTime) : null;
+        let endDate = endTime ? new Date(endTime) : null;
 
-        if (endDate && endDate < startDate) {
-            setError("Clock Out time cannot be before Clock In time.");
-            return;
+        if (endDate && endDate <= startDate) {
+            const DAY_MS = 24 * 60 * 60 * 1000;
+            let adjusted = endDate;
+            while (adjusted <= startDate) {
+                adjusted = new Date(adjusted.getTime() + DAY_MS);
+            }
+            endDate = adjusted;
         }
 
         setSaving(true);
@@ -148,6 +180,10 @@ const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) 
             
             updates.totalWorkSeconds = newTotalWorkSeconds;
             updates.totalBreakSeconds = newTotalBreakSeconds;
+
+            if (log.scheduledStart) {
+                updates.lateMinutes = calculateLateMinutes(log.scheduledStart, startDate, timezone);
+            }
 
             // If we are setting an end time, ensure status is clocked_out
             if (endDate) {
@@ -194,7 +230,7 @@ const EditTimeModal = ({ log, onClose }: { log: WorkLog, onClose: () => void }) 
                         step="1"
                         className="w-full p-2 border rounded bg-gray-50 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
                     />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Leave empty to keep session active.</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Leave empty to keep session active. Overnight shifts will automatically roll into the next day.</p>
                 </div>
 
                 <div className="flex justify-end gap-3">

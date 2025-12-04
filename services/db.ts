@@ -7,7 +7,7 @@ import type { UserData, Role, Team, WorkLog, MonthlySchedule, TeamSettings, Admi
 
 const DEFAULT_ORGANIZATION_TIMEZONE = 'Asia/Kolkata';
 
-const readOrganizationTimezone = async (): Promise<string> => {
+export const readOrganizationTimezone = async (): Promise<string> => {
     try {
         const settingsRef = doc(db, 'adminSettings', 'global');
         const snap = await getDoc(settingsRef);
