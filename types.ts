@@ -34,6 +34,8 @@ export interface WorkLog {
     teamId?: string;
     startTime?: any;
     lateMinutes?: number;
+    scheduledStart?: string | null;
+    scheduledEnd?: string | null;
 }
 
 export interface TeamSettings {
