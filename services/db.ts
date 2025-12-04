@@ -1,5 +1,6 @@
 
 import { doc, setDoc, getDoc, serverTimestamp, collection, query, where, getDocs, addDoc, limit, updateDoc, Timestamp, arrayUnion, increment, onSnapshot, deleteDoc, deleteField, orderBy } from 'firebase/firestore';
+import { DateTime } from 'luxon';
 import { db } from './firebase';
 import type { User as FirebaseUser } from 'firebase/auth';
 import type { UserData, Role, Team, WorkLog, MonthlySchedule, TeamSettings, AdminSettingsType, ShiftTime, ShiftEntry } from '../types';
@@ -230,11 +231,15 @@ const getDocMillis = (d: any) => {
  * Creates a WorkLog ID based strictly on the local date of clock-in.
  * ID format: uid-YYYY-MM-DD
  */
-export const createSessionLogId = (uid: string, date: Date): string => {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day}`;
+export const createSessionLogId = (uid: string, date: Date | string): string => {
+    const dateStr = typeof date === 'string'
+        ? date
+        : (() => {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        })();
     return `${uid}-${dateStr}`;
 };
 
@@ -312,9 +317,15 @@ export const forceCloseLog = async (logId: string, endTime: Date) => {
  * 4. Create or Resume Today's Log.
  */
 export const performClockIn = async (uid: string, teamId: string, userDisplayName: string) => {
-    const now = new Date();
-    const todayLogId = createSessionLogId(uid, now);
-    const todayStartTs = Timestamp.fromDate(new Date(now.getFullYear(), now.getMonth(), now.getDate()));
+    const timezone = await readOrganizationTimezone();
+    const nowZoned = DateTime.now().setZone(timezone, { keepLocalTime: false });
+    const now = nowZoned.toJSDate();
+    const todayString = nowZoned.toISODate();
+    if (!todayString) {
+        throw new Error('Unable to resolve organization-local date');
+    }
+    const todayLogId = createSessionLogId(uid, todayString);
+    const todayStartTs = Timestamp.fromDate(new Date(nowZoned.startOf('day').toMillis()));
 
     // 1. Check for existing active session (Zombie Check)
     const activeLog = await getActiveWorkLog(uid);
@@ -346,9 +357,7 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
     let lateMinutes = 0;
 
     try {
-        const todayString = now.toISOString().split('T')[0];
-        const [y, m] = todayString.split('-').map(Number);
-        const monthlySchedule = await getScheduleForMonth(teamId, y, m);
+        const monthlySchedule = await getScheduleForMonth(teamId, nowZoned.year, nowZoned.month);
         const userSchedule = monthlySchedule[uid];
         const todayShift = userSchedule ? userSchedule[todayString] : null;
 
@@ -356,15 +365,12 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
             scheduledStart = todayShift.startTime;
             scheduledEnd = todayShift.endTime;
             
-            if (scheduledEnd < scheduledStart) {
+            if (scheduledEnd && scheduledStart && scheduledEnd < scheduledStart) {
                 isOvernightShift = true;
             }
 
-            const [hh, mm] = scheduledStart.split(':').map(Number);
-            const startMins = hh * 60 + mm;
-            const currentMins = now.getHours() * 60 + now.getMinutes();
-            if (currentMins > startMins) {
-                lateMinutes = currentMins - startMins;
+            if (scheduledStart) {
+                lateMinutes = calculateLateMinutesForDateTime(scheduledStart, nowZoned);
             }
         }
     } catch (e) {
@@ -670,15 +676,21 @@ const getDateFromTimestampLike = (value: any): Date | null => {
     }
 };
 
-const computeLateMinutes = (shiftStart: string, clockIn: Timestamp | null | undefined): number => {
-    if (!shiftStart || !clockIn) return 0;
-    const clockInDate = getDateFromTimestampLike(clockIn);
-    if (!clockInDate) return 0;
+const calculateLateMinutesForDateTime = (shiftStart: string, dateTime: DateTime | null): number => {
+    if (!shiftStart || !dateTime) return 0;
     const [hour, minute] = shiftStart.split(':').map(Number);
     if (Number.isNaN(hour) || Number.isNaN(minute)) return 0;
     const scheduledMinutes = hour * 60 + minute;
-    const actualMinutes = clockInDate.getHours() * 60 + clockInDate.getMinutes();
+    const actualMinutes = dateTime.hour * 60 + dateTime.minute;
     return Math.max(0, actualMinutes - scheduledMinutes);
+};
+
+const computeLateMinutes = (shiftStart: string, clockIn: Timestamp | null | undefined, timezone: string): number => {
+    if (!shiftStart || !clockIn) return 0;
+    const clockInDate = getDateFromTimestampLike(clockIn);
+    if (!clockInDate) return 0;
+    const zoned = DateTime.fromJSDate(clockInDate).setZone(timezone, { keepLocalTime: false });
+    return calculateLateMinutesForDateTime(shiftStart, zoned);
 };
 
 const computeIsOvernightShift = (entry: ShiftEntry | undefined): boolean => {
@@ -729,7 +741,7 @@ const collectChangedScheduleSlots = (previous: MonthlySchedule | undefined, next
     return changes;
 };
 
-const recalculateLateMinutesForSlot = async (userId: string, date: string, entry: ShiftEntry | undefined) => {
+const recalculateLateMinutesForSlot = async (userId: string, date: string, entry: ShiftEntry | undefined, timezone: string) => {
     const logId = `${userId}-${date}`;
     const logRef = doc(db, 'worklogs', logId);
     const snapshot = await getDoc(logRef);
@@ -739,7 +751,7 @@ const recalculateLateMinutesForSlot = async (userId: string, date: string, entry
     if (isShiftEntryObject(entry)) {
         updates.scheduledStart = entry.startTime;
         updates.scheduledEnd = entry.endTime ?? null;
-        updates.lateMinutes = computeLateMinutes(entry.startTime, logData.clockInTime as Timestamp | undefined);
+        updates.lateMinutes = computeLateMinutes(entry.startTime, logData.clockInTime as Timestamp | undefined, timezone);
         updates.isOvernightShift = computeIsOvernightShift(entry);
     } else {
         updates.scheduledStart = null;
@@ -753,7 +765,7 @@ const recalculateLateMinutesForSlot = async (userId: string, date: string, entry
 const reconcileLateMinutesForScheduleChanges = async (previous: MonthlySchedule | undefined, next: MonthlySchedule, timezone: string) => {
     const changes = collectChangedScheduleSlots(previous, next);
     for (const change of changes) {
-        await recalculateLateMinutesForSlot(change.userId, change.date, change.entry);
+        await recalculateLateMinutesForSlot(change.userId, change.date, change.entry, timezone);
         await persistAutoClockSlot(change.userId, change.date, change.entry, timezone);
     }
 };
