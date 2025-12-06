@@ -447,9 +447,10 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
         logData.totalWorkSeconds = 0;
         logData.totalBreakSeconds = 0;
         logData.breaks = [];
+        const initialActivityStart = Timestamp.now();
         logData.activities = [{
             type: 'working',
-            startTime: serverTimestamp(),
+            startTime: initialActivityStart,
             endTime: null
         }];
     } else {
@@ -457,10 +458,11 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
         // Or if we came here after closing a zombie but today's log already existed (rare)
         const existing = docSnap.data();
         if (!existing.clockInTime) logData.clockInTime = serverTimestamp();
-        let activities = closeLatestActivityEntry(existing.activities || [], serverTimestamp());
+        const resumeActivityTs = Timestamp.now();
+        let activities = closeLatestActivityEntry(existing.activities || [], resumeActivityTs);
         activities = appendActivityEntry(activities, {
             type: 'working',
-            startTime: serverTimestamp(),
+            startTime: resumeActivityTs,
             endTime: null
         });
         logData.activities = activities;
@@ -504,7 +506,8 @@ export const performClockOut = async (uid: string) => {
 
     let activitiesUpdate: RawActivityEntry[] | undefined;
     if (Array.isArray((activeLog as any).activities)) {
-        activitiesUpdate = closeLatestActivityEntry(activeLog.activities, serverTimestamp());
+        const activityCloseTs = Timestamp.now();
+        activitiesUpdate = closeLatestActivityEntry(activeLog.activities, activityCloseTs);
     }
 
     const updatePayload: Record<string, any> = {
