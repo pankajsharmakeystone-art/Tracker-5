@@ -155,6 +155,8 @@ const LOGIN_REMINDER_MIN_INTERVAL_SECONDS = 15;
 const LOGIN_REMINDER_MAX_INTERVAL_SECONDS = 600;
 const DEFAULT_LOGIN_REMINDER_INTERVAL_SECONDS = 30;
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
+let rendererHasActiveSession = false;
+let rendererClockedInHint = false;
 
 let lastForceLogoutRequestId = null;
 let forceLogoutRequestInFlight = false;
@@ -280,6 +282,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   const uid = currentUid;
 
   agentClockedIn = false;
+  rendererClockedInHint = false;
   stopAgentStatusLoop();
 
   const wasRecording = isRecordingActive;
@@ -322,6 +325,8 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   currentUid = null;
   currentShiftDate = null;
   lastAutoClockOutTargetKey = null;
+  rendererHasActiveSession = false;
+  rendererClockedInHint = false;
 
   try { await clientAuth.signOut(); } catch (err) { console.warn('[clockOutAndSignOutDesktop] signOut failed', err?.message || err); }
 
@@ -696,14 +701,33 @@ function clearLoginReminderTimer() {
 
 function getLoginReminderContext() {
   if (!cachedAdminSettings?.loginReminderEnabled) return null;
-  if (!currentUid) {
+  const effectiveClockedIn = agentClockedIn || rendererClockedInHint;
+  if (effectiveClockedIn) return null;
+
+  const appSessionDetected = Boolean(currentUid) || rendererHasActiveSession;
+  if (!appSessionDetected) {
     return {
       title: "Tracker isn't signed in",
       message: "Open the desktop app and log in to resume tracking.",
       cta: "Log In"
     };
   }
-  return null;
+  return {
+    title: "You're currently clocked out",
+    message: "Clock in to ensure your hours are tracked.",
+    cta: "Open Tracker"
+  };
+}
+
+function updateRendererSessionHints(status) {
+  rendererHasActiveSession = true;
+  const normalized = (status || '').toLowerCase();
+  const shouldClear = normalized === 'clocked_out' || normalized === 'offline';
+  const nextHint = shouldClear ? false : (normalized === 'working' || normalized === 'online' || normalized === 'manual_break');
+  if (rendererClockedInHint !== nextHint) {
+    rendererClockedInHint = nextHint;
+    refreshLoginReminderState({ immediate: true });
+  }
 }
 
 function getLoginReminderIntervalMs() {
@@ -1164,6 +1188,13 @@ function startAgentStatusWatch(uid) {
       const remoteStatus = data.status;
       if (!remoteStatus) return;
 
+      const normalizedStatus = remoteStatus === 'break' ? 'on_break' : remoteStatus;
+      const remoteClockedIn = normalizedStatus === 'online' || normalizedStatus === 'working' || normalizedStatus === 'on_break';
+      if (agentClockedIn !== remoteClockedIn) {
+        agentClockedIn = remoteClockedIn;
+        refreshLoginReminderState({ immediate: true });
+      }
+
       if ((remoteStatus === 'offline' || remoteStatus === 'clocked_out') && (agentClockedIn || isRecordingActive)) {
         log('[agentStatusWatch] remote status is', remoteStatus, '- forcing local stop');
         applyAgentStatus(remoteStatus === 'clocked_out' ? 'clocked_out' : 'offline').catch((err) => {
@@ -1375,6 +1406,8 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     // don't assume clocked in until web tells us
     agentClockedIn = false;
+    rendererClockedInHint = false;
+    rendererHasActiveSession = true;
 
     startCommandsWatch(uid);
     startAgentStatusLoop(uid); // loop will only do idle logic if agentClockedIn === true
@@ -1411,6 +1444,8 @@ ipcMain.handle("unregister-uid", async () => {
 
     currentUid = null;
     agentClockedIn = false;
+    rendererHasActiveSession = false;
+    rendererClockedInHint = false;
     isRecordingActive = false;
     resetAutoResumeRetry();
     currentShiftDate = null;
@@ -1553,6 +1588,7 @@ async function flushPendingAgentStatuses() {
 ipcMain.handle("set-agent-status", async (_, status) => {
   try {
     log("set-agent-status received:", status); 
+    updateRendererSessionHints(status);
     if (!currentUid) {
       log('Desktop not registered yet. Queuing status:', status);
       pendingAgentStatuses.push(status);
