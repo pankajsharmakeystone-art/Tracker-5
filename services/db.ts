@@ -922,6 +922,8 @@ export const streamAllAgentStatuses = (callback: (statuses: Record<string, any>)
     });
 };
 
+const createForceLogoutRequestId = () => `flr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
 export const sendCommandToDesktop = async (uid: string, command: 'startRecording' | 'stopRecording' | 'forceLogout') => {
     const docRef = doc(db, 'desktopCommands', uid);
     await setDoc(docRef, { [command]: true, timestamp: serverTimestamp() }, { merge: true });
@@ -929,6 +931,18 @@ export const sendCommandToDesktop = async (uid: string, command: 'startRecording
 
 export const forceLogoutAgent = async (uid: string) => {
     if (!uid) return;
+
+    const forceLogoutRequestId = createForceLogoutRequestId();
+
+    try {
+        await setDoc(doc(db, 'agentStatus', uid), {
+            forceLogoutRequestId,
+            forceLogoutRequestedAt: serverTimestamp(),
+            forceLogoutRequestedBy: 'admin_panel'
+        }, { merge: true });
+    } catch (error) {
+        console.error('[forceLogoutAgent] Failed to persist force logout request metadata', error);
+    }
 
     try {
         await performClockOut(uid);

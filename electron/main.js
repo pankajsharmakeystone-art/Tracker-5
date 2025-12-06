@@ -154,6 +154,10 @@ let loginReminderActive = false;
 const LOGIN_REMINDER_MIN_INTERVAL_SECONDS = 15;
 const LOGIN_REMINDER_MAX_INTERVAL_SECONDS = 600;
 const DEFAULT_LOGIN_REMINDER_INTERVAL_SECONDS = 30;
+const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
+
+let lastForceLogoutRequestId = null;
+let forceLogoutRequestInFlight = false;
 
 let autoClockOutInterval = null;
 let lastAutoClockOutTargetKey = null;
@@ -333,6 +337,8 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   }
 
   refreshLoginReminderState({ immediate: true });
+  lastForceLogoutRequestId = null;
+  forceLogoutRequestInFlight = false;
 
   return true;
 }
@@ -438,8 +444,12 @@ function registerDevtoolsShortcuts(windowInstance) {
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 820,
+    width: 550,
+    height: 700,
+    minWidth: 550,
+    minHeight: 700,
+    resizable: false,
+    maximizable: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -450,10 +460,10 @@ function createMainWindow() {
 
   // Dev/prod URL switching
   if (isDev) {
-    mainWindow.loadURL('https://tracker-5.vercel.app');
+    mainWindow.loadURL(`https://tracker-5.vercel.app/${DEFAULT_LOGIN_ROUTE_HASH}`);
   } else {
     // Load built Vite app (adjust path if needed)
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: DEFAULT_LOGIN_ROUTE_HASH });
   }
 
   // Send handshake to renderer
@@ -693,13 +703,6 @@ function getLoginReminderContext() {
       cta: "Log In"
     };
   }
-  if (!agentClockedIn) {
-    return {
-      title: "You're currently clocked out",
-      message: "Clock in to ensure your hours are tracked.",
-      cta: "Open Tracker"
-    };
-  }
   return null;
 }
 
@@ -720,10 +723,10 @@ function showLoginReminderPopup() {
   try {
     const display = screen.getPrimaryDisplay();
     const { workArea } = display;
-    const popupWidth = 360;
-    const popupHeight = 140;
-    const x = workArea.x + 24;
-    const y = workArea.y + workArea.height - popupHeight - 24;
+    const popupWidth = 460;
+    const popupHeight = 220;
+    const x = workArea.x + Math.round((workArea.width - popupWidth) / 2);
+    const y = workArea.y + Math.round((workArea.height - popupHeight) / 2);
 
     loginReminderWindow = new BrowserWindow({
       width: popupWidth,
@@ -756,20 +759,20 @@ function showLoginReminderPopup() {
             body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: transparent; }
             .card {
               width:100%; height:100%;
-              border-radius:14px;
-              padding:16px;
-              background: linear-gradient(135deg,#111827,#1f2937);
+              border-radius:18px;
+              padding:30px;
+              background: linear-gradient(135deg,#0f172a,#1f2937);
               color:#fff;
               display:flex;
               flex-direction:column;
               justify-content:space-between;
-              box-shadow:0 12px 30px rgba(0,0,0,0.45);
+              box-shadow:0 25px 55px rgba(0,0,0,0.55);
             }
-            .header { display:flex; align-items:center; gap:12px; }
-            img { width:48px; height:48px; border-radius:10px; }
-            h1 { font-size:16px; margin:0; }
-            p { margin:8px 0 0; font-size:13px; color:rgba(255,255,255,0.85); }
-            button { margin-top:12px; padding:10px 14px; border:none; border-radius:8px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; font-size:13px; }
+            .header { display:flex; align-items:center; gap:18px; }
+            img { width:64px; height:64px; border-radius:14px; }
+            h1 { font-size:20px; margin:0; letter-spacing:0.3px; }
+            p { margin:10px 0 0; font-size:15px; color:rgba(255,255,255,0.85); line-height:1.5; }
+            button { margin-top:20px; padding:14px 18px; border:none; border-radius:12px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; font-size:14px; box-shadow:0 10px 25px rgba(37,99,235,0.35); }
             button:hover { background:#1d4ed8; }
             button:active { transform:scale(0.98); }
           </style>
@@ -845,6 +848,35 @@ function refreshLoginReminderState({ immediate = false } = {}) {
 
   if (!loginReminderTimer) {
     scheduleLoginReminderTick();
+  }
+}
+
+async function acknowledgeForceLogoutRequest(uid) {
+  if (!uid) return;
+  try {
+    await db.collection('agentStatus').doc(uid).set({
+      forceLogoutRequestId: FieldValue.delete(),
+      forceLogoutRequestedAt: FieldValue.delete(),
+      forceLogoutCompletedAt: FieldValue.serverTimestamp()
+    }, { merge: true });
+  } catch (error) {
+    console.warn('[forceLogout] Failed to acknowledge request', error?.message || error);
+  }
+}
+
+async function handleRemoteForceLogoutRequest(requestId) {
+  if (!currentUid || forceLogoutRequestInFlight) return;
+  const targetUid = currentUid;
+  forceLogoutRequestInFlight = true;
+  log('[agentStatusWatch] Force logout request detected', requestId);
+  try {
+    await clockOutAndSignOutDesktop('force_logout_remote', { notifyRenderer: true });
+  } catch (error) {
+    console.error('[forceLogout] Failed to process remote request', error?.message || error);
+  } finally {
+    await acknowledgeForceLogoutRequest(targetUid);
+    forceLogoutRequestInFlight = false;
+    lastForceLogoutRequestId = null;
   }
 }
 
@@ -1111,11 +1143,24 @@ function startAgentStatusWatch(uid) {
   try {
     stopAgentStatusWatch();
     if (!uid) return;
+    lastForceLogoutRequestId = null;
+    forceLogoutRequestInFlight = false;
     const docRef = db.collection('agentStatus').doc(uid);
     agentStatusUnsub = docRef.onSnapshot((snap) => {
       if (!snap.exists) return;
       if (snap.metadata?.hasPendingWrites) return; // skip local echoes
       const data = snap.data() || {};
+      const remoteForceLogoutRequestId = data.forceLogoutRequestId || null;
+      if (remoteForceLogoutRequestId) {
+        if (remoteForceLogoutRequestId !== lastForceLogoutRequestId) {
+          lastForceLogoutRequestId = remoteForceLogoutRequestId;
+          handleRemoteForceLogoutRequest(remoteForceLogoutRequestId).catch((error) => {
+            console.error('[agentStatusWatch] Failed to honor force logout request', error?.message || error);
+          });
+        }
+        return;
+      }
+      lastForceLogoutRequestId = null;
       const remoteStatus = data.status;
       if (!remoteStatus) return;
 
