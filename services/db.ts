@@ -227,6 +227,35 @@ const getDocMillis = (d: any) => {
     return 0;
 };
 
+type RawActivityEntry = {
+    type?: string;
+    startTime?: any;
+    endTime?: any;
+    cause?: string;
+};
+
+const cloneActivityEntries = (raw: any): RawActivityEntry[] => (
+    Array.isArray(raw) ? raw.map((entry: RawActivityEntry) => ({ ...entry })) : []
+);
+
+const closeLatestActivityEntry = (raw: any, endTime: any): RawActivityEntry[] => {
+    const activities = cloneActivityEntries(raw);
+    if (!activities.length) return activities;
+    const lastIndex = activities.length - 1;
+    const last = { ...activities[lastIndex] };
+    if (!last.endTime) {
+        last.endTime = endTime;
+        activities[lastIndex] = last;
+    }
+    return activities;
+};
+
+const appendActivityEntry = (raw: any, entry: RawActivityEntry): RawActivityEntry[] => {
+    const activities = cloneActivityEntries(raw);
+    activities.push(entry);
+    return activities;
+};
+
 /**
  * Creates a WorkLog ID based strictly on the local date of clock-in.
  * ID format: uid-YYYY-MM-DD
@@ -302,11 +331,28 @@ export const streamActiveWorkLog = (uid: string, callback: (log: WorkLog | null)
  */
 export const forceCloseLog = async (logId: string, endTime: Date) => {
     const ref = doc(db, 'worklogs', logId);
-    await updateDoc(ref, {
+    const snapshot = await getDoc(ref);
+    const endTimestamp = Timestamp.fromDate(endTime);
+
+    let activitiesUpdate: RawActivityEntry[] | undefined;
+    if (snapshot.exists()) {
+        const rawActivities = (snapshot.data() as any)?.activities;
+        if (Array.isArray(rawActivities)) {
+            activitiesUpdate = closeLatestActivityEntry(rawActivities, endTimestamp);
+        }
+    }
+
+    const payload: Record<string, any> = {
         status: 'clocked_out',
-        clockOutTime: Timestamp.fromDate(endTime),
+        clockOutTime: endTimestamp,
         lastEventTimestamp: serverTimestamp()
-    });
+    };
+
+    if (activitiesUpdate) {
+        payload.activities = activitiesUpdate;
+    }
+
+    await updateDoc(ref, payload);
 };
 
 /**
@@ -401,11 +447,23 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
         logData.totalWorkSeconds = 0;
         logData.totalBreakSeconds = 0;
         logData.breaks = [];
+        logData.activities = [{
+            type: 'working',
+            startTime: serverTimestamp(),
+            endTime: null
+        }];
     } else {
         // Just resuming today's session if it was previously clocked out (re-entry)
         // Or if we came here after closing a zombie but today's log already existed (rare)
         const existing = docSnap.data();
         if (!existing.clockInTime) logData.clockInTime = serverTimestamp();
+        let activities = closeLatestActivityEntry(existing.activities || [], serverTimestamp());
+        activities = appendActivityEntry(activities, {
+            type: 'working',
+            startTime: serverTimestamp(),
+            endTime: null
+        });
+        logData.activities = activities;
     }
 
     Object.keys(logData).forEach(key => logData[key] === undefined && delete logData[key]);
@@ -444,13 +502,24 @@ export const performClockOut = async (uid: string) => {
         }
     }
 
-    await updateDoc(logDocRef, {
+    let activitiesUpdate: RawActivityEntry[] | undefined;
+    if (Array.isArray((activeLog as any).activities)) {
+        activitiesUpdate = closeLatestActivityEntry(activeLog.activities, serverTimestamp());
+    }
+
+    const updatePayload: Record<string, any> = {
         status: 'clocked_out',
         clockOutTime: serverTimestamp(),
         totalWorkSeconds: increment(workDuration),
         totalBreakSeconds: increment(breakDuration),
         lastEventTimestamp: serverTimestamp(),
-    });
+    };
+
+    if (activitiesUpdate) {
+        updatePayload.activities = activitiesUpdate;
+    }
+
+    await updateDoc(logDocRef, updatePayload);
 
     await updateAgentStatus(uid, 'offline', {
         manualBreak: false,

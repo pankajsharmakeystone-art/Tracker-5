@@ -5,7 +5,7 @@ import { useAgentLiveStream } from '../hooks/useAgentLiveStream';
 import { updateWorkLog, getTeamById, streamActiveWorkLog, updateAgentStatus, streamGlobalAdminSettings, performClockOut, performClockIn, isSessionStale, closeStaleSession } from '../services/db';
 import { serverTimestamp, increment, Timestamp, doc, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import type { WorkLog, Team, TeamSettings, AdminSettingsType } from '../types';
+import type { WorkLog, Team, TeamSettings, AdminSettingsType, ActivityEntry } from '../types';
 import Spinner from './Spinner';
 import ActivitySheet from './ActivitySheet';
 import AgentScheduleView from './AgentScheduleView';
@@ -66,6 +66,34 @@ const deriveBreakDurations = (log: WorkLog, nowMs: number, getMillis: (ts: any) 
     }
 
     return { manualSeconds, idleSeconds };
+};
+
+type SerializedActivity = ActivityEntry & Record<string, any>;
+
+const cloneActivities = (entries?: SerializedActivity[]): SerializedActivity[] => (
+    Array.isArray(entries) ? entries.map((entry) => ({ ...entry })) : []
+);
+
+const closeLatestActivity = (entries: SerializedActivity[], endTime: Timestamp) => {
+    if (!entries.length) return entries;
+    const updated = [...entries];
+    const lastIndex = updated.length - 1;
+    const last = { ...updated[lastIndex] };
+    if (!last.endTime) {
+        last.endTime = endTime;
+        updated[lastIndex] = last;
+    }
+    return updated;
+};
+
+const transitionActivities = (
+    entries: SerializedActivity[] | undefined,
+    transitionTs: Timestamp,
+    nextEntry: SerializedActivity
+): SerializedActivity[] => {
+    const closed = closeLatestActivity(cloneActivities(entries), transitionTs);
+    closed.push(nextEntry);
+    return closed;
 };
 
 const AgentPanel: React.FC = () => {
@@ -231,12 +259,20 @@ const AgentPanel: React.FC = () => {
                         idleBreakActiveRef.current = true;
                         const wDur = getDuration(currentLog.lastEventTimestamp);
                         const newBreaks = [...(currentLog.breaks || [])];
-                        newBreaks.push({ startTime: Timestamp.now(), endTime: null, cause: 'idle' });
+                        const idleStartTs = Timestamp.now();
+                        newBreaks.push({ startTime: idleStartTs, endTime: null, cause: 'idle' });
+                        const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, idleStartTs, {
+                            type: 'on_break',
+                            cause: 'idle',
+                            startTime: idleStartTs,
+                            endTime: null
+                        } as SerializedActivity);
                         updateWorkLog(currentLog.id, {
                             status: 'on_break',
                             totalWorkSeconds: increment(wDur),
                             lastEventTimestamp: serverTimestamp(),
                             breaks: newBreaks,
+                            activities
                         });
                     }
                     // Auto-Resume
@@ -245,14 +281,21 @@ const AgentPanel: React.FC = () => {
                         // Don't auto-resume if it was a manual break (handled by manualBreak check above generally, but good to be safe)
                         const bDur = getDuration(currentLog.lastEventTimestamp);
                         const newBreaks = [...(currentLog.breaks || [])];
-                        if(newBreaks.length > 0) {
-                             newBreaks[newBreaks.length - 1].endTime = Timestamp.now();
-                        }
+                        const resumeTs = Timestamp.now();
+                            if (newBreaks.length > 0) {
+                                newBreaks[newBreaks.length - 1].endTime = resumeTs;
+                            }
+                        const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, resumeTs, {
+                            type: 'working',
+                            startTime: resumeTs,
+                            endTime: null
+                        } as SerializedActivity);
                         updateWorkLog(currentLog.id, {
                             status: 'working',
                             totalBreakSeconds: increment(bDur),
                             lastEventTimestamp: serverTimestamp(),
                             breaks: newBreaks,
+                            activities
                         });
                         updateAgentStatus(uid, 'online', {
                             manualBreak: false,
@@ -311,13 +354,22 @@ const AgentPanel: React.FC = () => {
         try {
             const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
             const newBreaks = [...(workLog.breaks || [])];
-            newBreaks.push({ startTime: Timestamp.now(), endTime: null, cause: 'manual' });
+            const breakStartTs = Timestamp.now();
+            newBreaks.push({ startTime: breakStartTs, endTime: null, cause: 'manual' });
+
+            const activities = transitionActivities(workLog.activities as SerializedActivity[] | undefined, breakStartTs, {
+                type: 'on_break',
+                cause: 'manual',
+                startTime: breakStartTs,
+                endTime: null
+            } as SerializedActivity);
 
             await updateWorkLog(workLog.id, {
                 status: 'on_break',
                 totalWorkSeconds: increment(dur),
                 lastEventTimestamp: serverTimestamp(),
-                breaks: newBreaks
+                breaks: newBreaks,
+                activities
             });
             await updateAgentStatus(userData.uid, 'break', { manualBreak: true, breakStartedAt: serverTimestamp() });
             await notifyDesktopStatus('manual_break');
@@ -336,13 +388,21 @@ const AgentPanel: React.FC = () => {
         try {
             const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
             const newBreaks = [...(workLog.breaks || [])];
-            if(newBreaks.length > 0) newBreaks[newBreaks.length - 1].endTime = Timestamp.now();
+            const breakEndTs = Timestamp.now();
+            if (newBreaks.length > 0) newBreaks[newBreaks.length - 1].endTime = breakEndTs;
+
+            const activities = transitionActivities(workLog.activities as SerializedActivity[] | undefined, breakEndTs, {
+                type: 'working',
+                startTime: breakEndTs,
+                endTime: null
+            } as SerializedActivity);
 
             await updateWorkLog(workLog.id, {
                 status: 'working',
                 totalBreakSeconds: increment(dur),
                 lastEventTimestamp: serverTimestamp(),
-                breaks: newBreaks
+                breaks: newBreaks,
+                activities
             });
             await updateAgentStatus(userData.uid, 'online', { manualBreak: false, breakStartedAt: deleteField() });
             await notifyDesktopStatus('working');

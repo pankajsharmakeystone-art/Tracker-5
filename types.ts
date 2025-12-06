@@ -6,9 +6,13 @@ export interface BreakEntry {
     cause?: 'manual' | 'idle';
 }
 
+export type ActivityType = 'working' | 'on_break';
+
 export interface ActivityEntry {
+    type: ActivityType;
     startTime: any;
-    endTime: any;
+    endTime: any | null;
+    cause?: 'manual' | 'idle';
 }
 
 export interface WorkLog {

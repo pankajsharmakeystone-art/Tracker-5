@@ -4,6 +4,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
     startTime: Date;
     endTime: Date | null;
     durationSeconds: number;
+    cause?: 'manual' | 'idle';
 }> {
     const toDate = (ts: any): Date | null => {
         if (!ts) return null;
@@ -35,6 +36,31 @@ export function transformFirestoreWorklog(docData: any): Array<{
         return new Date(endMs + increments * DAY_MS);
     };
 
+    if (Array.isArray(docData.activities) && docData.activities.length > 0) {
+        const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
+        const segments = docData.activities
+            .filter((entry: any) => entry && entry.startTime)
+            .map((entry: any) => {
+                const start = toDate(entry.startTime);
+                if (!start) return null;
+                const end = toDate(entry.endTime);
+                const effectiveEnd = end ?? nowDate;
+                const durationSeconds = Math.max(0, (effectiveEnd.getTime() - start.getTime()) / 1000);
+                const normalizedType = (entry.type || '').toLowerCase() === 'on_break' ? 'On Break' : 'Working';
+                const cause = entry.cause === 'idle' ? 'idle' : entry.cause === 'manual' ? 'manual' : undefined;
+                return {
+                    type: normalizedType as 'Working' | 'On Break',
+                    startTime: start,
+                    endTime: end ?? null,
+                    durationSeconds,
+                    cause,
+                };
+            })
+            .filter(Boolean) as Array<{ type: 'Working' | 'On Break'; startTime: Date; endTime: Date | null; durationSeconds: number; cause?: 'manual' | 'idle'; }>;
+
+        return segments.sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0));
+    }
+
     // If it has a breaks array, use that structure
     if (Array.isArray(docData.breaks)) {
         const segments: Array<{
@@ -42,6 +68,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
             startTime: Date;
             endTime: Date | null;
             durationSeconds: number;
+            cause?: 'manual' | 'idle';
         }> = [];
 
         const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
@@ -96,6 +123,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
                 startTime: breakStart,
                 endTime: breakEnd ?? null,
                 durationSeconds,
+                cause: breakEntry?.cause,
             });
 
             cursor = breakEnd ?? null;
@@ -156,10 +184,11 @@ interface Props {
 }
 
 interface Segment {
-    type: 'Working' | 'Break';
+    type: 'Working' | 'On Break';
     startTime: Date;
     endTime: Date | null;
     durationSeconds: number;
+    cause?: 'manual' | 'idle';
 }
 
 const toDate = (ts: any): Date | null => {
@@ -231,7 +260,9 @@ const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog,
                                 {seg.type === 'Working' ? (
                                     <span className="text-green-800 dark:text-green-300 font-bold">Working</span>
                                 ) : (
-                                    <span className="text-yellow-800 dark:text-yellow-300 font-bold">On Break</span>
+                                    <span className="text-yellow-800 dark:text-yellow-300 font-bold">
+                                        {seg.cause ? `On Break (${seg.cause === 'idle' ? 'Idle' : 'Manual'})` : 'On Break'}
+                                    </span>
                                 )}
                             </td>
 
