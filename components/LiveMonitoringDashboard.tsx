@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
 import { DateTime } from 'luxon';
-import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone } from '../services/db';
+import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent } from '../services/db';
 import { useAuth } from '../hooks/useAuth';
 import type { WorkLog } from '../types';
 import Spinner from './Spinner';
@@ -323,6 +323,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [liveStreamAgent, setLiveStreamAgent] = useState<{ uid: string; displayName: string; teamId?: string } | null>(null);
     const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
     const [organizationTimezone, setOrganizationTimezone] = useState<string>('UTC');
+    const [forceLogoutPending, setForceLogoutPending] = useState<string | null>(null);
     
     const [selectedDate, setSelectedDate] = useState(() => {
         const d = new Date();
@@ -451,10 +452,35 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         return false;
     };
 
+    const canForceLogoutAgent = (log: WorkLog) => {
+        if (!log?.userId || !userData) return false;
+        if (userData.role === 'admin') return true;
+        if (userData.role === 'manager' && log.teamId) {
+            return managerTeamIds.includes(log.teamId);
+        }
+        return false;
+    };
+
     const handleLiveStream = (log: WorkLog) => {
         if (!log?.userId || !canRequestStreamForAgent(log)) return;
         setLiveStreamAgent({ uid: log.userId, displayName: log.userDisplayName, teamId: log.teamId });
         setIsLiveModalOpen(true);
+    };
+
+    const handleForceLogoutAgent = async (log: WorkLog) => {
+        if (!canForceLogoutAgent(log)) return;
+        if (!log?.userId) return;
+        const confirmation = window.confirm(`Force logout ${log.userDisplayName || 'this agent'}? This will clock them out immediately and disconnect their desktop app.`);
+        if (!confirmation) return;
+        setForceLogoutPending(log.userId);
+        try {
+            await forceLogoutAgent(log.userId);
+        } catch (error) {
+            console.error('[LiveMonitoringDashboard] Failed to force logout agent', error);
+            alert('Failed to force logout agent. Please try again or contact support.');
+        } finally {
+            setForceLogoutPending(null);
+        }
     };
 
     const closeLiveStreamModal = () => {
@@ -601,6 +627,17 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             title="Force Close Session"
                                         >
                                             Close
+                                        </button>
+                                    )}
+                                    {canForceLogoutAgent(agent) && (
+                                        <button
+                                            onClick={() => handleForceLogoutAgent(agent)}
+                                            disabled={forceLogoutPending === agent.userId}
+                                            className={`w-6 h-6 rounded-full border border-red-500 bg-red-500/90 hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-red-500 transition disabled:opacity-50 disabled:cursor-not-allowed`}
+                                            title="Force Logout"
+                                            aria-label="Force Logout"
+                                        >
+                                            <span className="sr-only">Force Logout</span>
                                         </button>
                                     )}
                                 </td>

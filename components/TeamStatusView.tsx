@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { streamTodayWorkLogs, streamAllAgentStatuses, streamGlobalAdminSettings, sendCommandToDesktop, forceLogoutAgent } from '../services/db';
+import { streamTodayWorkLogs, streamAllAgentStatuses, streamGlobalAdminSettings, sendCommandToDesktop } from '../services/db';
 import type { WorkLog, AdminSettingsType } from '../types';
 import Spinner from './Spinner';
 import { Timestamp } from 'firebase/firestore';
@@ -10,7 +10,6 @@ interface Props {
     currentUserId?: string;
     isMinimizable?: boolean;
     canControlRecording?: boolean; // New prop to restrict access to controls
-    allowForceLogout?: boolean;
 }
 
 const formatDuration = (totalSeconds: number): string => {
@@ -36,14 +35,13 @@ const getStatusIndicator = (status: WorkLog['status']) => {
     }
 };
 
-const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable = false, canControlRecording = false, allowForceLogout = false }) => {
+const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable = false, canControlRecording = false }) => {
     const [isMinimized, setIsMinimized] = useState(false);
     const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
     const [agentStatuses, setAgentStatuses] = useState<Record<string, any>>({});
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
     const [loading, setLoading] = useState(true);
     const [now, setNow] = useState(() => Date.now());
-    const [forceLogoutTarget, setForceLogoutTarget] = useState<string | null>(null);
 
     useEffect(() => {
         setLoading(true);
@@ -82,21 +80,6 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
 
     const handleStopRecording = async (uid: string) => {
         await sendCommandToDesktop(uid, 'stopRecording');
-    };
-
-    const handleForceLogout = async (uid: string, displayName: string) => {
-        const confirmation = window.confirm(`Force logout ${displayName || 'this agent'}? This will clock them out immediately and disconnect their desktop app.`);
-        if (!confirmation) return;
-
-        setForceLogoutTarget(uid);
-        try {
-            await forceLogoutAgent(uid);
-        } catch (error) {
-            console.error('[TeamStatusView] Failed to force logout agent', error);
-            alert('Failed to force logout agent. Please try again or contact support.');
-        } finally {
-            setForceLogoutTarget(null);
-        }
     };
 
     // Deduplicate logs by userId to ensure one row per agent in this status view
@@ -142,7 +125,6 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
     });
 
     const showRecordingControls = canControlRecording && adminSettings?.recordingMode === 'manual';
-    const showForceLogout = allowForceLogout;
 
     return (
         <div className="mb-8 bg-white dark:bg-gray-800/50 shadow-md rounded-xl border dark:border-gray-700">
@@ -205,7 +187,6 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                         const agentStatus = agentStatuses[log.userId];
                                         const isConnected = agentStatus?.isDesktopConnected === true;
                                         const isRecording = agentStatus?.isRecording === true;
-                                        const isForceLogoutBusy = forceLogoutTarget === log.userId;
 
                                         return (
                                             <div 
@@ -242,18 +223,6 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                                 <i className="fa-solid fa-stop"></i>
                                                             </button>
                                                         </div>
-                                                    )}
-
-                                                    {showForceLogout && (
-                                                        <button
-                                                            onClick={() => handleForceLogout(log.userId, log.userDisplayName)}
-                                                            disabled={isForceLogoutBusy}
-                                                            className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold rounded-md border border-red-200 text-red-600 bg-red-50 hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed dark:border-red-800 dark:text-red-200 dark:bg-red-900/40 dark:hover:bg-red-900"
-                                                            title="Force logout and clock out this agent"
-                                                        >
-                                                            <i className="fa-solid fa-right-from-bracket"></i>
-                                                            {isForceLogoutBusy ? 'Logging out…' : 'Force Logout'}
-                                                        </button>
                                                     )}
 
                                                     <div className="flex items-center gap-4 w-32 justify-end">
