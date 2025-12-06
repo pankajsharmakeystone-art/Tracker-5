@@ -633,7 +633,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                         <button
                                             onClick={() => handleForceLogoutAgent(agent)}
                                             disabled={forceLogoutPending === agent.userId}
-                                            className={`w-3 h-3 rounded-full border border-red-500 bg-red-500/90 hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-red-500 transition disabled:opacity-50 disabled:cursor-not-allowed`}
+                                            className={`w-4 h-4 rounded-full border border-red-500 bg-red-500/90 hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-red-500 transition disabled:opacity-50 disabled:cursor-not-allowed`}
                                             title="Force Logout"
                                             aria-label="Force Logout"
                                         >
