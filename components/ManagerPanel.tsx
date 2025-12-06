@@ -77,6 +77,7 @@ const ManagerPanel: React.FC = () => {
                             teamId={team.id} 
                             canControlRecording={true} 
                             isMinimizable={true} 
+                            allowForceLogout={true}
                         />
                     </div>
                 ))}

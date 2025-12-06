@@ -126,7 +126,7 @@ declare global {
             setAgentStatus: (status: string) => Promise<any>;
             requestScreenSources: () => Promise<any>;
             stopRecording: () => Promise<any>;
-            notifyRecordingSaved: (fileName: string, data: any) => Promise<any>;
+            notifyRecordingSaved: (fileName: string, data: any, meta?: { isLastSession?: boolean }) => Promise<any>;
             getIdleTime: () => Promise<number>;
             uploadToDropbox: (filePath: string) => Promise<any>;
             getRecordingQuality: () => Promise<any>;

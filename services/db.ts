@@ -927,7 +927,24 @@ export const streamAllAgentStatuses = (callback: (statuses: Record<string, any>)
     });
 };
 
-export const sendCommandToDesktop = async (uid: string, command: 'startRecording' | 'stopRecording') => {
+export const sendCommandToDesktop = async (uid: string, command: 'startRecording' | 'stopRecording' | 'forceLogout') => {
     const docRef = doc(db, 'desktopCommands', uid);
     await setDoc(docRef, { [command]: true, timestamp: serverTimestamp() }, { merge: true });
+};
+
+export const forceLogoutAgent = async (uid: string) => {
+    if (!uid) return;
+
+    try {
+        await performClockOut(uid);
+    } catch (error) {
+        console.error('[forceLogoutAgent] Failed to clock out user before forcing logout', error);
+    }
+
+    try {
+        await sendCommandToDesktop(uid, 'forceLogout');
+    } catch (error) {
+        console.error('[forceLogoutAgent] Failed to dispatch force logout command to desktop', error);
+        throw error;
+    }
 };

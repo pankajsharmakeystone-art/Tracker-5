@@ -156,6 +156,8 @@ let autoClockSlots = {};
 let currentShiftDate = null;
 let systemLocked = false;
 let manualBreakActive = false;
+let autoResumeInFlight = false;
+let systemLockIdleActive = false;
 
 // Dropbox token management
 let cachedDropboxAccessToken = null;
@@ -174,26 +176,115 @@ const buildDesktopStatusMetadata = () => ({
   isDesktopConnected: true
 });
 
+const isAutoRecordingEnabled = () => {
+  const settings = cachedAdminSettings || {};
+  const mode = String(settings.recordingMode || 'auto').toLowerCase();
+  if (settings.allowRecording === false) return false;
+  return mode === 'auto';
+};
+
 async function resumeRecordingIfNeeded(uid) {
-  if (!uid) return;
-  if (cachedAdminSettings?.recordingMode === 'auto' && cachedAdminSettings?.allowRecording) {
-    if (!isRecordingActive) {
-      isRecordingActive = true;
-      await db.collection('agentStatus').doc(uid)
-        .set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
-        .catch(() => {});
-      showRecordingPopup("Recording resumed");
-      if (mainWindow && mainWindow.webContents) {
-        try {
-          mainWindow.webContents.send("command-start-recording", { uid });
-        } catch (e) {
-          log("Failed to signal renderer about recording resume", e?.message || e);
-        }
-      }
-    } else {
-      log("Recording already active, skipping auto resume.");
+  if (!uid || !agentClockedIn) return;
+  if (!isAutoRecordingEnabled()) return;
+  if (isRecordingActive) {
+    log("Recording already active, skipping auto resume.");
+    return;
+  }
+
+  isRecordingActive = true;
+  await db.collection('agentStatus').doc(uid)
+    .set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
+    .catch(() => {});
+  showRecordingPopup("Recording resumed");
+  if (mainWindow && mainWindow.webContents) {
+    try {
+      mainWindow.webContents.send("command-start-recording", { uid });
+    } catch (e) {
+      log("Failed to signal renderer about recording resume", e?.message || e);
     }
   }
+}
+
+const scheduleAutoResumeRecording = () => {
+  if (autoResumeInFlight) return;
+  if (!currentUid || !agentClockedIn) return;
+  if (!isRecordingActive) return;
+  if (!isAutoRecordingEnabled()) return;
+
+  autoResumeInFlight = true;
+  isRecordingActive = false;
+  log("[recording] Recorder stopped unexpectedly, attempting auto-resume.");
+
+  resumeRecordingIfNeeded(currentUid)
+    .catch((err) => log("[recording] Auto-resume failed", err?.message || err))
+    .finally(() => {
+      autoResumeInFlight = false;
+    });
+};
+
+async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", options = {}) {
+  if (!currentUid) return false;
+
+  const notifyRenderer = options?.notifyRenderer !== false;
+  const uid = currentUid;
+
+  agentClockedIn = false;
+  stopAgentStatusLoop();
+
+  const wasRecording = isRecordingActive;
+  isRecordingActive = false;
+  autoResumeInFlight = false;
+
+  await db.collection('agentStatus').doc(uid)
+    .set({ isRecording: false }, { merge: true })
+    .catch(() => {});
+
+  if (wasRecording) showRecordingPopup("Recording stopped");
+  if (mainWindow) {
+    try {
+      mainWindow.webContents.send("command-stop-recording", { uid });
+    } catch (e) {
+      log("Failed to notify renderer about recording stop during force logout", e?.message || e);
+    }
+  }
+
+  await db.collection('agentStatus').doc(uid).set({
+    status: 'offline',
+    isIdle: false,
+    idleReason: FieldValue.delete(),
+    lockedBySystem: false,
+    isDesktopConnected: false,
+    lastUpdate: FieldValue.serverTimestamp()
+  }, { merge: true }).catch(()=>{});
+
+  if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
+  stopAgentStatusWatch();
+  stopAutoClockConfigWatch();
+  pendingAgentStatuses.length = 0;
+  manualBreakNotified.delete(uid);
+  manualBreakActive = false;
+  systemLockIdleActive = false;
+  systemLocked = false;
+  lastIdleState = false;
+
+  currentUid = null;
+  currentShiftDate = null;
+  lastAutoClockOutTargetKey = null;
+
+  try { await clientAuth.signOut(); } catch (err) { console.warn('[clockOutAndSignOutDesktop] signOut failed', err?.message || err); }
+
+  try {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send("clear-desktop-uid");
+      if (notifyRenderer) {
+        mainWindow.webContents.send("signed-out", { reason });
+      }
+    }
+  } catch (e) {
+    console.warn('[clockOutAndSignOutDesktop] renderer notification failed', e?.message || e);
+  }
+
+  return true;
 }
 
 async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
@@ -222,6 +313,7 @@ async function pushActiveStatus(uid, { idleSecs } = {}) {
       ...buildDesktopStatusMetadata()
     }, { merge: true })
     .catch(() => {});
+  systemLockIdleActive = false;
   await resumeRecordingIfNeeded(uid);
 }
 
@@ -231,13 +323,16 @@ function registerSystemLockHandlers() {
     systemLocked = true;
     if (!currentUid || !agentClockedIn || manualBreakActive || lastIdleState) return;
     lastIdleState = true;
+    systemLockIdleActive = true;
     await pushIdleStatus(currentUid, { idleSecs: powerMonitor.getSystemIdleTime(), reason: 'system_lock' });
   });
 
   powerMonitor.on('unlock-screen', async () => {
     log('System unlock event detected');
     systemLocked = false;
-    if (!currentUid || !agentClockedIn || !lastIdleState) return;
+    const shouldResume = systemLockIdleActive || lastIdleState;
+    systemLockIdleActive = false;
+    if (!currentUid || !agentClockedIn || !shouldResume) return;
     lastIdleState = false;
     await pushActiveStatus(currentUid, { idleSecs: powerMonitor.getSystemIdleTime() });
   });
@@ -620,6 +715,13 @@ function startCommandsWatch(uid) {
       await db.collection("desktopCommands").doc(uid).update({ stopRecording: false }).catch(()=>{});
     }
 
+    if (cmd.forceLogout) {
+      log("command forceLogout received");
+      await clockOutAndSignOutDesktop("force_logout", { notifyRenderer: true });
+      await db.collection("desktopCommands").doc(uid).update({ forceLogout: false }).catch(()=>{});
+      return;
+    }
+
     if (cmd.forceBreak) {
       log("force break cmd");
       await db.collection('agentStatus').doc(uid)
@@ -678,10 +780,16 @@ function startAgentStatusLoop(uid) {
       const idleSecs = powerMonitor.getSystemIdleTime();
       const timedOutIdle = idleLimit > 0 ? idleSecs >= idleLimit : false;
       const shouldForceIdle = systemLocked || timedOutIdle;
-      const idleReason = systemLocked ? 'system_lock' : 'auto_idle';
+      const idleReason = systemLocked ? 'system_lock' : (timedOutIdle ? 'auto_idle' : null);
 
-      // Debug log
-      console.log("⏱ Idle check → secs:", idleSecs, "limit:", idleLimit, "isIdle:", isIdle, "lastIdleState:", lastIdleState);
+      // Debug log (helps distinguish system-lock vs inactivity)
+      console.log(
+        "⏱ Idle check → secs:", idleSecs,
+        "limit:", idleLimit,
+        "timedOutIdle:", timedOutIdle,
+        "systemLocked:", systemLocked,
+        "lastIdleState:", lastIdleState
+      );
 
       // --------------------------------------------
       // Respect manualBreak flag in Firestore — if manualBreak is true, DO NOT perform idle transitions
@@ -1273,7 +1381,8 @@ ipcMain.handle("stop-recording", async () => {
   }
 });
 
-ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer) => {
+ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta = {}) => {
+  const shouldEvaluateAutoResume = Boolean(meta?.isLastSession);
   try {
     const buffer = Buffer.from(arrayBuffer);
     const filePath = path.join(RECORDINGS_DIR, fileName);
@@ -1302,6 +1411,10 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer) => {
   } catch(e){
     console.error("[notify-recording-saved] error", e);
     return { success: false, error: e.message };
+  } finally {
+    if (shouldEvaluateAutoResume) {
+      scheduleAutoResumeRecording();
+    }
   }
 });
 
@@ -1326,50 +1439,7 @@ ipcMain.handle("request-sign-out", async () => {
 // Clock out and then unregister (used when web chooses "Clock Out & Sign Out")
 ipcMain.handle("clock-out-and-sign-out", async () => {
   try {
-    if (currentUid) {
-      // perform same actions as manual clock out
-      agentClockedIn = false;
-      stopAgentStatusLoop();
-      
-      // ⚡ FIX: Force stop logic
-      const wasRecording = isRecordingActive;
-      isRecordingActive = false;
-      await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
-      
-      if (wasRecording) showRecordingPopup("Recording stopped");
-      
-      // ALWAYS tell renderer to stop
-      if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid: currentUid });
-
-      // mark offline
-      await db.collection('agentStatus').doc(currentUid).set({
-        status: 'offline',
-        isIdle: false,
-        isDesktopConnected: false,
-        lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true }).catch(()=>{});
-
-      // unregister user on desktop
-      if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
-      stopAgentStatusWatch();
-      stopAutoClockConfigWatch();
-      currentUid = null;
-      agentClockedIn = false;
-      isRecordingActive = false;
-      currentShiftDate = null;
-      lastAutoClockOutTargetKey = null;
-      try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[clock-out-and-sign-out] signOut failed", signOutErr?.message || signOutErr); }
-
-      // ensure renderer clears any locally-stored desktop UID to prevent auto login
-      try {
-        if (mainWindow && mainWindow.webContents) {
-          mainWindow.webContents.send("clear-desktop-uid");
-        }
-      } catch(e) { console.warn("[clock-out-and-sign-out] failed to send clear-desktop-uid", e); }
-
-      // notify renderer
-      if (mainWindow) mainWindow.webContents.send("signed-out", { reason: "clocked_out_and_signed_out" });
-    }
+    await clockOutAndSignOutDesktop("clocked_out_and_signed_out", { notifyRenderer: true });
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };

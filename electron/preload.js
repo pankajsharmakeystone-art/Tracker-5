@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   // recording flow
   requestScreenSources: () => ipcRenderer.invoke("start-recording"),
   stopRecording: () => ipcRenderer.invoke("stop-recording"),
-  notifyRecordingSaved: (fileName, data) => ipcRenderer.invoke("notify-recording-saved", fileName, data),
+  notifyRecordingSaved: (fileName, data, meta = {}) => ipcRenderer.invoke("notify-recording-saved", fileName, data, meta || {}),
 
   // idle
   getIdleTime: () => ipcRenderer.invoke("get-idle-time"),

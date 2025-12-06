@@ -102,7 +102,7 @@ const AdminPanel: React.FC = () => {
         <div>
             <h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-200 mb-4">Admin Controls</h2>
             
-            <TeamStatusView canControlRecording={true} />
+            <TeamStatusView canControlRecording={true} allowForceLogout={true} />
 
             <div className="mb-6 border-b border-gray-200 dark:border-gray-700">
                 <nav className="flex flex-wrap gap-2" aria-label="Tabs">

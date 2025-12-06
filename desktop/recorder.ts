@@ -91,6 +91,7 @@ const startRecorderForSource = async (
         finalizeResolve?.();
         return;
       }
+      const isLastSession = sessions.size === 1;
 
       try {
         const blob = new Blob(session.recordedChunks, { type: 'video/webm' });
@@ -101,7 +102,7 @@ const startRecorderForSource = async (
         if (window.desktopAPI?.notifyRecordingSaved) {
           try {
             console.log(`Sending ${fileName} (${arrayBuffer.byteLength} bytes) to desktop...`);
-            await window.desktopAPI.notifyRecordingSaved(fileName, arrayBuffer);
+            await window.desktopAPI.notifyRecordingSaved(fileName, arrayBuffer, { isLastSession });
           } catch (ipcError) {
             console.error('Failed to send recording to desktop app via IPC:', ipcError);
           }
