@@ -66,6 +66,8 @@ const AdminSettings: React.FC = () => {
         manualBreakTimeoutMinutes: 30,
         organizationTimezone: 'Asia/Kolkata',
         showLiveTeamStatusToAgents: true,
+        loginReminderEnabled: false,
+        loginReminderIntervalSeconds: 30,
     };
     
     const [settings, setSettings] = useState<AdminSettingsType>(defaultSettings);
@@ -224,6 +226,29 @@ const AdminSettings: React.FC = () => {
                         checked={settings.showLiveTeamStatusToAgents ?? true}
                         onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, showLiveTeamStatusToAgents: e.target.checked }))}
                     />
+                </FormField>
+
+                <FormField label="Login Reminder" description="When enabled, the desktop app periodically prompts agents to log in or clock in if they forget.">
+                    <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+                        <ToggleSwitch
+                            id="loginReminderEnabled"
+                            checked={settings.loginReminderEnabled ?? false}
+                            onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, loginReminderEnabled: e.target.checked }))}
+                        />
+                        <div className="flex items-center gap-2">
+                            <input
+                                type="number"
+                                name="loginReminderIntervalSeconds"
+                                value={settings.loginReminderIntervalSeconds ?? 30}
+                                onChange={handleInputChange}
+                                min={15}
+                                max={600}
+                                disabled={!settings.loginReminderEnabled}
+                                className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-24 p-2.5 disabled:opacity-60 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                            />
+                            <span className="text-sm text-gray-600 dark:text-gray-300">seconds</span>
+                        </div>
+                    </div>
                 </FormField>
 
                 <FormField label="Recording Quality" description="Select the target resolution for screen recordings.">

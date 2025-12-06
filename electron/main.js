@@ -147,6 +147,13 @@ let agentClockedIn = false; // only monitor idle when true
 let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
+let loginReminderWindow = null;
+
+let loginReminderTimer = null;
+let loginReminderActive = false;
+const LOGIN_REMINDER_MIN_INTERVAL_SECONDS = 15;
+const LOGIN_REMINDER_MAX_INTERVAL_SECONDS = 600;
+const DEFAULT_LOGIN_REMINDER_INTERVAL_SECONDS = 30;
 
 let autoClockOutInterval = null;
 let lastAutoClockOutTargetKey = null;
@@ -324,6 +331,8 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   } catch (e) {
     console.warn('[clockOutAndSignOutDesktop] renderer notification failed', e?.message || e);
   }
+
+  refreshLoginReminderState({ immediate: true });
 
   return true;
 }
@@ -661,6 +670,184 @@ function showRecordingPopup(message) {
   }
 }
 
+function closeLoginReminderWindow() {
+  if (loginReminderWindow) {
+    try { loginReminderWindow.close(); } catch (e) {}
+    loginReminderWindow = null;
+  }
+}
+
+function clearLoginReminderTimer() {
+  if (loginReminderTimer) {
+    clearTimeout(loginReminderTimer);
+    loginReminderTimer = null;
+  }
+}
+
+function getLoginReminderContext() {
+  if (!cachedAdminSettings?.loginReminderEnabled) return null;
+  if (!currentUid) {
+    return {
+      title: "Tracker isn't signed in",
+      message: "Open the desktop app and log in to resume tracking.",
+      cta: "Log In"
+    };
+  }
+  if (!agentClockedIn) {
+    return {
+      title: "You're currently clocked out",
+      message: "Clock in to ensure your hours are tracked.",
+      cta: "Open Tracker"
+    };
+  }
+  return null;
+}
+
+function getLoginReminderIntervalMs() {
+  const raw = Number(cachedAdminSettings?.loginReminderIntervalSeconds);
+  let seconds = DEFAULT_LOGIN_REMINDER_INTERVAL_SECONDS;
+  if (!Number.isNaN(raw) && raw > 0) seconds = raw;
+  seconds = Math.max(LOGIN_REMINDER_MIN_INTERVAL_SECONDS, Math.min(seconds, LOGIN_REMINDER_MAX_INTERVAL_SECONDS));
+  return seconds * 1000;
+}
+
+function showLoginReminderPopup() {
+  const context = getLoginReminderContext();
+  if (!context) return;
+
+  closeLoginReminderWindow();
+
+  try {
+    const display = screen.getPrimaryDisplay();
+    const { workArea } = display;
+    const popupWidth = 360;
+    const popupHeight = 140;
+    const x = workArea.x + 24;
+    const y = workArea.y + workArea.height - popupHeight - 24;
+
+    loginReminderWindow = new BrowserWindow({
+      width: popupWidth,
+      height: popupHeight,
+      x,
+      y,
+      parent: null,
+      modal: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      frame: false,
+      transparent: false,
+      resizable: false,
+      movable: false,
+      focusable: true,
+      webPreferences: {
+        nodeIntegration: true,
+        contextIsolation: false
+      }
+    });
+
+    loginReminderWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+    const safeIconUrl = `file://${POPUP_ICON_PATH}`;
+    const html = `
+      <html>
+        <head>
+          <meta charset="utf-8"/>
+          <style>
+            body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: transparent; }
+            .card {
+              width:100%; height:100%;
+              border-radius:14px;
+              padding:16px;
+              background: linear-gradient(135deg,#111827,#1f2937);
+              color:#fff;
+              display:flex;
+              flex-direction:column;
+              justify-content:space-between;
+              box-shadow:0 12px 30px rgba(0,0,0,0.45);
+            }
+            .header { display:flex; align-items:center; gap:12px; }
+            img { width:48px; height:48px; border-radius:10px; }
+            h1 { font-size:16px; margin:0; }
+            p { margin:8px 0 0; font-size:13px; color:rgba(255,255,255,0.85); }
+            button { margin-top:12px; padding:10px 14px; border:none; border-radius:8px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; font-size:13px; }
+            button:hover { background:#1d4ed8; }
+            button:active { transform:scale(0.98); }
+          </style>
+        </head>
+        <body>
+          <div class="card" id="card">
+            <div class="header">
+              <img src="${safeIconUrl}" alt="Tracker" />
+              <div>
+                <h1>${context.title}</h1>
+                <p>${context.message}</p>
+              </div>
+            </div>
+            <button id="cta">${context.cta}</button>
+          </div>
+          <script>
+            const { ipcRenderer } = require('electron');
+            const fire = () => ipcRenderer.send('login-reminder-clicked');
+            document.getElementById('card').addEventListener('click', fire);
+            document.getElementById('cta').addEventListener('click', (event) => { event.stopPropagation(); fire(); });
+          </script>
+        </body>
+      </html>
+    `;
+
+    loginReminderWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    loginReminderWindow.on('closed', () => { loginReminderWindow = null; });
+
+    setTimeout(() => {
+      closeLoginReminderWindow();
+    }, 8000);
+  } catch (error) {
+    console.error('[login-reminder] popup failed', error?.message || error);
+  }
+}
+
+function scheduleLoginReminderTick() {
+  clearLoginReminderTimer();
+  const delay = getLoginReminderIntervalMs();
+  loginReminderTimer = setTimeout(() => {
+    loginReminderTimer = null;
+    if (!getLoginReminderContext()) {
+      loginReminderActive = false;
+      closeLoginReminderWindow();
+      return;
+    }
+    showLoginReminderPopup();
+    scheduleLoginReminderTick();
+  }, delay);
+}
+
+function refreshLoginReminderState({ immediate = false } = {}) {
+  const context = getLoginReminderContext();
+  if (!context) {
+    loginReminderActive = false;
+    clearLoginReminderTimer();
+    closeLoginReminderWindow();
+    return;
+  }
+
+  if (!loginReminderActive) {
+    loginReminderActive = true;
+    if (immediate) {
+      showLoginReminderPopup();
+    }
+    scheduleLoginReminderTick();
+    return;
+  }
+
+  if (immediate) {
+    showLoginReminderPopup();
+  }
+
+  if (!loginReminderTimer) {
+    scheduleLoginReminderTick();
+  }
+}
+
 // ---------- HELPERS: DISPLAY NAME ----------
 async function fetchDisplayName(uid) {
   try {
@@ -724,6 +911,8 @@ function applyAdminSettings(next) {
   } else {
     stopAutoClockOutWatcher();
   }
+
+  refreshLoginReminderState({ immediate: true });
 }
 
 // ---------- DESKTOP COMMANDS ----------
@@ -1089,6 +1278,8 @@ async function performAutoClockOut() {
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
 
+    refreshLoginReminderState({ immediate: true });
+
   } catch (e) {
     console.error("[performAutoClockOut] error", e);
   }
@@ -1148,6 +1339,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
     log("Registered uid:", uid);
+    refreshLoginReminderState();
     return { success: true };
   } catch(e){
     return { success: false, error: e.message };
@@ -1179,6 +1371,7 @@ ipcMain.handle("unregister-uid", async () => {
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
     try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
+    refreshLoginReminderState({ immediate: true });
     return { success: true };
   } catch(e){
     return { success: false, error: e.message };
@@ -1211,6 +1404,7 @@ async function applyAgentStatus(status) {
     if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
 
     manualBreakNotified.delete(currentUid);
+    refreshLoginReminderState();
     return { success: true };
   }
 
@@ -1234,6 +1428,7 @@ async function applyAgentStatus(status) {
       isDesktopConnected: false,
       lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(()=>{});
+    refreshLoginReminderState({ immediate: true });
     return { success: true };
   }
 
@@ -1271,6 +1466,7 @@ async function applyAgentStatus(status) {
     }, { merge: true }).catch(()=>{});
 
     manualBreakNotified.delete(currentUid);
+    refreshLoginReminderState();
     return { success: true };
   }
 
@@ -1290,6 +1486,7 @@ async function applyAgentStatus(status) {
       isIdle: true,
       lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(()=>{});
+    refreshLoginReminderState();
     return { success: true };
   }
 
@@ -1468,6 +1665,21 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta =
     if (shouldEvaluateAutoResume) {
       scheduleAutoResumeRecording();
     }
+  }
+});
+
+ipcMain.on('login-reminder-clicked', () => {
+  closeLoginReminderWindow();
+  if (mainWindow) {
+    try {
+      mainWindow.show();
+      mainWindow.focus();
+    } catch (e) {
+      console.warn('[login-reminder] failed to focus main window', e?.message || e);
+    }
+  }
+  if (loginReminderActive) {
+    scheduleLoginReminderTick();
   }
 });
 

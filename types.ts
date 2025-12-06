@@ -115,6 +115,8 @@ export interface AdminSettingsType {
     recordingQuality?: "480p" | "720p" | "1080p";
     organizationTimezone?: string;
     showLiveTeamStatusToAgents?: boolean;
+    loginReminderEnabled?: boolean;
+    loginReminderIntervalSeconds?: number;
 }
 
 declare global {
