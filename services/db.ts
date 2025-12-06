@@ -3,7 +3,7 @@ import { doc, setDoc, getDoc, serverTimestamp, collection, query, where, getDocs
 import { DateTime } from 'luxon';
 import { db } from './firebase';
 import type { User as FirebaseUser } from 'firebase/auth';
-import type { UserData, Role, Team, WorkLog, MonthlySchedule, TeamSettings, AdminSettingsType, ShiftTime, ShiftEntry } from '../types';
+import type { UserData, Role, Team, WorkLog, MonthlySchedule, AdminSettingsType, ShiftTime, ShiftEntry } from '../types';
 
 const DEFAULT_ORGANIZATION_TIMEZONE = 'Asia/Kolkata';
 
@@ -112,11 +112,6 @@ export const streamTeamsForAdmin = (adminId: string, callback: (teams: Team[]) =
         console.error("Error streaming teams:", error);
         callback([]);
     });
-};
-
-export const updateTeamSettings = async (teamId: string, settings: Partial<TeamSettings>) => {
-    const teamDocRef = doc(db, 'teams', teamId);
-    await updateDoc(teamDocRef, { settings });
 };
 
 export const getAllUsers = async (): Promise<UserData[]> => {

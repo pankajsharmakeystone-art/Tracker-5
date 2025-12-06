@@ -147,7 +147,7 @@ export const startDesktopRecording = async (sourceId: string | string[], sourceN
     console.error('Failed to start recording for all requested desktop sources. Informing desktop to reset.');
     try {
       if (window.desktopAPI?.stopRecording) {
-        await window.desktopAPI.stopRecording();
+        await window.desktopAPI.stopRecording({ autoRetry: true, reason: 'start-failed' });
       }
     } catch (stopErr) {
       console.error('Failed to notify desktop about recording failure:', stopErr);

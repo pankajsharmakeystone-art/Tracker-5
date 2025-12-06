@@ -114,6 +114,7 @@ export interface AdminSettingsType {
     allowRecording?: boolean;
     recordingQuality?: "480p" | "720p" | "1080p";
     organizationTimezone?: string;
+    showLiveTeamStatusToAgents?: boolean;
 }
 
 declare global {
@@ -125,7 +126,7 @@ declare global {
             unregisterUid: () => Promise<any>;
             setAgentStatus: (status: string) => Promise<any>;
             requestScreenSources: () => Promise<any>;
-            stopRecording: () => Promise<any>;
+            stopRecording: (meta?: { autoRetry?: boolean; reason?: string }) => Promise<any>;
             notifyRecordingSaved: (fileName: string, data: any, meta?: { isLastSession?: boolean }) => Promise<any>;
             getIdleTime: () => Promise<number>;
             uploadToDropbox: (filePath: string) => Promise<any>;

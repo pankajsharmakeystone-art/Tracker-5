@@ -5,7 +5,7 @@ import { useAgentLiveStream } from '../hooks/useAgentLiveStream';
 import { updateWorkLog, getTeamById, streamActiveWorkLog, updateAgentStatus, streamGlobalAdminSettings, performClockOut, performClockIn, isSessionStale, closeStaleSession } from '../services/db';
 import { serverTimestamp, increment, Timestamp, doc, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import type { WorkLog, Team, TeamSettings, AdminSettingsType, ActivityEntry } from '../types';
+import type { WorkLog, Team, AdminSettingsType, ActivityEntry } from '../types';
 import Spinner from './Spinner';
 import ActivitySheet from './ActivitySheet';
 import AgentScheduleView from './AgentScheduleView';
@@ -104,7 +104,6 @@ const AgentPanel: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const [displayWorkSeconds, setDisplayWorkSeconds] = useState(0);
     const [displayBreakSeconds, setDisplayBreakSeconds] = useState(0);
-    const [teamSettings, setTeamSettings] = useState<TeamSettings | null>(null);
     const [activeTab, setActiveTab] = useState('timeClock');
 
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
@@ -468,7 +467,15 @@ const AgentPanel: React.FC = () => {
                         )}
                     </div>
 
-                    {teamSettings?.showLiveTeamStatus && activeTeamId && userData && <div className="my-8"><TeamStatusView teamId={activeTeamId} currentUserId={userData.uid} isMinimizable={true} /></div>}
+                    {adminSettings?.showLiveTeamStatusToAgents !== false && activeTeamId && userData && (
+                        <div className="my-8">
+                            <TeamStatusView
+                                teamId={activeTeamId}
+                                currentUserId={userData.uid}
+                                isMinimizable={true}
+                            />
+                        </div>
+                    )}
                 </div>
             )}
             {activeTab === 'mySchedule' && userData && activeTeamId && <AgentScheduleView userId={userData.uid} teamId={activeTeamId} />}

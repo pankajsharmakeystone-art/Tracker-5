@@ -158,6 +158,22 @@ let systemLocked = false;
 let manualBreakActive = false;
 let autoResumeInFlight = false;
 let systemLockIdleActive = false;
+const AUTO_RESUME_BASE_DELAY_MS = 5000;
+const AUTO_RESUME_MAX_DELAY_MS = 60000;
+let autoResumeRetryDelayMs = AUTO_RESUME_BASE_DELAY_MS;
+let autoResumeRetryTimer = null;
+
+function clearAutoResumeRetryTimer() {
+  if (autoResumeRetryTimer) {
+    clearTimeout(autoResumeRetryTimer);
+    autoResumeRetryTimer = null;
+  }
+}
+
+function resetAutoResumeRetry() {
+  clearAutoResumeRetryTimer();
+  autoResumeRetryDelayMs = AUTO_RESUME_BASE_DELAY_MS;
+}
 
 // Dropbox token management
 let cachedDropboxAccessToken = null;
@@ -205,22 +221,46 @@ async function resumeRecordingIfNeeded(uid) {
   }
 }
 
-const scheduleAutoResumeRecording = () => {
+function scheduleAutoResumeRecording(options = {}) {
+  const { force = false, reason = null } = options;
   if (autoResumeInFlight) return;
   if (!currentUid || !agentClockedIn) return;
-  if (!isRecordingActive) return;
   if (!isAutoRecordingEnabled()) return;
+  if (!force && !isRecordingActive) return;
 
   autoResumeInFlight = true;
-  isRecordingActive = false;
-  log("[recording] Recorder stopped unexpectedly, attempting auto-resume.");
+  if (!force) {
+    isRecordingActive = false;
+  }
+
+  resetAutoResumeRetry();
+  const label = reason ? ` (${reason})` : "";
+  log(`[recording] Recorder stop detected${label}; attempting auto-resume.`);
 
   resumeRecordingIfNeeded(currentUid)
-    .catch((err) => log("[recording] Auto-resume failed", err?.message || err))
+    .then(() => {
+      resetAutoResumeRetry();
+    })
+    .catch((err) => {
+      log("[recording] Auto-resume attempt failed", err?.message || err);
+      scheduleAutoResumeRetry(reason || err?.message || "retry");
+    })
     .finally(() => {
       autoResumeInFlight = false;
     });
-};
+}
+
+function scheduleAutoResumeRetry(reason = "retry") {
+  if (!currentUid || !agentClockedIn) return;
+  clearAutoResumeRetryTimer();
+  const delay = autoResumeRetryDelayMs;
+  autoResumeRetryTimer = setTimeout(() => {
+    autoResumeRetryTimer = null;
+    scheduleAutoResumeRecording({ force: true, reason });
+  }, delay);
+  log(`[recording] Auto-resume retry in ${Math.round(delay / 1000)}s (${reason})`);
+  autoResumeRetryDelayMs = Math.min(autoResumeRetryDelayMs * 2, AUTO_RESUME_MAX_DELAY_MS);
+}
 
 async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", options = {}) {
   if (!currentUid) return false;
@@ -234,6 +274,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   const wasRecording = isRecordingActive;
   isRecordingActive = false;
   autoResumeInFlight = false;
+  resetAutoResumeRetry();
 
   await db.collection('agentStatus').doc(uid)
     .set({ isRecording: false }, { merge: true })
@@ -710,6 +751,7 @@ function startCommandsWatch(uid) {
       log("command stopRecording received");
       if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid });
       isRecordingActive = false;
+      resetAutoResumeRetry();
       if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
       showRecordingPopup("Recording stopped by admin");
       await db.collection("desktopCommands").doc(uid).update({ stopRecording: false }).catch(()=>{});
@@ -1015,6 +1057,7 @@ async function performAutoClockOut() {
     // Force stop even if isRecordingActive is false (to clean up renderer state)
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
+    resetAutoResumeRetry();
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
     if (wasRecording) showRecordingPopup("Recording stopped (auto clock-out)");
     
@@ -1132,6 +1175,7 @@ ipcMain.handle("unregister-uid", async () => {
     currentUid = null;
     agentClockedIn = false;
     isRecordingActive = false;
+    resetAutoResumeRetry();
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
     try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
@@ -1160,6 +1204,7 @@ async function applyAgentStatus(status) {
 
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
+    resetAutoResumeRetry();
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
@@ -1177,6 +1222,7 @@ async function applyAgentStatus(status) {
 
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
+    resetAutoResumeRetry();
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording stopped');
@@ -1233,6 +1279,7 @@ async function applyAgentStatus(status) {
 
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
+    resetAutoResumeRetry();
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
@@ -1365,14 +1412,20 @@ ipcMain.handle("live-stream-get-sources", async () => {
   }
 });
 
-ipcMain.handle("stop-recording", async () => {
+ipcMain.handle("stop-recording", async (_, meta = {}) => {
   try {
     // called by renderer when it ends recording explicitly
     isRecordingActive = false;
+    autoResumeInFlight = false;
     if (currentUid) {
       await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
     }
-    showRecordingPopup("Recording stopped");
+    const popupMessage = meta?.autoRetry ? "Recording interrupted. Retrying..." : "Recording stopped";
+    showRecordingPopup(popupMessage);
+    resetAutoResumeRetry();
+    if (meta?.autoRetry) {
+      scheduleAutoResumeRetry(meta?.reason || "renderer-failed");
+    }
     log("stop-recording invoked");
     return { success: true };
   } catch (e) {

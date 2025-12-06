@@ -65,6 +65,7 @@ const AdminSettings: React.FC = () => {
         autoClockOutEnabled: false,
         manualBreakTimeoutMinutes: 30,
         organizationTimezone: 'Asia/Kolkata',
+        showLiveTeamStatusToAgents: true,
     };
     
     const [settings, setSettings] = useState<AdminSettingsType>(defaultSettings);
@@ -214,6 +215,14 @@ const AdminSettings: React.FC = () => {
                         id="allowRecording"
                         checked={settings.allowRecording ?? false}
                         onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, allowRecording: e.target.checked }))}
+                    />
+                </FormField>
+
+                <FormField label="Show Team Status To Agents" description="When enabled, agents can view the Live Team Status widget for their own team inside the dashboard.">
+                    <ToggleSwitch
+                        id="showLiveTeamStatusToAgents"
+                        checked={settings.showLiveTeamStatusToAgents ?? true}
+                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, showLiveTeamStatusToAgents: e.target.checked }))}
                     />
                 </FormField>
 

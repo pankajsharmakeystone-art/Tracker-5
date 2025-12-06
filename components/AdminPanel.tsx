@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../hooks/useAuth';
-import { createTeam, streamTeamsForAdmin, updateTeamSettings } from '../services/db';
-import type { Team, TeamSettings } from '../types';
+import { createTeam, streamTeamsForAdmin } from '../services/db';
+import type { Team } from '../types';
 import Spinner from './Spinner';
 import UserManagementTable from './UserManagementTable';
 import LiveMonitoringDashboard from './LiveMonitoringDashboard';
@@ -18,7 +18,6 @@ const AdminPanel: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState('users');
-    const [showLiveStatus, setShowLiveStatus] = useState(true);
     const [selectedTeamIdForSchedule, setSelectedTeamIdForSchedule] = useState('');
     const [selectedTeamIdForReports, setSelectedTeamIdForReports] = useState('');
 
@@ -36,9 +35,6 @@ const AdminPanel: React.FC = () => {
                 if (adminTeams.length > 0) {
                     if (!selectedTeamIdForSchedule) setSelectedTeamIdForSchedule(adminTeams[0].id);
                     if (!selectedTeamIdForReports) setSelectedTeamIdForReports(adminTeams[0].id);
-                    if (adminTeams[0].settings) {
-                        setShowLiveStatus(adminTeams[0].settings.showLiveTeamStatus ?? true);
-                    }
                 }
             });
         } else {
@@ -73,22 +69,6 @@ const AdminPanel: React.FC = () => {
         });
     };
 
-    const handleSettingsUpdate = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setError(null);
-        try {
-            const settingsToUpdate: Partial<TeamSettings> = {
-                showLiveTeamStatus: showLiveStatus
-            };
-            // Update settings for all teams owned by this admin
-            const promises = teams.map(team => updateTeamSettings(team.id, settingsToUpdate));
-            await Promise.all(promises);
-            alert('Settings updated successfully!');
-        } catch(err) {
-            setError("Failed to update settings.");
-        }
-    };
-
     const TabButton = ({ tabName, title }: { tabName: string, title: string }) => (
         <button
             onClick={() => setActiveTab(tabName)}
@@ -110,7 +90,6 @@ const AdminPanel: React.FC = () => {
                     <TabButton tabName="teams" title="Team Management" />
                     <TabButton tabName="scheduling" title="Scheduling" />
                     <TabButton tabName="reports" title="Reports" />
-                    <TabButton tabName="teamSettings" title="Team Settings" />
                     <TabButton tabName="appSettings" title="Application Settings" />
                     <TabButton tabName="monitoring" title="Detailed Monitoring" />
                 </nav>
@@ -209,29 +188,6 @@ const AdminPanel: React.FC = () => {
                         ) : (
                              <p className="text-gray-500 dark:text-gray-400">Please create a team first to generate reports.</p>
                         )}
-                    </div>
-                )}
-
-                {activeTab === 'teamSettings' && (
-                     <div className="p-4 bg-gray-100 dark:bg-gray-800/50 rounded-lg border dark:border-gray-700">
-                        <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">General Team Settings</h3>
-                        <form onSubmit={handleSettingsUpdate}>
-                             <div className="flex items-center mb-4">
-                                <input
-                                    id="showLiveTeamStatus"
-                                    type="checkbox"
-                                    checked={showLiveStatus}
-                                    onChange={(e) => setShowLiveStatus(e.target.checked)}
-                                    className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
-                                />
-                                <label htmlFor="showLiveTeamStatus" className="ml-2 text-sm font-medium text-gray-900 dark:text-gray-300">
-                                    Show "Live Team Status" widget to agents
-                                </label>
-                            </div>
-                             <button type="submit" className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800">
-                                Update All Teams
-                            </button>
-                        </form>
                     </div>
                 )}
 
