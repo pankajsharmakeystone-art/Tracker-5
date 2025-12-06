@@ -154,6 +154,8 @@ let agentStatusUnsub = null; // remote Firestore watch for agentStatus
 let autoClockConfigUnsub = null;
 let autoClockSlots = {};
 let currentShiftDate = null;
+let systemLocked = false;
+let manualBreakActive = false;
 
 // Dropbox token management
 let cachedDropboxAccessToken = null;
@@ -163,6 +165,83 @@ let dropboxTokenExpiry = null;
 // track manual-break timeout notifications per uid to avoid repeat spam
 const manualBreakNotified = new Map();
 const pendingAgentStatuses = [];
+
+const buildDesktopStatusMetadata = () => ({
+  lastUpdate: FieldValue.serverTimestamp(),
+  appVersion: app.getVersion(),
+  platform: process.platform,
+  machineName: os.hostname(),
+  isDesktopConnected: true
+});
+
+async function resumeRecordingIfNeeded(uid) {
+  if (!uid) return;
+  if (cachedAdminSettings?.recordingMode === 'auto' && cachedAdminSettings?.allowRecording) {
+    if (!isRecordingActive) {
+      isRecordingActive = true;
+      await db.collection('agentStatus').doc(uid)
+        .set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
+        .catch(() => {});
+      showRecordingPopup("Recording resumed");
+      if (mainWindow && mainWindow.webContents) {
+        try {
+          mainWindow.webContents.send("command-start-recording", { uid });
+        } catch (e) {
+          log("Failed to signal renderer about recording resume", e?.message || e);
+        }
+      }
+    } else {
+      log("Recording already active, skipping auto resume.");
+    }
+  }
+}
+
+async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
+  if (!uid) return;
+  await db.collection("agentStatus").doc(uid)
+    .set({
+      status: "break",
+      isIdle: true,
+      idleSecs,
+      idleReason: reason || null,
+      lockedBySystem: reason === 'system_lock',
+      ...buildDesktopStatusMetadata()
+    }, { merge: true })
+    .catch(() => {});
+}
+
+async function pushActiveStatus(uid, { idleSecs } = {}) {
+  if (!uid) return;
+  await db.collection("agentStatus").doc(uid)
+    .set({
+      status: "online",
+      isIdle: false,
+      idleSecs,
+      idleReason: FieldValue.delete(),
+      lockedBySystem: false,
+      ...buildDesktopStatusMetadata()
+    }, { merge: true })
+    .catch(() => {});
+  await resumeRecordingIfNeeded(uid);
+}
+
+function registerSystemLockHandlers() {
+  powerMonitor.on('lock-screen', async () => {
+    log('System lock event detected');
+    systemLocked = true;
+    if (!currentUid || !agentClockedIn || manualBreakActive || lastIdleState) return;
+    lastIdleState = true;
+    await pushIdleStatus(currentUid, { idleSecs: powerMonitor.getSystemIdleTime(), reason: 'system_lock' });
+  });
+
+  powerMonitor.on('unlock-screen', async () => {
+    log('System unlock event detected');
+    systemLocked = false;
+    if (!currentUid || !agentClockedIn || !lastIdleState) return;
+    lastIdleState = false;
+    await pushActiveStatus(currentUid, { idleSecs: powerMonitor.getSystemIdleTime() });
+  });
+}
 
 autoUpdater.on("checking-for-update", () => emitAutoUpdateStatus("checking"));
 autoUpdater.on("update-available", (info) => emitAutoUpdateStatus("available", { version: info?.version }));
@@ -597,14 +676,9 @@ function startAgentStatusLoop(uid) {
       }
 
       const idleSecs = powerMonitor.getSystemIdleTime();
-      let isIdle = false;
-
-      // idleTimeout = 0 → completely disable idle detection
-      if (idleLimit > 0) {
-        isIdle = idleSecs >= idleLimit;
-      } else {
-        isIdle = false; // idle tracking turned off
-      }
+      const timedOutIdle = idleLimit > 0 ? idleSecs >= idleLimit : false;
+      const shouldForceIdle = systemLocked || timedOutIdle;
+      const idleReason = systemLocked ? 'system_lock' : 'auto_idle';
 
       // Debug log
       console.log("⏱ Idle check → secs:", idleSecs, "limit:", idleLimit, "isIdle:", isIdle, "lastIdleState:", lastIdleState);
@@ -622,6 +696,7 @@ function startAgentStatusLoop(uid) {
       }
 
       const manualBreak = !!agentData.manualBreak;
+      manualBreakActive = manualBreak;
       const breakStartedAt = agentData.breakStartedAt || null; // Firestore Timestamp or null
 
       if (manualBreak) {
@@ -662,60 +737,17 @@ function startAgentStatusLoop(uid) {
       // --------------------------
       // Idle detected (idleLimit>0)
       // --------------------------
-      if (isIdle && !lastIdleState) {
+      if (shouldForceIdle && !lastIdleState) {
         lastIdleState = true;
-        log("User idle detected — setting status to break");
-        await db.collection("agentStatus").doc(uid)
-          .set({
-            status: "break",
-            isIdle: true,
-            idleSecs,
-            lastUpdate: FieldValue.serverTimestamp(),
-            appVersion: app.getVersion(),
-            platform: process.platform,
-            machineName: os.hostname(),
-            isDesktopConnected: true
-          }, { merge: true }).catch(()=>{});
-          
-        // ⚡ FIX: Removed all "Stop Recording" logic here. 
-        // Now, when user goes idle, recording continues without interruption.
-        
+        log(systemLocked ? "System lock detected — setting status to break" : "User idle detected — setting status to break");
+        await pushIdleStatus(uid, { idleSecs, reason: idleReason });
         return;
       }
 
-      if (!isIdle && lastIdleState) {
+      if (!shouldForceIdle && lastIdleState) {
         lastIdleState = false;
-        log("User returned from idle — setting status to online");
-        await db.collection("agentStatus").doc(uid)
-          .set({
-            status: "online",
-            isIdle: false,
-            idleSecs,
-            lastUpdate: FieldValue.serverTimestamp(),
-            appVersion: app.getVersion(),
-            platform: process.platform,
-            machineName: os.hostname(),
-            isDesktopConnected: true
-          }, { merge: true }).catch(()=>{});
-        
-        // resume recording automatically if admin configured auto recordingMode and allowRecording
-        if (cachedAdminSettings?.recordingMode === 'auto' && cachedAdminSettings?.allowRecording) {
-          
-          // ⚡ FIX: Only restart if it actually stopped! 
-          // Since we now keep recording during idle, isRecordingActive will usually be true.
-          // This prevents the "Already Active" error when returning from idle.
-          if (!isRecordingActive) {
-              isRecordingActive = true;
-              await db.collection('agentStatus').doc(uid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
-              showRecordingPopup("Recording resumed");
-              
-              if (mainWindow && mainWindow.webContents) {
-                 mainWindow.webContents.send("command-start-recording", { uid });
-              }
-          } else {
-              log("Returned from idle. Recording was already active, continuing.");
-          }
-        }
+        log("Idle cleared — setting status to online");
+        await pushActiveStatus(uid, { idleSecs });
         return;
       }
 
@@ -1543,6 +1575,7 @@ function scheduleAutoUpdateCheck() {
 
 // ---------- APP INIT ----------
 app.whenReady().then(() => {
+  registerSystemLockHandlers();
   createMainWindow();
   createTray();
   buildAppMenu();
