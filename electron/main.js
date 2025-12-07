@@ -149,14 +149,14 @@ let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 let loginReminderWindow = null;
 
-let loginReminderTimer = null;
 let loginReminderActive = false;
-const LOGIN_REMINDER_MIN_INTERVAL_SECONDS = 15;
-const LOGIN_REMINDER_MAX_INTERVAL_SECONDS = 600;
-const DEFAULT_LOGIN_REMINDER_INTERVAL_SECONDS = 30;
+let loginReminderContextKey = null;
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
 let rendererHasActiveSession = false;
 let rendererClockedInHint = false;
+
+let manualBreakReminderWindow = null;
+let manualBreakReminderPayloadKey = null;
 
 let lastForceLogoutRequestId = null;
 let forceLogoutRequestInFlight = false;
@@ -167,10 +167,8 @@ let agentStatusUnsub = null; // remote Firestore watch for agentStatus
 let autoClockConfigUnsub = null;
 let autoClockSlots = {};
 let currentShiftDate = null;
-let systemLocked = false;
 let manualBreakActive = false;
 let autoResumeInFlight = false;
-let systemLockIdleActive = false;
 const AUTO_RESUME_BASE_DELAY_MS = 5000;
 const AUTO_RESUME_MAX_DELAY_MS = 60000;
 let autoResumeRetryDelayMs = AUTO_RESUME_BASE_DELAY_MS;
@@ -193,8 +191,6 @@ let cachedDropboxAccessToken = null;
 let cachedDropboxRefreshToken = null;
 let dropboxTokenExpiry = null;
 
-// track manual-break timeout notifications per uid to avoid repeat spam
-const manualBreakNotified = new Map();
 const pendingAgentStatuses = [];
 
 const buildDesktopStatusMetadata = () => ({
@@ -316,11 +312,9 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   stopAgentStatusWatch();
   stopAutoClockConfigWatch();
   pendingAgentStatuses.length = 0;
-  manualBreakNotified.delete(uid);
   manualBreakActive = false;
-  systemLockIdleActive = false;
-  systemLocked = false;
   lastIdleState = false;
+  closeManualBreakReminderWindow();
 
   currentUid = null;
   currentShiftDate = null;
@@ -374,29 +368,7 @@ async function pushActiveStatus(uid, { idleSecs } = {}) {
       ...buildDesktopStatusMetadata()
     }, { merge: true })
     .catch(() => {});
-  systemLockIdleActive = false;
   await resumeRecordingIfNeeded(uid);
-}
-
-function registerSystemLockHandlers() {
-  powerMonitor.on('lock-screen', async () => {
-    log('System lock event detected');
-    systemLocked = true;
-    if (!currentUid || !agentClockedIn || manualBreakActive || lastIdleState) return;
-    lastIdleState = true;
-    systemLockIdleActive = true;
-    await pushIdleStatus(currentUid, { idleSecs: powerMonitor.getSystemIdleTime(), reason: 'system_lock' });
-  });
-
-  powerMonitor.on('unlock-screen', async () => {
-    log('System unlock event detected');
-    systemLocked = false;
-    const shouldResume = systemLockIdleActive || lastIdleState;
-    systemLockIdleActive = false;
-    if (!currentUid || !agentClockedIn || !shouldResume) return;
-    lastIdleState = false;
-    await pushActiveStatus(currentUid, { idleSecs: powerMonitor.getSystemIdleTime() });
-  });
 }
 
 autoUpdater.on("checking-for-update", () => emitAutoUpdateStatus("checking"));
@@ -690,13 +662,7 @@ function closeLoginReminderWindow() {
     try { loginReminderWindow.close(); } catch (e) {}
     loginReminderWindow = null;
   }
-}
-
-function clearLoginReminderTimer() {
-  if (loginReminderTimer) {
-    clearTimeout(loginReminderTimer);
-    loginReminderTimer = null;
-  }
+  loginReminderContextKey = null;
 }
 
 function getLoginReminderContext() {
@@ -730,16 +696,7 @@ function updateRendererSessionHints(status) {
   }
 }
 
-function getLoginReminderIntervalMs() {
-  const raw = Number(cachedAdminSettings?.loginReminderIntervalSeconds);
-  let seconds = DEFAULT_LOGIN_REMINDER_INTERVAL_SECONDS;
-  if (!Number.isNaN(raw) && raw > 0) seconds = raw;
-  seconds = Math.max(LOGIN_REMINDER_MIN_INTERVAL_SECONDS, Math.min(seconds, LOGIN_REMINDER_MAX_INTERVAL_SECONDS));
-  return seconds * 1000;
-}
-
-function showLoginReminderPopup() {
-  const context = getLoginReminderContext();
+function showLoginReminderPopup(context) {
   if (!context) return;
 
   closeLoginReminderWindow();
@@ -765,6 +722,7 @@ function showLoginReminderPopup() {
       transparent: false,
       resizable: false,
       movable: false,
+      closable: false,
       focusable: true,
       webPreferences: {
         nodeIntegration: true,
@@ -823,55 +781,183 @@ function showLoginReminderPopup() {
     `;
 
     loginReminderWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
-    loginReminderWindow.on('closed', () => { loginReminderWindow = null; });
-
-    setTimeout(() => {
-      closeLoginReminderWindow();
-    }, 8000);
+    loginReminderWindow.on('closed', () => { loginReminderWindow = null; loginReminderContextKey = null; });
   } catch (error) {
     console.error('[login-reminder] popup failed', error?.message || error);
   }
 }
 
-function scheduleLoginReminderTick() {
-  clearLoginReminderTimer();
-  const delay = getLoginReminderIntervalMs();
-  loginReminderTimer = setTimeout(() => {
-    loginReminderTimer = null;
-    if (!getLoginReminderContext()) {
-      loginReminderActive = false;
-      closeLoginReminderWindow();
-      return;
+function focusMainAppWindow() {
+  if (!mainWindow) return;
+  try {
+    mainWindow.show();
+    mainWindow.focus();
+  } catch (e) {
+    console.warn('[focusMainAppWindow] Failed to focus main window', e?.message || e);
+  }
+}
+
+function closeManualBreakReminderWindow() {
+  if (manualBreakReminderWindow) {
+    try { manualBreakReminderWindow.close(); } catch (e) {}
+    manualBreakReminderWindow = null;
+  }
+  manualBreakReminderPayloadKey = null;
+}
+
+function showManualBreakReminderPopup(context) {
+  if (!context) return;
+  const payloadKey = `${context.timeoutMins || 'na'}`;
+  if (manualBreakReminderWindow && manualBreakReminderPayloadKey === payloadKey) return;
+  manualBreakReminderPayloadKey = payloadKey;
+  closeManualBreakReminderWindow();
+
+  try {
+    const display = screen.getPrimaryDisplay();
+    const { workArea } = display;
+    const popupWidth = 480;
+    const popupHeight = 260;
+    const x = workArea.x + Math.round((workArea.width - popupWidth) / 2);
+    const y = workArea.y + Math.round((workArea.height - popupHeight) / 2);
+
+    manualBreakReminderWindow = new BrowserWindow({
+      width: popupWidth,
+      height: popupHeight,
+      x,
+      y,
+      parent: null,
+      modal: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      frame: false,
+      transparent: false,
+      resizable: false,
+      movable: false,
+      closable: false,
+      focusable: true,
+      webPreferences: {
+        nodeIntegration: true,
+        contextIsolation: false
+      }
+    });
+
+    manualBreakReminderWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+    const durationText = context.timeoutMins === 1 ? '1 minute' : `${context.timeoutMins} minutes`;
+    const safeIconUrl = `file://${POPUP_ICON_PATH}`;
+    const html = `
+      <html>
+        <head>
+          <meta charset="utf-8"/>
+          <style>
+            body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: transparent; }
+            .card {
+              width:100%; height:100%;
+              border-radius:20px;
+              padding:28px;
+              background: linear-gradient(135deg,#991b1b,#7f1d1d);
+              color:#fff;
+              display:flex;
+              flex-direction:column;
+              justify-content:space-between;
+              box-shadow:0 30px 55px rgba(153,27,27,0.55);
+            }
+            .header { display:flex; align-items:center; gap:20px; }
+            img { width:64px; height:64px; border-radius:14px; background:#fff; padding:8px; box-sizing:border-box; }
+            h1 { font-size:22px; margin:0; letter-spacing:0.4px; }
+            p { margin:10px 0 0; font-size:15px; color:rgba(255,255,255,0.9); line-height:1.5; }
+            .actions { display:flex; flex-direction:column; gap:12px; margin-top:20px; }
+            button { padding:14px 18px; border:none; border-radius:12px; font-weight:600; cursor:pointer; font-size:15px; }
+            #return { background:#22c55e; color:#052e16; box-shadow:0 12px 28px rgba(34,197,94,0.45); }
+            #return:hover { background:#16a34a; }
+            #open { background:rgba(255,255,255,0.15); color:#fff; border:1px solid rgba(255,255,255,0.3); }
+            #open:hover { background:rgba(255,255,255,0.25); }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div>
+              <div class="header">
+                <img src="${safeIconUrl}" alt="Tracker" />
+                <div>
+                  <h1>Break Time Limit Exceeded</h1>
+                  <p>You have been on manual break for more than ${durationText}. Return online to keep tracking your time.</p>
+                </div>
+              </div>
+              <div class="actions">
+                <button id="return">Remove Break & Return Online</button>
+                <button id="open">Open Tracker</button>
+              </div>
+            </div>
+          </div>
+          <script>
+            const { ipcRenderer } = require('electron');
+            document.getElementById('return').addEventListener('click', () => ipcRenderer.invoke('manual-break-reminder-remove'));
+            document.getElementById('open').addEventListener('click', () => ipcRenderer.send('manual-break-reminder-open'));
+          </script>
+        </body>
+      </html>
+    `;
+
+    manualBreakReminderWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    manualBreakReminderWindow.on('closed', () => {
+      manualBreakReminderWindow = null;
+      manualBreakReminderPayloadKey = null;
+    });
+  } catch (error) {
+    console.error('[manual-break-reminder] popup failed', error?.message || error);
+  }
+}
+
+async function endBreakFromDesktopFlow() {
+  if (!currentUid) return { success: false, error: 'no-uid' };
+  try {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('desktop-request-end-break', { uid: currentUid });
+      closeManualBreakReminderWindow();
+      return { success: true, deliveredToRenderer: true };
     }
-    showLoginReminderPopup();
-    scheduleLoginReminderTick();
-  }, delay);
+  } catch (e) {
+    // fall through to server-side update
+  }
+
+  try {
+    await db.collection('agentStatus').doc(currentUid).set({
+      status: 'online',
+      manualBreak: false,
+      breakStartedAt: FieldValue.delete(),
+      isIdle: false,
+      lastUpdate: FieldValue.serverTimestamp()
+    }, { merge: true }).catch(()=>{});
+
+    try {
+      if (mainWindow && mainWindow.webContents) {
+        mainWindow.webContents.send('manual-break-cleared-by-desktop', { uid: currentUid });
+      }
+    } catch (notifyError) {
+      console.warn('[manual-break-reminder] failed to notify renderer about cleared break', notifyError?.message || notifyError);
+    }
+    closeManualBreakReminderWindow();
+    return { success: true, deliveredToRenderer: false };
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) };
+  }
 }
 
 function refreshLoginReminderState({ immediate = false } = {}) {
   const context = getLoginReminderContext();
   if (!context) {
     loginReminderActive = false;
-    clearLoginReminderTimer();
+    loginReminderContextKey = null;
     closeLoginReminderWindow();
     return;
   }
 
-  if (!loginReminderActive) {
-    loginReminderActive = true;
-    if (immediate) {
-      showLoginReminderPopup();
-    }
-    scheduleLoginReminderTick();
-    return;
-  }
-
-  if (immediate) {
-    showLoginReminderPopup();
-  }
-
-  if (!loginReminderTimer) {
-    scheduleLoginReminderTick();
+  const contextKey = `${context.title}|${context.message}|${context.cta}`;
+  loginReminderActive = true;
+  if (!loginReminderWindow || loginReminderContextKey !== contextKey || immediate) {
+    loginReminderContextKey = contextKey;
+    showLoginReminderPopup(context);
   }
 }
 
@@ -1066,15 +1152,14 @@ function startAgentStatusLoop(uid) {
 
       const idleSecs = powerMonitor.getSystemIdleTime();
       const timedOutIdle = idleLimit > 0 ? idleSecs >= idleLimit : false;
-      const shouldForceIdle = systemLocked || timedOutIdle;
-      const idleReason = systemLocked ? 'system_lock' : (timedOutIdle ? 'auto_idle' : null);
+      const shouldForceIdle = timedOutIdle;
+      const idleReason = timedOutIdle ? 'auto_idle' : null;
 
       // Debug log (helps distinguish system-lock vs inactivity)
       console.log(
         "⏱ Idle check → secs:", idleSecs,
         "limit:", idleLimit,
         "timedOutIdle:", timedOutIdle,
-        "systemLocked:", systemLocked,
         "lastIdleState:", lastIdleState
       );
 
@@ -1111,16 +1196,10 @@ function startAgentStatusLoop(uid) {
             const elapsedMs = Date.now() - startedMs;
             const elapsedMins = Math.floor(elapsedMs / 60000);
 
-            if (elapsedMins >= timeoutMins && !manualBreakNotified.get(uid)) {
-              manualBreakNotified.set(uid, true);
-              // notify renderer to show persistent modal (renderer should present Remove Break / Cancel)
-              if (mainWindow && mainWindow.webContents) {
-                try {
-                  mainWindow.webContents.send('manual-break-timeout', { uid, elapsedMins, timeoutMins });
-                } catch (e) {
-                  console.warn('[manual-break-timeout] send failed', e);
-                }
-              }
+            if (elapsedMins >= timeoutMins) {
+              showManualBreakReminderPopup({ timeoutMins });
+            } else {
+              closeManualBreakReminderWindow();
             }
           }
         }
@@ -1129,12 +1208,14 @@ function startAgentStatusLoop(uid) {
         return;
       }
 
+      closeManualBreakReminderWindow();
+
       // --------------------------
       // Idle detected (idleLimit>0)
       // --------------------------
       if (shouldForceIdle && !lastIdleState) {
         lastIdleState = true;
-        log(systemLocked ? "System lock detected — setting status to break" : "User idle detected — setting status to break");
+        log("User idle detected — setting status to break");
         await pushIdleStatus(uid, { idleSecs, reason: idleReason });
         return;
       }
@@ -1353,6 +1434,7 @@ async function performAutoClockOut() {
     stopAgentStatusLoop();
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
+    closeManualBreakReminderWindow();
 
     refreshLoginReminderState({ immediate: true });
 
@@ -1450,6 +1532,7 @@ ipcMain.handle("unregister-uid", async () => {
     resetAutoResumeRetry();
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
+    closeManualBreakReminderWindow();
     try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
     refreshLoginReminderState({ immediate: true });
     return { success: true };
@@ -1483,7 +1566,7 @@ async function applyAgentStatus(status) {
     if (wasRecording) showRecordingPopup('Recording paused (break)');
     if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
 
-    manualBreakNotified.delete(currentUid);
+    closeManualBreakReminderWindow();
     refreshLoginReminderState();
     return { success: true };
   }
@@ -1545,7 +1628,7 @@ async function applyAgentStatus(status) {
       breakStartedAt: FieldValue.delete()
     }, { merge: true }).catch(()=>{});
 
-    manualBreakNotified.delete(currentUid);
+    closeManualBreakReminderWindow();
     refreshLoginReminderState();
     return { success: true };
   }
@@ -1601,40 +1684,10 @@ ipcMain.handle("set-agent-status", async (_, status) => {
   }
 });
 
-// Desktop-initiated end-break: renderer will handle worklog updates. We try to notify renderer; if renderer not available, clear manualBreak server-side.
-ipcMain.handle('end-break-from-desktop', async () => {
-  try {
-    if (!currentUid) return { success: false, error: 'no-uid' };
-
-    // Try to notify renderer (web) to perform the same end-break flow (update worklog & agentStatus)
-    try {
-      if (mainWindow && mainWindow.webContents) {
-        mainWindow.webContents.send('desktop-request-end-break', { uid: currentUid });
-        return { success: true, deliveredToRenderer: true };
-      }
-    } catch (e) {
-      // fallthrough to server-side update
-    }
-
-    // Renderer not available — perform minimal safe server-side changes:
-    //  - clear manualBreak flag and breakStartedAt
-    //  - set agentStatus to online
-    await db.collection('agentStatus').doc(currentUid).set({
-      status: 'online',
-      manualBreak: false,
-      breakStartedAt: FieldValue.delete(),
-      isIdle: false,
-      lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).catch(()=>{});
-
-    // Optionally inform renderer if it comes back
-    try { if (mainWindow && mainWindow.webContents) mainWindow.webContents.send('manual-break-cleared-by-desktop', { uid: currentUid }); } catch(e){}
-
-    return { success: true, deliveredToRenderer: false };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-});
+// Desktop-initiated end-break helpers
+ipcMain.handle('end-break-from-desktop', async () => endBreakFromDesktopFlow());
+ipcMain.handle('manual-break-reminder-remove', async () => endBreakFromDesktopFlow());
+ipcMain.on('manual-break-reminder-open', () => focusMainAppWindow());
 
 // Recording handlers
 ipcMain.handle("start-recording", async () => {
@@ -1750,18 +1803,7 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta =
 });
 
 ipcMain.on('login-reminder-clicked', () => {
-  closeLoginReminderWindow();
-  if (mainWindow) {
-    try {
-      mainWindow.show();
-      mainWindow.focus();
-    } catch (e) {
-      console.warn('[login-reminder] failed to focus main window', e?.message || e);
-    }
-  }
-  if (loginReminderActive) {
-    scheduleLoginReminderTick();
-  }
+  focusMainAppWindow();
 });
 
 ipcMain.handle("get-idle-time", () => {
@@ -1991,7 +2033,6 @@ function scheduleAutoUpdateCheck() {
 
 // ---------- APP INIT ----------
 app.whenReady().then(() => {
-  registerSystemLockHandlers();
   createMainWindow();
   createTray();
   buildAppMenu();
