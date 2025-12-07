@@ -353,7 +353,7 @@ const AgentPanel: React.FC = () => {
         }
     };
 
-    const handleEndBreak = async () => {
+    const handleEndBreak = useCallback(async () => {
         if (!workLog || !userData) return;
         setLoading(true);
         try {
@@ -383,7 +383,17 @@ const AgentPanel: React.FC = () => {
         } finally {
             setLoading(false);
         }
-    };
+    }, [workLog, userData, getMillis, notifyDesktopStatus]);
+
+    useEffect(() => {
+        if (!window.desktopAPI?.onDesktopRequestEndBreak) return;
+        const cleanup = window.desktopAPI.onDesktopRequestEndBreak(() => {
+            handleEndBreak().catch((err) => console.error('[AgentPanel] desktop-request-end-break failed', err));
+        });
+        return () => {
+            if (typeof cleanup === 'function') cleanup();
+        };
+    }, [handleEndBreak]);
 
     if (loading && !workLog) return <Spinner />;
 

@@ -132,6 +132,7 @@ if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: tr
 
 // Path to the uploaded icon you asked to use for the popup
 const POPUP_ICON_PATH = "/mnt/data/a35a616b-074d-4238-a09e-5dcb70efb649.png"; 
+const ADMIN_SETTINGS_CACHE_PATH = path.join(app.getPath("userData"), "admin-settings.json");
 
 // ---------- GLOBALS ----------
 let mainWindow = null;
@@ -157,6 +158,32 @@ let rendererClockedInHint = false;
 
 let manualBreakReminderWindow = null;
 let manualBreakReminderPayloadKey = null;
+
+function persistAdminSettingsCache(settings) {
+  try {
+    fs.writeFileSync(ADMIN_SETTINGS_CACHE_PATH, JSON.stringify(settings || {}, null, 2), "utf8");
+  } catch (error) {
+    console.warn("[adminSettings] failed to persist cache", error?.message || error);
+  }
+}
+
+function hydrateAdminSettingsFromDisk() {
+  try {
+    if (!fs.existsSync(ADMIN_SETTINGS_CACHE_PATH)) return;
+    const raw = fs.readFileSync(ADMIN_SETTINGS_CACHE_PATH, "utf8");
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      cachedAdminSettings = parsed;
+      log("[adminSettings] hydrated cached settings from disk");
+      refreshLoginReminderState({ immediate: true });
+    }
+  } catch (error) {
+    console.warn("[adminSettings] failed to load cached settings", error?.message || error);
+  }
+}
+
+hydrateAdminSettingsFromDisk();
 
 let lastForceLogoutRequestId = null;
 let forceLogoutRequestInFlight = false;
@@ -1019,6 +1046,7 @@ async function fetchDisplayName(uid) {
 function applyAdminSettings(next) {
   cachedAdminSettings = next || {};
   log("adminSettings updated:", cachedAdminSettings);
+  persistAdminSettingsCache(cachedAdminSettings);
 
   cachedDropboxRefreshToken = cachedAdminSettings?.dropboxRefreshToken || null;
   if (cachedDropboxRefreshToken) {

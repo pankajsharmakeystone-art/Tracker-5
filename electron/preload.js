@@ -52,6 +52,12 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   onCommandStopRecording: (cb) => ipcRenderer.on("command-stop-recording", (e, data) => cb(data)),
   onCommandForceBreak: (cb) => ipcRenderer.on("command-force-break", (e, data) => cb(data)),
   onSettingsUpdated: (cb) => ipcRenderer.on("settings-updated", (e, data) => cb(data)),
+  onDesktopRequestEndBreak: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("desktop-request-end-break", handler);
+    return () => ipcRenderer.removeListener("desktop-request-end-break", handler);
+  },
 
   // auto-clocked-out notification
   onAutoClockOut: (cb) => ipcRenderer.on("auto-clocked-out", (e, data) => cb(data)),

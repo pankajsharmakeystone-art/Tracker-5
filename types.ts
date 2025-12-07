@@ -34,6 +34,7 @@ export interface WorkLog {
 
     totalWorkSeconds: number;
     totalBreakSeconds: number;
+            onDesktopRequestEndBreak?: (callback: (data?: any) => void) => (() => void) | void;
 
     teamId?: string;
     startTime?: any;
