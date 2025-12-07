@@ -116,7 +116,6 @@ export interface AdminSettingsType {
     organizationTimezone?: string;
     showLiveTeamStatusToAgents?: boolean;
     loginReminderEnabled?: boolean;
-    loginReminderIntervalSeconds?: number;
 }
 
 declare global {

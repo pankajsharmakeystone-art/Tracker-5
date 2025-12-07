@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useLiveScreenViewer, type RemoteFeed } from '../hooks/useLiveScreenViewer';
 import type { ViewerState } from '../hooks/useLiveScreenViewer';
 
@@ -49,6 +49,7 @@ const LiveFeedTile: React.FC<{ feed: RemoteFeed; index: number }> = ({ feed, ind
 
 const LiveStreamModal: React.FC<LiveStreamModalProps> = ({ isOpen, agent, onClose }) => {
   const { remoteFeeds, state, error, endSession } = useLiveScreenViewer(agent, isOpen);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -62,29 +63,46 @@ const LiveStreamModal: React.FC<LiveStreamModalProps> = ({ isOpen, agent, onClos
   const handleClose = async () => {
     await endSession();
     onClose();
+    setExpanded(false);
   };
 
   const copy = STATE_COPY[state];
+  const containerClass = expanded
+    ? 'w-full h-full max-w-[1600px]'
+    : 'w-full max-w-5xl max-h-[90vh]';
+  const bodyHeightClass = expanded ? 'min-h-[70vh]' : 'min-h-[320px]';
 
   return (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" role="dialog" aria-modal="true">
-      <div className="w-full max-w-5xl bg-gray-900 text-white rounded-3xl overflow-hidden shadow-2xl border border-white/10">
-        <header className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+    <div
+      className={`fixed inset-0 z-[120] flex ${expanded ? 'items-stretch' : 'items-center'} justify-center bg-black/70 backdrop-blur-sm p-4`}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className={`${containerClass} bg-gray-900 text-white rounded-3xl overflow-hidden shadow-2xl border border-white/10 flex flex-col`}>
+        <header className="flex items-center justify-between px-6 py-4 border-b border-white/10 gap-4">
           <div>
             <p className="text-xs uppercase tracking-[0.3em] text-gray-400">Live Screen Request</p>
             <h2 className="text-2xl font-semibold">{agent.displayName}</h2>
             <p className="text-sm text-gray-400">{copy?.title}</p>
           </div>
-          <button
-            onClick={handleClose}
-            className="text-gray-400 hover:text-white transition-colors text-3xl leading-none"
-            aria-label="Close live stream modal"
-          >
-            &times;
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setExpanded((prev) => !prev)}
+              className="px-4 py-2 text-sm font-medium rounded-lg bg-white/10 hover:bg-white/20 text-white"
+            >
+              {expanded ? 'Exit Full Size' : 'Full Size'}
+            </button>
+            <button
+              onClick={handleClose}
+              className="text-gray-400 hover:text-white transition-colors text-3xl leading-none"
+              aria-label="Close live stream modal"
+            >
+              &times;
+            </button>
+          </div>
         </header>
 
-        <div className="bg-black relative min-h-[320px]">
+        <div className={`bg-black relative flex-1 ${bodyHeightClass}`}>
           {remoteFeeds.length > 0 && (
             <div className={`grid gap-4 p-4 ${remoteFeeds.length > 1 ? 'md:grid-cols-2' : 'grid-cols-1'}`}>
               {remoteFeeds.map((feed, idx) => (

@@ -59,7 +59,6 @@ const AdminSettings: React.FC = () => {
         dropboxAppSecret: '',
         idleTimeout: 300,
         recordingMode: 'manual',
-        requireLoginOnBoot: false,
         showRecordingNotification: false,
         recordingQuality: '720p',
         autoClockOutEnabled: false,
@@ -67,7 +66,6 @@ const AdminSettings: React.FC = () => {
         organizationTimezone: 'Asia/Kolkata',
         showLiveTeamStatusToAgents: true,
         loginReminderEnabled: false,
-        loginReminderIntervalSeconds: 30,
     };
     
     const [settings, setSettings] = useState<AdminSettingsType>(defaultSettings);
@@ -204,14 +202,6 @@ const AdminSettings: React.FC = () => {
             {error && <p className="text-sm text-red-500 mb-4 p-3 bg-red-100 dark:bg-red-900/50 rounded-md">{error}</p>}
             
             <form onSubmit={handleSave}>
-                <FormField label="Require Login on Boot" description="Force users to log in every time the desktop application starts.">
-                    <ToggleSwitch
-                        id="requireLoginOnBoot"
-                        checked={settings.requireLoginOnBoot ?? false}
-                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, requireLoginOnBoot: e.target.checked }))}
-                    />
-                </FormField>
-                
                 <FormField label="Allow Screen Recording" description="Enable or disable the screen recording feature for all agents.">
                      <ToggleSwitch
                         id="allowRecording"
@@ -228,27 +218,12 @@ const AdminSettings: React.FC = () => {
                     />
                 </FormField>
 
-                <FormField label="Login Reminder" description="When enabled, the desktop app periodically prompts agents to log in or clock in if they forget.">
-                    <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
-                        <ToggleSwitch
-                            id="loginReminderEnabled"
-                            checked={settings.loginReminderEnabled ?? false}
-                            onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, loginReminderEnabled: e.target.checked }))}
-                        />
-                        <div className="flex items-center gap-2">
-                            <input
-                                type="number"
-                                name="loginReminderIntervalSeconds"
-                                value={settings.loginReminderIntervalSeconds ?? 30}
-                                onChange={handleInputChange}
-                                min={15}
-                                max={600}
-                                disabled={!settings.loginReminderEnabled}
-                                className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-24 p-2.5 disabled:opacity-60 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
-                            />
-                            <span className="text-sm text-gray-600 dark:text-gray-300">seconds</span>
-                        </div>
-                    </div>
+                <FormField label="Login Reminder" description="When enabled, the desktop app persistently prompts agents until they sign in and clock in.">
+                    <ToggleSwitch
+                        id="loginReminderEnabled"
+                        checked={settings.loginReminderEnabled ?? false}
+                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, loginReminderEnabled: e.target.checked }))}
+                    />
                 </FormField>
 
                 <FormField label="Recording Quality" description="Select the target resolution for screen recordings.">
