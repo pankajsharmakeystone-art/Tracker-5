@@ -39,7 +39,7 @@ const AppContent = () => {
       
       <HashRouter>
         <Routes>
-          <Route path="/" element={<LoginPage />} />
+          <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/landing" element={<LandingPage />} />
           <Route path="/signup" element={<SignupPage />} />
