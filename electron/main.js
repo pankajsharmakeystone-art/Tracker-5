@@ -686,12 +686,16 @@ function getLoginReminderContext() {
 }
 
 function updateRendererSessionHints(status) {
+  const hadActiveSession = rendererHasActiveSession;
   rendererHasActiveSession = true;
   const normalized = (status || '').toLowerCase();
   const shouldClear = normalized === 'clocked_out' || normalized === 'offline';
   const nextHint = shouldClear ? false : (normalized === 'working' || normalized === 'online' || normalized === 'manual_break');
-  if (rendererClockedInHint !== nextHint) {
+  const hintChanged = rendererClockedInHint !== nextHint;
+  if (hintChanged) {
     rendererClockedInHint = nextHint;
+  }
+  if (!hadActiveSession || hintChanged) {
     refreshLoginReminderState({ immediate: true });
   }
 }
@@ -799,7 +803,10 @@ function focusMainAppWindow() {
 
 function closeManualBreakReminderWindow() {
   if (manualBreakReminderWindow) {
-    try { manualBreakReminderWindow.close(); } catch (e) {}
+    try {
+      manualBreakReminderWindow.removeAllListeners('closed');
+      manualBreakReminderWindow.destroy();
+    } catch (e) {}
     manualBreakReminderWindow = null;
   }
   manualBreakReminderPayloadKey = null;

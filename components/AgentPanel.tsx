@@ -10,7 +10,6 @@ import Spinner from './Spinner';
 import ActivitySheet from './ActivitySheet';
 import AgentScheduleView from './AgentScheduleView';
 import TeamStatusView from './TeamStatusView';
-import ManualBreakTimeoutModal from './ManualBreakTimeoutModal';
 
 const formatDuration = (totalSeconds: number): string => {
     if (totalSeconds < 0) totalSeconds = 0;
@@ -110,9 +109,6 @@ const AgentPanel: React.FC = () => {
     const [activeTeamId, setActiveTeamId] = useState<string | null>(null);
     const [availableTeams, setAvailableTeams] = useState<Team[]>([]);
 
-    const [showTimeoutModal, setShowTimeoutModal] = useState(false);
-    const [dismissedTimeout, setDismissedTimeout] = useState(false);
-    const [breakStartedAt, setBreakStartedAt] = useState<number | null>(null);
 
     const workLogRef = useRef<WorkLog | null>(null);
     const manualBreakRef = useRef(false);
@@ -241,13 +237,6 @@ const AgentPanel: React.FC = () => {
                 if (data.manualBreak) idleBreakActiveRef.current = false;
                 
                 // Track break start
-                if (data.manualBreak && data.breakStartedAt) {
-                    setBreakStartedAt(getMillis(data.breakStartedAt));
-                } else {
-                    setBreakStartedAt(null);
-                    setDismissedTimeout(false);
-                }
-
                 // Handle Idle Changes Logic (Sync with Firestore)
                 const currentLog = workLogRef.current;
                 if (currentLog && !data.manualBreak) {
@@ -309,22 +298,6 @@ const AgentPanel: React.FC = () => {
         return () => unsubscribe();
     }, [userData?.uid, getMillis, notifyDesktopStatus]);
 
-    // Manual Break Timeout
-    useEffect(() => {
-        if (!breakStartedAt || !adminSettings?.manualBreakTimeoutMinutes || dismissedTimeout) {
-            setShowTimeoutModal(false);
-            return;
-        }
-        const check = () => {
-            const elapsed = (Date.now() - breakStartedAt) / 60000;
-            const timeout = adminSettings.manualBreakTimeoutMinutes ?? 30;
-            if (elapsed >= timeout) setShowTimeoutModal(true);
-        };
-        check();
-        const i = setInterval(check, 10000);
-        return () => clearInterval(i);
-    }, [breakStartedAt, adminSettings, dismissedTimeout]);
-
     // Actions
     const handleClockIn = async () => {
         if (!userData || !activeTeamId) return;
@@ -383,7 +356,6 @@ const AgentPanel: React.FC = () => {
     const handleEndBreak = async () => {
         if (!workLog || !userData) return;
         setLoading(true);
-        setShowTimeoutModal(false);
         try {
             const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
             const newBreaks = [...(workLog.breaks || [])];
@@ -417,8 +389,6 @@ const AgentPanel: React.FC = () => {
 
     return (
         <div>
-            <ManualBreakTimeoutModal isOpen={showTimeoutModal} timeoutMinutes={adminSettings?.manualBreakTimeoutMinutes || 30} onRemoveBreak={handleEndBreak} onContinueBreak={() => { setShowTimeoutModal(false); setDismissedTimeout(true); }} />
-            
             <div className="flex justify-between items-center mb-4">
                 <h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-200">Agent Dashboard</h2>
                 {availableTeams.length > 1 && (
