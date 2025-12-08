@@ -178,7 +178,6 @@ function hydrateAdminSettingsFromDisk() {
 }
 
 hydrateAdminSettingsFromDisk();
-configureGoogleIntegrations();
 
 let lastForceLogoutRequestId = null;
 let forceLogoutRequestInFlight = false;
@@ -221,6 +220,8 @@ let googleAuthClient = null;
 let googleSheetsClient = null;
 let googleDriveClient = null;
 let googleSetupError = null;
+
+configureGoogleIntegrations();
 
 const pendingAgentStatuses = [];
 
