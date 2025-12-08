@@ -65,7 +65,6 @@ const AdminSettings: React.FC = () => {
         manualBreakTimeoutMinutes: 30,
         organizationTimezone: 'Asia/Kolkata',
         showLiveTeamStatusToAgents: true,
-        loginReminderEnabled: false,
     };
     
     const [settings, setSettings] = useState<AdminSettingsType>(defaultSettings);
@@ -215,14 +214,6 @@ const AdminSettings: React.FC = () => {
                         id="showLiveTeamStatusToAgents"
                         checked={settings.showLiveTeamStatusToAgents ?? true}
                         onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, showLiveTeamStatusToAgents: e.target.checked }))}
-                    />
-                </FormField>
-
-                <FormField label="Login Reminder" description="When enabled, the desktop app persistently prompts agents until they sign in and clock in.">
-                    <ToggleSwitch
-                        id="loginReminderEnabled"
-                        checked={settings.loginReminderEnabled ?? false}
-                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, loginReminderEnabled: e.target.checked }))}
                     />
                 </FormField>
 

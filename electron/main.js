@@ -148,13 +148,7 @@ let agentClockedIn = false; // only monitor idle when true
 let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
-let loginReminderWindow = null;
-
-let loginReminderActive = false;
-let loginReminderContextKey = null;
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
-let rendererHasActiveSession = false;
-let rendererClockedInHint = false;
 
 let manualBreakReminderWindow = null;
 let manualBreakReminderPayloadKey = null;
@@ -176,7 +170,6 @@ function hydrateAdminSettingsFromDisk() {
     if (parsed && typeof parsed === "object") {
       cachedAdminSettings = parsed;
       log("[adminSettings] hydrated cached settings from disk");
-      refreshLoginReminderState({ immediate: true });
     }
   } catch (error) {
     console.warn("[adminSettings] failed to load cached settings", error?.message || error);
@@ -305,7 +298,6 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   const uid = currentUid;
 
   agentClockedIn = false;
-  rendererClockedInHint = false;
   stopAgentStatusLoop();
 
   const wasRecording = isRecordingActive;
@@ -346,8 +338,6 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   currentUid = null;
   currentShiftDate = null;
   lastAutoClockOutTargetKey = null;
-  rendererHasActiveSession = false;
-  rendererClockedInHint = false;
 
   try { await clientAuth.signOut(); } catch (err) { console.warn('[clockOutAndSignOutDesktop] signOut failed', err?.message || err); }
 
@@ -362,7 +352,6 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     console.warn('[clockOutAndSignOutDesktop] renderer notification failed', e?.message || e);
   }
 
-  refreshLoginReminderState({ immediate: true });
   lastForceLogoutRequestId = null;
   forceLogoutRequestInFlight = false;
 
@@ -684,140 +673,6 @@ function showRecordingPopup(message) {
   }
 }
 
-function closeLoginReminderWindow() {
-  if (loginReminderWindow) {
-    try { loginReminderWindow.close(); } catch (e) {}
-    loginReminderWindow = null;
-  }
-  loginReminderContextKey = null;
-}
-
-function getLoginReminderContext() {
-  if (!cachedAdminSettings?.loginReminderEnabled) return null;
-  const effectiveClockedIn = agentClockedIn || rendererClockedInHint;
-  if (effectiveClockedIn) return null;
-
-  const appSessionDetected = Boolean(currentUid) || rendererHasActiveSession;
-  if (!appSessionDetected) {
-    return {
-      title: "Tracker isn't signed in",
-      message: "Open the desktop app and log in to resume tracking.",
-      cta: "Log In"
-    };
-  }
-  return {
-    title: "You're currently clocked out",
-    message: "Clock in to ensure your hours are tracked.",
-    cta: "Open Tracker"
-  };
-}
-
-function updateRendererSessionHints(status) {
-  const hadActiveSession = rendererHasActiveSession;
-  rendererHasActiveSession = true;
-  const normalized = (status || '').toLowerCase();
-  const shouldClear = normalized === 'clocked_out' || normalized === 'offline';
-  const nextHint = shouldClear ? false : (normalized === 'working' || normalized === 'online' || normalized === 'manual_break');
-  const hintChanged = rendererClockedInHint !== nextHint;
-  if (hintChanged) {
-    rendererClockedInHint = nextHint;
-  }
-  if (!hadActiveSession || hintChanged) {
-    refreshLoginReminderState({ immediate: true });
-  }
-}
-
-function showLoginReminderPopup(context) {
-  if (!context) return;
-
-  closeLoginReminderWindow();
-
-  try {
-    const display = screen.getPrimaryDisplay();
-    const { workArea } = display;
-    const popupWidth = 460;
-    const popupHeight = 220;
-    const x = workArea.x + Math.round((workArea.width - popupWidth) / 2);
-    const y = workArea.y + Math.round((workArea.height - popupHeight) / 2);
-
-    loginReminderWindow = new BrowserWindow({
-      width: popupWidth,
-      height: popupHeight,
-      x,
-      y,
-      parent: null,
-      modal: false,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      frame: false,
-      transparent: false,
-      resizable: false,
-      movable: false,
-      closable: false,
-      focusable: true,
-      webPreferences: {
-        nodeIntegration: true,
-        contextIsolation: false
-      }
-    });
-
-    loginReminderWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-
-    const safeIconUrl = `file://${POPUP_ICON_PATH}`;
-    const html = `
-      <html>
-        <head>
-          <meta charset="utf-8"/>
-          <style>
-            body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: transparent; }
-            .card {
-              width:100%; height:100%;
-              border-radius:18px;
-              padding:30px;
-              background: linear-gradient(135deg,#0f172a,#1f2937);
-              color:#fff;
-              display:flex;
-              flex-direction:column;
-              justify-content:space-between;
-              box-shadow:0 25px 55px rgba(0,0,0,0.55);
-            }
-            .header { display:flex; align-items:center; gap:18px; }
-            img { width:64px; height:64px; border-radius:14px; }
-            h1 { font-size:20px; margin:0; letter-spacing:0.3px; }
-            p { margin:10px 0 0; font-size:15px; color:rgba(255,255,255,0.85); line-height:1.5; }
-            button { margin-top:20px; padding:14px 18px; border:none; border-radius:12px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; font-size:14px; box-shadow:0 10px 25px rgba(37,99,235,0.35); }
-            button:hover { background:#1d4ed8; }
-            button:active { transform:scale(0.98); }
-          </style>
-        </head>
-        <body>
-          <div class="card" id="card">
-            <div class="header">
-              <img src="${safeIconUrl}" alt="Tracker" />
-              <div>
-                <h1>${context.title}</h1>
-                <p>${context.message}</p>
-              </div>
-            </div>
-            <button id="cta">${context.cta}</button>
-          </div>
-          <script>
-            const { ipcRenderer } = require('electron');
-            const fire = () => ipcRenderer.send('login-reminder-clicked');
-            document.getElementById('card').addEventListener('click', fire);
-            document.getElementById('cta').addEventListener('click', (event) => { event.stopPropagation(); fire(); });
-          </script>
-        </body>
-      </html>
-    `;
-
-    loginReminderWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
-    loginReminderWindow.on('closed', () => { loginReminderWindow = null; loginReminderContextKey = null; });
-  } catch (error) {
-    console.error('[login-reminder] popup failed', error?.message || error);
-  }
-}
-
 function focusMainAppWindow() {
   if (!mainWindow) return;
   try {
@@ -978,23 +833,6 @@ async function endBreakFromDesktopFlow() {
   }
 }
 
-function refreshLoginReminderState({ immediate = false } = {}) {
-  const context = getLoginReminderContext();
-  if (!context) {
-    loginReminderActive = false;
-    loginReminderContextKey = null;
-    closeLoginReminderWindow();
-    return;
-  }
-
-  const contextKey = `${context.title}|${context.message}|${context.cta}`;
-  loginReminderActive = true;
-  if (!loginReminderWindow || loginReminderContextKey !== contextKey || immediate) {
-    loginReminderContextKey = contextKey;
-    showLoginReminderPopup(context);
-  }
-}
-
 async function acknowledgeForceLogoutRequest(uid) {
   if (!uid) return;
   try {
@@ -1089,7 +927,6 @@ function applyAdminSettings(next) {
     stopAutoClockOutWatcher();
   }
 
-  refreshLoginReminderState({ immediate: true });
 }
 
 // ---------- DESKTOP COMMANDS ----------
@@ -1308,7 +1145,6 @@ function startAgentStatusWatch(uid) {
       const remoteClockedIn = normalizedStatus === 'online' || normalizedStatus === 'working' || normalizedStatus === 'on_break';
       if (agentClockedIn !== remoteClockedIn) {
         agentClockedIn = remoteClockedIn;
-        refreshLoginReminderState({ immediate: true });
       }
 
       if ((remoteStatus === 'offline' || remoteStatus === 'clocked_out') && (agentClockedIn || isRecordingActive)) {
@@ -1471,8 +1307,6 @@ async function performAutoClockOut() {
     lastAutoClockOutTargetKey = null;
     closeManualBreakReminderWindow();
 
-    refreshLoginReminderState({ immediate: true });
-
   } catch (e) {
     console.error("[performAutoClockOut] error", e);
   }
@@ -1523,8 +1357,6 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     // don't assume clocked in until web tells us
     agentClockedIn = false;
-    rendererClockedInHint = false;
-    rendererHasActiveSession = true;
 
     startCommandsWatch(uid);
     startAgentStatusLoop(uid); // loop will only do idle logic if agentClockedIn === true
@@ -1534,7 +1366,6 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
     log("Registered uid:", uid);
-    refreshLoginReminderState();
     return { success: true };
   } catch(e){
     return { success: false, error: e.message };
@@ -1561,15 +1392,12 @@ ipcMain.handle("unregister-uid", async () => {
 
     currentUid = null;
     agentClockedIn = false;
-    rendererHasActiveSession = false;
-    rendererClockedInHint = false;
     isRecordingActive = false;
     resetAutoResumeRetry();
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
     closeManualBreakReminderWindow();
     try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
-    refreshLoginReminderState({ immediate: true });
     return { success: true };
   } catch(e){
     return { success: false, error: e.message };
@@ -1602,7 +1430,6 @@ async function applyAgentStatus(status) {
     if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
 
     closeManualBreakReminderWindow();
-    refreshLoginReminderState();
     return { success: true };
   }
 
@@ -1626,7 +1453,6 @@ async function applyAgentStatus(status) {
       isDesktopConnected: false,
       lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(()=>{});
-    refreshLoginReminderState({ immediate: true });
     return { success: true };
   }
 
@@ -1664,7 +1490,6 @@ async function applyAgentStatus(status) {
     }, { merge: true }).catch(()=>{});
 
     closeManualBreakReminderWindow();
-    refreshLoginReminderState();
     return { success: true };
   }
 
@@ -1684,7 +1509,6 @@ async function applyAgentStatus(status) {
       isIdle: true,
       lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(()=>{});
-    refreshLoginReminderState();
     return { success: true };
   }
 
@@ -1706,7 +1530,6 @@ async function flushPendingAgentStatuses() {
 ipcMain.handle("set-agent-status", async (_, status) => {
   try {
     log("set-agent-status received:", status); 
-    updateRendererSessionHints(status);
     if (!currentUid) {
       log('Desktop not registered yet. Queuing status:', status);
       pendingAgentStatuses.push(status);
@@ -1835,10 +1658,6 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta =
       scheduleAutoResumeRecording();
     }
   }
-});
-
-ipcMain.on('login-reminder-clicked', () => {
-  focusMainAppWindow();
 });
 
 ipcMain.handle("get-idle-time", () => {
