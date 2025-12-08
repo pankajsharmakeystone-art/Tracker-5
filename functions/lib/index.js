@@ -6,8 +6,47 @@ const admin = require("firebase-admin");
 const scheduler_1 = require("firebase-functions/v2/scheduler");
 const node_fetch_1 = require("node-fetch");
 const crypto = require("crypto");
+const luxon_1 = require("luxon");
 admin.initializeApp();
 const db = admin.firestore();
+const DEFAULT_TIMEZONE = "Asia/Kolkata";
+let cachedTimezone = DEFAULT_TIMEZONE;
+let lastTimezoneFetch = 0;
+const getOrganizationTimezone = async () => {
+    const now = Date.now();
+    const cacheIsFresh = now - lastTimezoneFetch < 5 * 60 * 1000;
+    if (cacheIsFresh)
+        return cachedTimezone;
+    try {
+        const snap = await db.collection("adminSettings").doc("global").get();
+        if (snap.exists) {
+            const data = snap.data();
+            cachedTimezone = (data === null || data === void 0 ? void 0 : data.organizationTimezone) || DEFAULT_TIMEZONE;
+        }
+        else {
+            cachedTimezone = DEFAULT_TIMEZONE;
+        }
+    }
+    catch (error) {
+        console.error("Failed to load organization timezone", error);
+        cachedTimezone = DEFAULT_TIMEZONE;
+    }
+    lastTimezoneFetch = now;
+    return cachedTimezone;
+};
+const buildShiftBoundary = (logStartDate, timeStr, useOvernight, timezone) => {
+    if (!timeStr)
+        return null;
+    const [hour, minute] = timeStr.split(":").map(Number);
+    if (Number.isNaN(hour) || Number.isNaN(minute))
+        return null;
+    const base = luxon_1.DateTime.fromJSDate(logStartDate, { zone: timezone || DEFAULT_TIMEZONE });
+    const referenceDay = useOvernight ? base.plus({ days: 1 }) : base;
+    return referenceDay
+        .set({ hour, minute, second: 0, millisecond: 0 })
+        .toUTC()
+        .toJSDate();
+};
 const inferProjectId = () => {
     if (process.env.GCLOUD_PROJECT)
         return process.env.GCLOUD_PROJECT;
@@ -32,35 +71,96 @@ const DROPBOX_CALLBACK_URL = `${FUNCTION_BASE_URL}/dropboxOauthCallback`;
 const allowCors = (res) => {
     res.set("Access-Control-Allow-Origin", "*");
     res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
 };
-const DROPBOX_SESSIONS_COLLECTION = "dropboxOauthSessions";
-const isRecent = (timestamp, maxMinutes = 15) => {
-    if (!timestamp)
-        return false;
-    const created = timestamp.toDate().getTime();
-    return Date.now() - created < maxMinutes * 60 * 1000;
+const parseBearerToken = (headerValue) => {
+    if (!headerValue)
+        return null;
+    const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+    if (!raw)
+        return null;
+    const [scheme, token] = raw.split(' ');
+    if (!scheme || !token)
+        return null;
+    return scheme.toLowerCase() === 'bearer' ? token.trim() : null;
 };
 const ensureAdminUser = async (uid) => {
-    const userSnap = await db.collection("users").doc(uid).get();
-    if (!userSnap.exists) {
-        throw new functions.https.HttpsError("permission-denied", "User profile not found.");
-    }
+    const userSnap = await db.collection('users').doc(uid).get();
     const data = userSnap.data();
-    if ((data === null || data === void 0 ? void 0 : data.role) !== "admin") {
-        throw new functions.https.HttpsError("permission-denied", "Admin privileges required.");
+    if (!userSnap.exists || ((data === null || data === void 0 ? void 0 : data.role) !== 'admin' && (data === null || data === void 0 ? void 0 : data.role) !== 'super_admin')) {
+        throw new functions.https.HttpsError('permission-denied', 'Admin access required.');
     }
-    return data;
 };
-const parseBearerToken = (header) => {
-    if (!header)
-        return null;
-    const value = Array.isArray(header) ? header[0] : header;
-    const match = value.match(/^Bearer (.*)$/i);
-    return match ? match[1] : null;
+const DROPBOX_SESSIONS_COLLECTION = "dropboxSessions";
+const isRecent = (value) => {
+    if (!value || !value.toDate)
+        return false;
+    const created = value.toDate().getTime();
+    return Date.now() - created < 10 * 60 * 1000; // 10 minutes
 };
 const sendHtml = (res, content, status = 200) => {
     res.status(status).set("Content-Type", "text/html; charset=utf-8").send(`<!doctype html><html><head><title>Dropbox Authorization</title><style>body{font-family:Arial,sans-serif;background:#f7f7f7;margin:0;padding:40px;color:#111;} .card{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;box-shadow:0 10px 35px rgba(0,0,0,0.08);} h1{font-size:22px;margin-bottom:18px;} p{line-height:1.5;margin:12px 0;} .success{color:#0f9d58;} .error{color:#d93025;} a{color:#1a73e8;} button{border:none;background:#1a73e8;color:#fff;padding:12px 18px;border-radius:8px;font-size:15px;cursor:pointer;margin-top:20px;}</style></head><body><div class="card">${content}</div></body></html>`);
+};
+const shouldTreatAsOvernight = (logData) => {
+    if ((logData === null || logData === void 0 ? void 0 : logData.isOvernightShift) === true)
+        return true;
+    const start = typeof (logData === null || logData === void 0 ? void 0 : logData.scheduledStart) === "string" ? logData.scheduledStart : "";
+    const end = typeof (logData === null || logData === void 0 ? void 0 : logData.scheduledEnd) === "string" ? logData.scheduledEnd : "";
+    if (!start || !end)
+        return false;
+    return end < start;
+};
+const getTimestampMillis = (value) => {
+    if (!value)
+        return null;
+    if (value instanceof admin.firestore.Timestamp)
+        return value.toMillis();
+    const maybe = value;
+    if (typeof (maybe === null || maybe === void 0 ? void 0 : maybe.toMillis) === "function")
+        return maybe.toMillis();
+    if (typeof (maybe === null || maybe === void 0 ? void 0 : maybe.toDate) === "function")
+        return maybe.toDate().getTime();
+    if (value instanceof Date)
+        return value.getTime();
+    if (typeof value === "number")
+        return value;
+    return null;
+};
+const cloneEntryArray = (raw) => (Array.isArray(raw) ? raw.map((entry) => (Object.assign({}, entry))) : []);
+const closeLatestActivityEntry = (raw, endTime) => {
+    const activities = cloneEntryArray(raw);
+    if (!activities.length)
+        return null;
+    const lastIndex = activities.length - 1;
+    const last = Object.assign({}, activities[lastIndex]);
+    if (!last.endTime) {
+        last.endTime = endTime;
+        activities[lastIndex] = last;
+        return activities;
+    }
+    return null;
+};
+const closeOpenBreakEntry = (raw, endTime) => {
+    const breaks = cloneEntryArray(raw);
+    if (!breaks.length)
+        return null;
+    const lastIndex = breaks.length - 1;
+    const last = Object.assign({}, breaks[lastIndex]);
+    if (!last.endTime) {
+        last.endTime = endTime;
+        breaks[lastIndex] = last;
+        return breaks;
+    }
+    return null;
+};
+const deriveDateKey = (logStartDate, timezone) => {
+    try {
+        return luxon_1.DateTime.fromJSDate(logStartDate)
+            .setZone(timezone || DEFAULT_TIMEZONE, { keepLocalTime: false })
+            .toISODate();
+    }
+    catch (_a) {
+        return null;
+    }
 };
 exports.issueDesktopToken = functions
     .region(FUNCTIONS_REGION)
@@ -252,7 +352,7 @@ exports.dailyMidnightCleanup = (0, scheduler_1.onSchedule)("5 0 * * *", async (e
         const data = doc.data();
         // Rule N1 Exception: Overnight shifts are allowed to cross midnight.
         // They will be closed by `autoClockOutAtShiftEnd` or manual action.
-        if (data.isOvernightShift === true) {
+        if (shouldTreatAsOvernight(data)) {
             console.log(`Skipping overnight shift: ${doc.id}`);
             return;
         }
@@ -286,55 +386,98 @@ exports.dailyMidnightCleanup = (0, scheduler_1.onSchedule)("5 0 * * *", async (e
  * Auto Clock-Out at Shift End
  * Enforces schedule limits.
  */
-exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", async (event) => {
+exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", async () => {
+    var _a;
     const now = new Date();
+    const organizationTimezone = await getOrganizationTimezone();
     const snapshot = await db.collection("worklogs")
         .where("status", "in", ["working", "on_break", "break"])
         .get();
+    if (snapshot.empty)
+        return;
     const batch = db.batch();
     let count = 0;
-    const parseTime = (dateObj, timeStr) => {
-        const [hh, mm] = timeStr.split(":").map(Number);
-        const newDate = new Date(dateObj);
-        newDate.setHours(hh, mm, 0, 0);
-        return newDate;
+    const slotCache = new Map();
+    const getAutoClockSlot = async (userId, dateKey) => {
+        if (!userId || !dateKey)
+            return null;
+        if (!slotCache.has(userId)) {
+            const snap = await db.collection("autoClockConfigs").doc(userId).get();
+            slotCache.set(userId, snap.exists ? snap.data() : {});
+        }
+        const config = slotCache.get(userId) || {};
+        return (config === null || config === void 0 ? void 0 : config[dateKey]) || null;
     };
-    snapshot.docs.forEach((doc) => {
-        const data = doc.data();
-        if (!data.scheduledEnd || !data.date)
-            return;
-        let shiftEndDate;
+    for (const docSnap of snapshot.docs) {
+        const data = docSnap.data();
+        if (!(data === null || data === void 0 ? void 0 : data.date) || !(data === null || data === void 0 ? void 0 : data.userId))
+            continue;
         const logStartDate = data.date.toDate();
-        // Correctly calculate end time based on shift type
-        if (data.isOvernightShift) {
-            const nextDay = new Date(logStartDate);
-            nextDay.setDate(nextDay.getDate() + 1);
-            shiftEndDate = parseTime(nextDay, data.scheduledEnd);
+        const dateKey = deriveDateKey(logStartDate, organizationTimezone);
+        const slot = await getAutoClockSlot(data.userId, dateKey);
+        const scheduledEnd = (slot === null || slot === void 0 ? void 0 : slot.shiftEndTime) || data.scheduledEnd;
+        if (!scheduledEnd)
+            continue;
+        const timezoneForLog = (slot === null || slot === void 0 ? void 0 : slot.timezone) || organizationTimezone;
+        const useOvernight = (_a = slot === null || slot === void 0 ? void 0 : slot.isOvernightShift) !== null && _a !== void 0 ? _a : shouldTreatAsOvernight(data);
+        const shiftEndDate = buildShiftBoundary(logStartDate, scheduledEnd, useOvernight, timezoneForLog);
+        if (!shiftEndDate)
+            continue;
+        if (now <= shiftEndDate)
+            continue;
+        const shiftEndTs = admin.firestore.Timestamp.fromDate(shiftEndDate);
+        const shiftEndMillis = shiftEndDate.getTime();
+        const lastEventMillis = getTimestampMillis(data.lastEventTimestamp);
+        const normalizedStatus = (data.status || "working").toString().toLowerCase();
+        let workDelta = 0;
+        let breakDelta = 0;
+        if (lastEventMillis != null && shiftEndMillis > lastEventMillis) {
+            const elapsedSeconds = (shiftEndMillis - lastEventMillis) / 1000;
+            if (["on_break", "break"].includes(normalizedStatus)) {
+                breakDelta = elapsedSeconds;
+            }
+            else {
+                workDelta = elapsedSeconds;
+            }
         }
-        else {
-            shiftEndDate = parseTime(logStartDate, data.scheduledEnd);
+        const workLogRef = db.collection("worklogs").doc(docSnap.id);
+        const updates = {
+            status: "clocked_out",
+            clockOutTime: shiftEndTs,
+            lastEventTimestamp: shiftEndTs,
+        };
+        if (workDelta > 0) {
+            updates.totalWorkSeconds = admin.firestore.FieldValue.increment(workDelta);
         }
-        // Buffer: Allow 15 mins past shift end? Strict for now.
-        if (now > shiftEndDate) {
-            console.log(`Auto-clocking out ${doc.id}. End: ${shiftEndDate.toISOString()}`);
-            batch.update(db.collection("worklogs").doc(doc.id), {
-                status: "clocked_out",
-                clockOutTime: admin.firestore.Timestamp.fromDate(shiftEndDate),
-                lastEventTimestamp: admin.firestore.FieldValue.serverTimestamp()
-            });
-            batch.update(db.collection("agentStatus").doc(data.userId), {
-                status: "offline",
-                manualBreak: false,
-                breakStartedAt: admin.firestore.FieldValue.delete()
-            });
-            batch.update(db.collection("users").doc(data.userId), {
-                isLoggedIn: false,
-                activeSession: admin.firestore.FieldValue.delete()
-            });
-            count++;
+        if (breakDelta > 0) {
+            updates.totalBreakSeconds = admin.firestore.FieldValue.increment(breakDelta);
         }
-    });
-    if (count > 0)
+        const updatedActivities = closeLatestActivityEntry(data.activities, shiftEndTs);
+        if (updatedActivities) {
+            updates.activities = updatedActivities;
+        }
+        const updatedBreaks = closeOpenBreakEntry(data.breaks, shiftEndTs);
+        if (updatedBreaks) {
+            updates.breaks = updatedBreaks;
+        }
+        batch.update(workLogRef, updates);
+        batch.set(db.collection("agentStatus").doc(data.userId), {
+            status: "offline",
+            manualBreak: false,
+            breakStartedAt: admin.firestore.FieldValue.delete(),
+            lastUpdate: shiftEndTs
+        }, { merge: true });
+        batch.set(db.collection("users").doc(data.userId), {
+            isLoggedIn: false,
+            activeSession: admin.firestore.FieldValue.delete(),
+            lastClockOut: shiftEndTs,
+            sessionClearedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        count++;
+    }
+    if (count > 0) {
         await batch.commit();
+        console.log(`Auto clocked out ${count} session(s) at scheduled shift end.`);
+    }
 });
 //# sourceMappingURL=index.js.map

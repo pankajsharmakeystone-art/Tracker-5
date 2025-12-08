@@ -61,17 +61,6 @@ const inferProjectId = (): string => {
   return admin.app().options.projectId || "tracker-5";
 };
 
-      const autoClockConfigCache = new Map<string, Record<string, any>>();
-
-      const getAutoClockSlot = async (userId: string, dateKey: string) => {
-        if (!userId) return null;
-        if (!autoClockConfigCache.has(userId)) {
-          const snap = await db.collection("autoClockConfigs").doc(userId).get();
-          autoClockConfigCache.set(userId, snap.exists ? (snap.data() as Record<string, any>) : {});
-        }
-        const config = autoClockConfigCache.get(userId) || {};
-        return config?.[dateKey] || null;
-      };
 const PROJECT_ID = inferProjectId();
 const FUNCTIONS_REGION = "us-central1";
 const FUNCTION_BASE_URL = `https://${FUNCTIONS_REGION}-${PROJECT_ID}.cloudfunctions.net`;
@@ -80,43 +69,41 @@ const DROPBOX_CALLBACK_URL = `${FUNCTION_BASE_URL}/dropboxOauthCallback`;
 const allowCors = (res: Response) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
-      for (const docSnap of snapshot.docs) {
-        const data = docSnap.data();
-        if (!data?.date) continue;
+};
 
-        const logStartDate: Date = data.date.toDate();
-        const dateKey = logStartDate.toISOString().split('T')[0];
-        const slot = await getAutoClockSlot(data.userId, dateKey);
-        const shiftEndTime: string | undefined = slot?.shiftEndTime || data.scheduledEnd;
-        if (!shiftEndTime) continue;
+const parseBearerToken = (headerValue: string | string[] | undefined | null): string | null => {
+  if (!headerValue) return null;
+  const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (!raw) return null;
+  const [scheme, token] = raw.split(' ');
+  if (!scheme || !token) return null;
+  return scheme.toLowerCase() === 'bearer' ? token.trim() : null;
+};
 
-        const useOvernight = slot?.isOvernightShift ?? shouldTreatAsOvernight(data);
-        const shiftEndDate = buildShiftBoundary(logStartDate, shiftEndTime, useOvernight, slot?.timezone || cachedTimezone);
-        if (!shiftEndDate) continue;
+const ensureAdminUser = async (uid: string) => {
+  const userSnap = await db.collection('users').doc(uid).get();
+  const data = userSnap.data();
+  if (!userSnap.exists || (data?.role !== 'admin' && data?.role !== 'super_admin')) {
+    throw new functions.https.HttpsError('permission-denied', 'Admin access required.');
+  }
+};
+const DROPBOX_SESSIONS_COLLECTION = "dropboxSessions";
 
-        if (now > shiftEndDate) {
-          console.log(`Auto-clocking out ${docSnap.id}. End: ${shiftEndDate.toISOString()}`);
+interface DropboxSessionDoc {
+  uid: string;
+  appKey: string;
+  appSecret: string;
+  stateSecret: string;
+  createdAt: admin.firestore.Timestamp;
+  status?: string;
+}
 
-          batch.update(db.collection("worklogs").doc(docSnap.id), {
-            status: "clocked_out",
-            clockOutTime: admin.firestore.Timestamp.fromDate(shiftEndDate),
-            lastEventTimestamp: admin.firestore.FieldValue.serverTimestamp()
-          });
+const isRecent = (value: admin.firestore.Timestamp | admin.firestore.FieldValue | undefined): boolean => {
+  if (!value || !(value as admin.firestore.Timestamp).toDate) return false;
+  const created = (value as admin.firestore.Timestamp).toDate().getTime();
+  return Date.now() - created < 10 * 60 * 1000; // 10 minutes
+};
 
-          batch.update(db.collection("agentStatus").doc(data.userId), {
-          status: "offline",
-          manualBreak: false,
-          breakStartedAt: admin.firestore.FieldValue.delete()
-          });
-
-          batch.update(db.collection("users").doc(data.userId), {
-          isLoggedIn: false,
-          activeSession: admin.firestore.FieldValue.delete()
-          });
-
-          count++;
-        }
-      }
 const sendHtml = (res: Response, content: string, status = 200) => {
   res.status(status).set("Content-Type", "text/html; charset=utf-8").send(`<!doctype html><html><head><title>Dropbox Authorization</title><style>body{font-family:Arial,sans-serif;background:#f7f7f7;margin:0;padding:40px;color:#111;} .card{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;box-shadow:0 10px 35px rgba(0,0,0,0.08);} h1{font-size:22px;margin-bottom:18px;} p{line-height:1.5;margin:12px 0;} .success{color:#0f9d58;} .error{color:#d93025;} a{color:#1a73e8;} button{border:none;background:#1a73e8;color:#fff;padding:12px 18px;border-radius:8px;font-size:15px;cursor:pointer;margin-top:20px;}</style></head><body><div class="card">${content}</div></body></html>`);
 };
@@ -127,6 +114,67 @@ const shouldTreatAsOvernight = (logData: any): boolean => {
   const end = typeof logData?.scheduledEnd === "string" ? logData.scheduledEnd : "";
   if (!start || !end) return false;
   return end < start;
+};
+
+type TimestampLike =
+  | admin.firestore.Timestamp
+  | { toMillis?: () => number; toDate?: () => Date }
+  | Date
+  | number
+  | null
+  | undefined;
+
+const getTimestampMillis = (value: TimestampLike): number | null => {
+  if (!value) return null;
+  if (value instanceof admin.firestore.Timestamp) return value.toMillis();
+  const maybe = value as { toMillis?: () => number; toDate?: () => Date };
+  if (typeof maybe?.toMillis === "function") return maybe.toMillis();
+  if (typeof maybe?.toDate === "function") return maybe.toDate().getTime();
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value;
+  return null;
+};
+
+type GenericEntry = Record<string, any>;
+
+const cloneEntryArray = <T extends GenericEntry>(raw: any): T[] => (
+  Array.isArray(raw) ? raw.map((entry: T) => ({ ...entry })) : []
+);
+
+const closeLatestActivityEntry = (raw: any, endTime: admin.firestore.Timestamp): GenericEntry[] | null => {
+  const activities = cloneEntryArray(raw);
+  if (!activities.length) return null;
+  const lastIndex = activities.length - 1;
+  const last = { ...activities[lastIndex] };
+  if (!last.endTime) {
+    last.endTime = endTime;
+    activities[lastIndex] = last;
+    return activities;
+  }
+  return null;
+};
+
+const closeOpenBreakEntry = (raw: any, endTime: admin.firestore.Timestamp): GenericEntry[] | null => {
+  const breaks = cloneEntryArray(raw);
+  if (!breaks.length) return null;
+  const lastIndex = breaks.length - 1;
+  const last = { ...breaks[lastIndex] };
+  if (!last.endTime) {
+    last.endTime = endTime;
+    breaks[lastIndex] = last;
+    return breaks;
+  }
+  return null;
+};
+
+const deriveDateKey = (logStartDate: Date, timezone: string): string | null => {
+  try {
+    return DateTime.fromJSDate(logStartDate)
+      .setZone(timezone || DEFAULT_TIMEZONE, { keepLocalTime: false })
+      .toISODate();
+  } catch {
+    return null;
+  }
 };
 
 export const issueDesktopToken = functions
@@ -394,51 +442,107 @@ export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
  * Auto Clock-Out at Shift End
  * Enforces schedule limits.
  */
-export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async (event) => {
+export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async () => {
   const now = new Date();
   const organizationTimezone = await getOrganizationTimezone();
-      const snapshot = await db.collection("worklogs")
-        .where("status", "in", ["working", "on_break", "break"])
-        .get();
-      
-      const batch = db.batch();
-      let count = 0;
-      
-      snapshot.docs.forEach((doc) => {
-          const data = doc.data();
-            if (!data.scheduledEnd || !data.date) return;
+  const snapshot = await db.collection("worklogs")
+    .where("status", "in", ["working", "on_break", "break"])
+    .get();
 
-            const logStartDate = data.date.toDate();
-            const scheduledEnd = data.scheduledEnd as string;
+  if (snapshot.empty) return;
 
-            // Correctly calculate end time based on shift type
-            const shiftEndDate = buildShiftBoundary(logStartDate, scheduledEnd, shouldTreatAsOvernight(data), organizationTimezone);
-            if (!shiftEndDate) return;
+  const batch = db.batch();
+  let count = 0;
+  const slotCache = new Map<string, Record<string, any>>();
 
-          // Buffer: Allow 15 mins past shift end? Strict for now.
-          if (now > shiftEndDate) {
-              console.log(`Auto-clocking out ${doc.id}. End: ${shiftEndDate.toISOString()}`);
-              
-              batch.update(db.collection("worklogs").doc(doc.id), {
-                  status: "clocked_out",
-                  clockOutTime: admin.firestore.Timestamp.fromDate(shiftEndDate),
-                  lastEventTimestamp: admin.firestore.FieldValue.serverTimestamp()
-              });
+  const getAutoClockSlot = async (userId: string, dateKey: string | null) => {
+    if (!userId || !dateKey) return null;
+    if (!slotCache.has(userId)) {
+      const snap = await db.collection("autoClockConfigs").doc(userId).get();
+      slotCache.set(userId, snap.exists ? (snap.data() as Record<string, any>) : {});
+    }
+    const config = slotCache.get(userId) || {};
+    return config?.[dateKey] || null;
+  };
 
-              batch.update(db.collection("agentStatus").doc(data.userId), {
-                status: "offline",
-                manualBreak: false,
-                breakStartedAt: admin.firestore.FieldValue.delete()
-              });
+  for (const docSnap of snapshot.docs) {
+    const data = docSnap.data();
+    if (!data?.date || !data?.userId) continue;
 
-              batch.update(db.collection("users").doc(data.userId), {
-                isLoggedIn: false,
-                activeSession: admin.firestore.FieldValue.delete()
-              });
+    const logStartDate: Date = data.date.toDate();
+    const dateKey = deriveDateKey(logStartDate, organizationTimezone);
+    const slot = await getAutoClockSlot(data.userId, dateKey);
+    const scheduledEnd: string | undefined = slot?.shiftEndTime || data.scheduledEnd;
+    if (!scheduledEnd) continue;
 
-              count++;
-          }
-      });
+    const timezoneForLog = slot?.timezone || organizationTimezone;
+    const useOvernight = slot?.isOvernightShift ?? shouldTreatAsOvernight(data);
+    const shiftEndDate = buildShiftBoundary(logStartDate, scheduledEnd, useOvernight, timezoneForLog);
+    if (!shiftEndDate) continue;
+    if (now <= shiftEndDate) continue;
 
-        if (count > 0) await batch.commit();
-  });
+    const shiftEndTs = admin.firestore.Timestamp.fromDate(shiftEndDate);
+    const shiftEndMillis = shiftEndDate.getTime();
+    const lastEventMillis = getTimestampMillis(data.lastEventTimestamp as TimestampLike);
+
+    const normalizedStatus = (data.status || "working").toString().toLowerCase();
+    let workDelta = 0;
+    let breakDelta = 0;
+
+    if (lastEventMillis != null && shiftEndMillis > lastEventMillis) {
+      const elapsedSeconds = (shiftEndMillis - lastEventMillis) / 1000;
+      if (["on_break", "break"].includes(normalizedStatus)) {
+        breakDelta = elapsedSeconds;
+      } else {
+        workDelta = elapsedSeconds;
+      }
+    }
+
+    const workLogRef = db.collection("worklogs").doc(docSnap.id);
+    const updates: Record<string, any> = {
+      status: "clocked_out",
+      clockOutTime: shiftEndTs,
+      lastEventTimestamp: shiftEndTs,
+    };
+
+    if (workDelta > 0) {
+      updates.totalWorkSeconds = admin.firestore.FieldValue.increment(workDelta);
+    }
+    if (breakDelta > 0) {
+      updates.totalBreakSeconds = admin.firestore.FieldValue.increment(breakDelta);
+    }
+
+    const updatedActivities = closeLatestActivityEntry(data.activities, shiftEndTs);
+    if (updatedActivities) {
+      updates.activities = updatedActivities;
+    }
+
+    const updatedBreaks = closeOpenBreakEntry(data.breaks, shiftEndTs);
+    if (updatedBreaks) {
+      updates.breaks = updatedBreaks;
+    }
+
+    batch.update(workLogRef, updates);
+
+    batch.set(db.collection("agentStatus").doc(data.userId), {
+      status: "offline",
+      manualBreak: false,
+      breakStartedAt: admin.firestore.FieldValue.delete(),
+      lastUpdate: shiftEndTs
+    }, { merge: true });
+
+    batch.set(db.collection("users").doc(data.userId), {
+      isLoggedIn: false,
+      activeSession: admin.firestore.FieldValue.delete(),
+      lastClockOut: shiftEndTs,
+      sessionClearedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    count++;
+  }
+
+  if (count > 0) {
+    await batch.commit();
+    console.log(`Auto clocked out ${count} session(s) at scheduled shift end.`);
+  }
+});
