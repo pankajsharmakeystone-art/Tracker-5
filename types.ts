@@ -146,7 +146,7 @@ declare global {
             onSettingsUpdated: (callback: (data: any) => void) => void;
             onDesktopRequestEndBreak?: (callback: (data?: any) => void) => (() => void) | void;
             syncAdminSettings?: (settings: AdminSettingsType | null) => Promise<any>;
-            onAutoClockOut: (callback: (data: any) => void) => void;
+            onAutoClockOut: (callback: (data: any) => void) => (() => void) | void;
             onAutoUpdateStatus?: (callback: (data: { event: string; version?: string; percent?: number; message?: string }) => void) => (() => void) | void;
             requestImmediateUpdateCheck?: () => Promise<any>;
             installPendingUpdate?: () => Promise<any>;

@@ -60,7 +60,12 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   },
 
   // auto-clocked-out notification
-  onAutoClockOut: (cb) => ipcRenderer.on("auto-clocked-out", (e, data) => cb(data)),
+  onAutoClockOut: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("auto-clocked-out", handler);
+    return () => ipcRenderer.removeListener("auto-clocked-out", handler);
+  },
 
   // basic ping
   ping: () => ipcRenderer.invoke("ping"),

@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { logout } from '../services/auth';
 import { useAuth } from '../hooks/useAuth';
@@ -15,6 +15,11 @@ const DashboardPage: React.FC = () => {
     const [showError, setShowError] = useState(false);
     const [autoClockOutMessage, setAutoClockOutMessage] = useState<string | null>(null);
     const currentUid = userData?.uid || user?.uid || null;
+    const currentUidRef = useRef<string | null>(currentUid);
+
+    useEffect(() => {
+        currentUidRef.current = currentUid;
+    }, [currentUid]);
     
     useEffect(() => {
         let timer: number;
@@ -34,12 +39,24 @@ const DashboardPage: React.FC = () => {
     }, [loading, userData]);
 
     useEffect(() => {
-        // Listen for auto clock out events from desktop
-        if (window.desktopAPI && window.desktopAPI.onAutoClockOut) {
-            window.desktopAPI.onAutoClockOut(() => {
-                setAutoClockOutMessage("You were automatically clocked out at shift end.");
-            });
-        }
+        if (!window.desktopAPI || !window.desktopAPI.onAutoClockOut) return;
+
+        const handleAutoClockOut = async () => {
+            setAutoClockOutMessage("You were automatically clocked out at shift end.");
+            const targetUid = currentUidRef.current;
+            if (!targetUid) return;
+            try {
+                await performClockOut(targetUid);
+            } catch (error) {
+                console.error("[DashboardPage] Failed to sync auto clock-out", error);
+                setAutoClockOutMessage("Auto clock-out triggered, but we could not update your timesheet. Please review manually.");
+            }
+        };
+
+        const cleanup = window.desktopAPI.onAutoClockOut(handleAutoClockOut);
+        return () => {
+            if (typeof cleanup === 'function') cleanup();
+        };
     }, []);
 
     const performLogout = async () => {
