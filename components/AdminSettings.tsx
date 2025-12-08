@@ -432,7 +432,7 @@ const AdminSettings: React.FC = () => {
                             onChange={handleInputChange}
                             rows={8}
                             className="w-full rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-emerald-500 focus:ring-emerald-500 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
-                            placeholder="{\n  \"type\": \"service_account\",\n  ...\n}"
+                            placeholder={`{\n  "type": "service_account",\n  ...\n}`}
                         />
                         <p className="text-xs text-gray-500 dark:text-gray-400">
                             We recommend rotating this key periodically from the Google Cloud Console. Remove any accidental whitespace at the beginning or end before saving.
