@@ -49,6 +49,18 @@ const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ checked, onChange, id }) =>
     </label>
 );
 
+interface SectionHeadingProps {
+    title: string;
+    description?: string;
+}
+
+const SectionHeading: React.FC<SectionHeadingProps> = ({ title, description }) => (
+    <div className="mt-10 mb-4 first:mt-0">
+        <h4 className="text-base font-semibold text-gray-900 dark:text-white">{title}</h4>
+        {description && <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{description}</p>}
+    </div>
+);
+
 const AdminSettings: React.FC = () => {
     const defaultSettings: AdminSettingsType = {
         allowRecording: false,
@@ -208,20 +220,29 @@ const AdminSettings: React.FC = () => {
             {error && <p className="text-sm text-red-500 mb-4 p-3 bg-red-100 dark:bg-red-900/50 rounded-md">{error}</p>}
             
             <form onSubmit={handleSave}>
+                <SectionHeading
+                    title="Screen Recording"
+                    description="Control who can record, how recordings behave, and whether the desktop app surfaces status cues."
+                />
+
                 <FormField label="Allow Screen Recording" description="Enable or disable the screen recording feature for all agents.">
-                     <ToggleSwitch
+                    <ToggleSwitch
                         id="allowRecording"
                         checked={settings.allowRecording ?? false}
                         onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, allowRecording: e.target.checked }))}
                     />
                 </FormField>
 
-                <FormField label="Show Team Status To Agents" description="When enabled, agents can view the Live Team Status widget for their own team inside the dashboard.">
-                    <ToggleSwitch
-                        id="showLiveTeamStatusToAgents"
-                        checked={settings.showLiveTeamStatusToAgents ?? true}
-                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, showLiveTeamStatusToAgents: e.target.checked }))}
-                    />
+                <FormField label="Recording Mode" description="Set whether recording starts automatically on clock-in or must be started manually.">
+                    <select
+                        name="recordingMode"
+                        value={settings.recordingMode}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                    >
+                        <option value="manual">Manual</option>
+                        <option value="auto">Automatic</option>
+                    </select>
                 </FormField>
 
                 <FormField label="Recording Quality" description="Select the target resolution for screen recordings.">
@@ -238,74 +259,17 @@ const AdminSettings: React.FC = () => {
                 </FormField>
 
                 <FormField label="Show Recording Notification" description="Show a desktop notification when screen recording starts or stops.">
-                     <ToggleSwitch
+                    <ToggleSwitch
                         id="showRecordingNotification"
                         checked={settings.showRecordingNotification ?? false}
                         onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, showRecordingNotification: e.target.checked }))}
                     />
                 </FormField>
-                
-                <FormField label="Recording Mode" description="Set whether recording starts automatically on clock-in or must be started manually.">
-                    <select
-                        name="recordingMode"
-                        value={settings.recordingMode}
-                        onChange={handleInputChange}
-                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
-                    >
-                        <option value="manual">Manual</option>
-                        <option value="auto">Automatic</option>
-                    </select>
-                </FormField>
-                
-                <FormField label="Idle Timeout (seconds)" description="Automatically clock out users after inactivity. Set to 0 to disable.">
-                    <input
-                        type="number"
-                        name="idleTimeout"
-                        value={settings.idleTimeout}
-                        onChange={handleInputChange}
-                        min="0"
-                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
-                        placeholder="e.g., 300"
-                    />
-                </FormField>
 
-                <FormField
-                    label="Organization Timezone"
-                    description="Schedules, desktop reminders, and auto clock-out logic run in this timezone."
-                >
-                    <select
-                        name="organizationTimezone"
-                        value={settings.organizationTimezone || 'Asia/Kolkata'}
-                        onChange={handleInputChange}
-                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
-                    >
-                        {timezoneOptions.map((tz: string) => (
-                            <option key={tz} value={tz}>{tz}</option>
-                        ))}
-                    </select>
-                </FormField>
-
-                 <FormField label="Auto Clock-Out" description="Enable automatic clock-out based on the agent's scheduled shift end time.">
-                    <div className="flex items-center gap-4">
-                        <ToggleSwitch
-                            id="autoClockOutEnabled"
-                            checked={settings.autoClockOutEnabled}
-                            onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, autoClockOutEnabled: e.target.checked }))}
-                        />
-                    </div>
-                </FormField>
-
-                <FormField label="Manual Break Timeout (minutes)" description="Show a forced popup when a manual break exceeds this duration.">
-                    <input
-                        type="number"
-                        name="manualBreakTimeoutMinutes"
-                        value={settings.manualBreakTimeoutMinutes}
-                        onChange={handleInputChange}
-                        min="1"
-                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
-                        placeholder="e.g., 30"
-                    />
-                </FormField>
+                <SectionHeading
+                    title="Uploads & Integrations"
+                    description="Decide where finished recordings are stored and walk admins through the one-time credential setup."
+                />
 
                 <FormField label="Auto-Upload Destinations" description="Automatically export screen recordings once they finish encoding. Choose Dropbox, Google Drive + Sheets, or keep both enabled for redundancy.">
                     <div className="space-y-4">
@@ -394,56 +358,98 @@ const AdminSettings: React.FC = () => {
                             <button
                                 type="button"
                                 onClick={() => setShowGoogleSheetsChecklist((prev) => !prev)}
-                                className="flex w-full items-center justify-between text-left font-semibold text-emerald-900 dark:text-emerald-100"
-                            >
-                                <span>Google Sheets setup checklist</span>
-                                <span>{showGoogleSheetsChecklist ? '− Hide' : '+ Show'}</span>
-                            </button>
-                            {showGoogleSheetsChecklist && (
-                                <div className="mt-3 space-y-2">
-                                    <ol className="list-decimal list-inside space-y-2">
-                                        <li>
-                                            Visit the <a className="text-emerald-700 underline dark:text-emerald-200" href="https://console.cloud.google.com/" target="_blank" rel="noreferrer">Google Cloud Console</a>, create/select a project, and enable both the <strong>Google Sheets API</strong> and <strong>Google Drive API</strong> from <em>APIs &amp; Services → Library</em>.
-                                        </li>
-                                        <li>
-                                            Navigate to <em>APIs &amp; Services → Credentials</em>, click <strong>Create Credentials → Service Account</strong>, and follow the wizard. When prompted for keys, choose <strong>Add Key → Create new key → JSON</strong> to download the service account JSON file.
-                                        </li>
-                                        <li>
-                                            Open that JSON file and note the <code>client_email</code>; this acts like the “bot” user. Keep the entire JSON safe—we will ask you to paste/upload it once Google uploads are ready.
-                                        </li>
-                                        <li>
-                                            Create or open the Google Sheet that should receive uploads, click <strong>Share</strong>, and grant edit access to the service account email from step 3. If you want files to land inside a specific Drive folder, share that folder with the same email as well.
-                                        </li>
-                                        <li>
-                                            Copy the <strong>Spreadsheet ID</strong> from the sheet URL (the long string between <code>/d/</code> and <code>/edit</code>). If you created a Drive folder, grab its ID from the folder URL too, plus the exact sheet/tab name if you want something other than the default.
-                                        </li>
-                                        <li>
-                                            Return here and provide the JSON + sheet ID in the upcoming Google Sheets fields. Once saved, the desktop uploader will push data automatically just like Dropbox.
-                                        </li>
-                                    </ol>
-                                    <p className="text-xs text-gray-600 dark:text-emerald-200">
-                                        Tip: service accounts do not count toward seat licenses. Rotate the JSON key periodically from the Cloud Console for best security.
-                                    </p>
+                        {settings.autoUpload && settings.uploadToGoogleSheets && (
+                            <>
+                                <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-gray-800 dark:border-emerald-900/40 dark:bg-emerald-900/20 dark:text-emerald-50">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowGoogleSheetsChecklist((prev) => !prev)}
+                                        className="flex w-full items-center justify-between text-left font-semibold text-emerald-900 dark:text-emerald-100"
+                                    >
+                                        <span>Google Sheets setup checklist</span>
+                                        <span>{showGoogleSheetsChecklist ? '− Hide' : '+ Show'}</span>
+                                    </button>
+                                    {showGoogleSheetsChecklist && (
+                                        <div className="mt-3 space-y-2">
+                                            <ol className="list-decimal list-inside space-y-2">
+                                                <li>
+                                                    Visit the <a className="text-emerald-700 underline dark:text-emerald-200" href="https://console.cloud.google.com/" target="_blank" rel="noreferrer">Google Cloud Console</a>, create/select a project, and enable both the <strong>Google Sheets API</strong> and <strong>Google Drive API</strong> from <em>APIs &amp; Services → Library</em>.
+                                                </li>
+                                                <li>
+                                                    Navigate to <em>APIs &amp; Services → Credentials</em>, click <strong>Create Credentials → Service Account</strong>, and follow the wizard. When prompted for keys, choose <strong>Add Key → Create new key → JSON</strong> to download the service account JSON file.
+                                                </li>
+                                                <li>
+                                                    Open that JSON file and note the <code>client_email</code>; this acts like the “bot” user. Keep the entire JSON safe—we will ask you to paste/upload it once Google uploads are ready.
+                                                </li>
+                                                <li>
+                                                    Create or open the Google Sheet that should receive uploads, click <strong>Share</strong>, and grant edit access to the service account email from step 3. If you want files to land inside a specific Drive folder, share that folder with the same email as well.
+                                                </li>
+                                                <li>
+                                                    Copy the <strong>Spreadsheet ID</strong> from the sheet URL (the long string between <code>/d/</code> and <code>/edit</code>). If you created a Drive folder, grab its ID from the folder URL too, plus the exact sheet/tab name if you want something other than the default.
+                                                </li>
+                                                <li>
+                                                    Return here and provide the JSON + sheet ID in the upcoming Google Sheets fields. Once saved, the desktop uploader will push data automatically just like Dropbox.
+                                                </li>
+                                            </ol>
+                                            <p className="text-xs text-gray-600 dark:text-emerald-200">
+                                                Tip: service accounts do not count toward seat licenses. Rotate the JSON key periodically from the Cloud Console for best security.
+                                            </p>
+                                        </div>
+                                    )}
                                 </div>
-                            )}
-                        </div>
 
-                        <FormField label="Google Service Account JSON" description="Paste the JSON key you downloaded while following the checklist above. The contents are encrypted at rest.">
-                            <div className="space-y-2">
-                                <textarea
-                                    name="googleServiceAccountJson"
-                                    value={settings.googleServiceAccountJson || ''}
-                                    onChange={handleInputChange}
-                                    rows={8}
-                                    className="w-full rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-emerald-500 focus:ring-emerald-500 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
-                                    placeholder={`{\n  "type": "service_account",\n  ...\n}`}
-                                />
-                                <p className="text-xs text-gray-500 dark:text-gray-400">
-                                    We recommend rotating this key periodically from the Google Cloud Console. Remove any accidental whitespace at the beginning or end before saving.
-                                </p>
-                            </div>
+                                <FormField label="Google Service Account JSON" description="Paste the JSON key you downloaded while following the checklist above. The contents are encrypted at rest.">
+                                    <div className="space-y-2">
+                                        <textarea
+                                            name="googleServiceAccountJson"
+                                            value={settings.googleServiceAccountJson || ''}
+                                            onChange={handleInputChange}
+                                            rows={8}
+                                            className="w-full rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-emerald-500 focus:ring-emerald-500 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                                            placeholder={`{\n  "type": "service_account",\n  ...\n}`}
+                                        />
+                                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                                            We recommend rotating this key periodically from the Google Cloud Console. Remove any accidental whitespace at the beginning or end before saving.
+                                        </p>
+                                    </div>
+                                </FormField>
+
+                                <FormField label="Google Spreadsheet ID" description="The ID found between /d/ and /edit in the sheet URL (example: docs.google.com/spreadsheets/d/THIS_PART/edit).">
+                                    <input
+                                        type="text"
+                                        name="googleSpreadsheetId"
+                                        value={settings.googleSpreadsheetId || ''}
+                                        onChange={handleInputChange}
+                                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                                        placeholder="Spreadsheet ID"
+                                    />
+                                </FormField>
+
+                                <FormField label="Google Sheet Tab Name" description="Optional: specify the tab/worksheet where new rows should be appended. Defaults to 'Uploads'.">
+                                    <input
+                                        type="text"
+                                        name="googleSpreadsheetTabName"
+                                        value={settings.googleSpreadsheetTabName || ''}
+                                        onChange={handleInputChange}
+                                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                                        placeholder="Uploads"
+                                    />
+                                </FormField>
+
+                                <FormField label="Google Drive Folder ID" description="Optional: upload files into a specific shared folder. Leave blank to use the service account's root Drive.">
+                                    <input
+                                        type="text"
+                                        name="googleDriveFolderId"
+                                        value={settings.googleDriveFolderId || ''}
+                                        onChange={handleInputChange}
+                                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                                        placeholder="Drive Folder ID (optional)"
+                                    />
+                                </FormField>
+                            </>
+                        )}
                         </FormField>
-
+                        {settings.autoUpload && (settings.uploadToDropbox ?? true) && (
                         <FormField label="Google Spreadsheet ID" description="The ID found between /d/ and /edit in the sheet URL (example: docs.google.com/spreadsheets/d/THIS_PART/edit).">
                             <input
                                 type="text"
@@ -549,6 +555,74 @@ const AdminSettings: React.FC = () => {
                         </FormField>
                     </>
                 )}
+
+                <SectionHeading
+                    title="Monitoring & Break Rules"
+                    description="Define idle detection, break reminders, and the visibility agents have inside the dashboard."
+                />
+
+                <FormField label="Idle Timeout (seconds)" description="Automatically clock out users after inactivity. Set to 0 to disable.">
+                    <input
+                        type="number"
+                        name="idleTimeout"
+                        value={settings.idleTimeout}
+                        onChange={handleInputChange}
+                        min="0"
+                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        placeholder="e.g., 300"
+                    />
+                </FormField>
+
+                <FormField label="Manual Break Timeout (minutes)" description="Show a forced popup when a manual break exceeds this duration.">
+                    <input
+                        type="number"
+                        name="manualBreakTimeoutMinutes"
+                        value={settings.manualBreakTimeoutMinutes}
+                        onChange={handleInputChange}
+                        min="1"
+                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-blue-600 focus:border-blue-600 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        placeholder="e.g., 30"
+                    />
+                </FormField>
+
+                <FormField label="Show Team Status To Agents" description="When enabled, agents can view the Live Team Status widget for their own team inside the dashboard.">
+                    <ToggleSwitch
+                        id="showLiveTeamStatusToAgents"
+                        checked={settings.showLiveTeamStatusToAgents ?? true}
+                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, showLiveTeamStatusToAgents: e.target.checked }))}
+                    />
+                </FormField>
+
+                <SectionHeading
+                    title="Scheduling & Time"
+                    description="Keep desktop automation aligned with your company timezone and shift plans."
+                />
+
+                <FormField
+                    label="Organization Timezone"
+                    description="Schedules, desktop reminders, and auto clock-out logic run in this timezone."
+                >
+                    <select
+                        name="organizationTimezone"
+                        value={settings.organizationTimezone || 'Asia/Kolkata'}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                    >
+                        {timezoneOptions.map((tz: string) => (
+                            <option key={tz} value={tz}>{tz}</option>
+                        ))}
+                    </select>
+                </FormField>
+
+                <FormField label="Auto Clock-Out" description="Enable automatic clock-out based on the agent's scheduled shift end time.">
+                    <div className="flex items-center gap-4">
+                        <ToggleSwitch
+                            id="autoClockOutEnabled"
+                            checked={settings.autoClockOutEnabled}
+                            onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, autoClockOutEnabled: e.target.checked }))}
+                        />
+                    </div>
+                </FormField>
                 
                  <div className="mt-8 flex items-center gap-4">
                     <button type="submit" disabled={saving} className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800 disabled:opacity-50">
