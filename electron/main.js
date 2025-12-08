@@ -12,6 +12,7 @@ const os = require("os");
 const fetch = require("node-fetch");
 const electronLog = require("electron-log");
 const { DateTime } = require("luxon");
+const { google } = require("googleapis");
 
 // auto-updater
 const { autoUpdater } = require("electron-updater");
@@ -177,6 +178,7 @@ function hydrateAdminSettingsFromDisk() {
 }
 
 hydrateAdminSettingsFromDisk();
+configureGoogleIntegrations();
 
 let lastForceLogoutRequestId = null;
 let forceLogoutRequestInFlight = false;
@@ -210,6 +212,15 @@ function resetAutoResumeRetry() {
 let cachedDropboxAccessToken = null;
 let cachedDropboxRefreshToken = null;
 let dropboxTokenExpiry = null;
+
+const GOOGLE_UPLOAD_SCOPES = [
+  "https://www.googleapis.com/auth/drive.file",
+  "https://www.googleapis.com/auth/spreadsheets"
+];
+let googleAuthClient = null;
+let googleSheetsClient = null;
+let googleDriveClient = null;
+let googleSetupError = null;
 
 const pendingAgentStatuses = [];
 
@@ -408,6 +419,86 @@ function getDropboxAppSecret() {
 
 function hasDropboxCredentials() {
   return Boolean(cachedDropboxRefreshToken || cachedDropboxAccessToken || cachedAdminSettings?.dropboxToken);
+}
+
+function resetGoogleIntegrations() {
+  googleAuthClient = null;
+  googleSheetsClient = null;
+  googleDriveClient = null;
+  googleSetupError = null;
+}
+
+function configureGoogleIntegrations() {
+  resetGoogleIntegrations();
+  const raw = cachedAdminSettings?.googleServiceAccountJson;
+  if (!raw) {
+    return;
+  }
+  let parsed;
+  try {
+    parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (error) {
+    googleSetupError = `parse-error: ${error?.message || error}`;
+    log("[google] Failed to parse service account JSON", error?.message || error);
+    return;
+  }
+  if (!parsed?.client_email || !parsed?.private_key) {
+    googleSetupError = "invalid-service-account-json";
+    log("[google] Missing client_email/private_key in service account JSON");
+    return;
+  }
+  try {
+    googleAuthClient = new google.auth.JWT(parsed.client_email, null, parsed.private_key, GOOGLE_UPLOAD_SCOPES);
+    googleSheetsClient = google.sheets({ version: "v4", auth: googleAuthClient });
+    googleDriveClient = google.drive({ version: "v3", auth: googleAuthClient });
+    googleSetupError = null;
+    log("[google] Service account initialized");
+  } catch (error) {
+    googleSetupError = error?.message || "google-auth-init-failed";
+    log("[google] Failed to initialize Google API clients", error?.message || error);
+    resetGoogleIntegrations();
+  }
+}
+
+async function ensureGoogleAuthorized() {
+  if (!googleAuthClient) {
+    throw new Error(googleSetupError || "google-not-configured");
+  }
+  if (typeof googleAuthClient.authorize === "function") {
+    await googleAuthClient.authorize();
+  }
+  return true;
+}
+
+function shouldUploadToDropbox() {
+  if (!cachedAdminSettings?.autoUpload) return false;
+  if (cachedAdminSettings?.uploadToDropbox === false) return false;
+  return hasDropboxCredentials();
+}
+
+function shouldUploadToGoogleSheets() {
+  if (!cachedAdminSettings?.autoUpload) return false;
+  if (!cachedAdminSettings?.uploadToGoogleSheets) return false;
+  if (!cachedAdminSettings?.googleSpreadsheetId) return false;
+  if (!cachedAdminSettings?.googleServiceAccountJson) return false;
+  if (!googleSheetsClient || !googleDriveClient || googleSetupError) return false;
+  return true;
+}
+
+function getGoogleSheetTabName() {
+  const raw = (cachedAdminSettings?.googleSpreadsheetTabName || "Uploads").trim();
+  return raw || "Uploads";
+}
+
+function guessRecordingMimeType(fileName = "") {
+  const ext = path.extname(fileName || "").toLowerCase();
+  switch (ext) {
+    case ".mp4": return "video/mp4";
+    case ".mov": return "video/quicktime";
+    case ".mkv": return "video/x-matroska";
+    case ".avi": return "video/x-msvideo";
+    default: return "video/webm";
+  }
 }
 
 // ---------- CREATE MAIN WINDOW ----------
@@ -910,6 +1001,8 @@ function applyAdminSettings(next) {
   if (cachedAdminSettings.requireLoginOnBoot && !currentUid) {
     log("requireLoginOnBoot enabled, but lock window is disabled in this build");
   }
+
+  configureGoogleIntegrations();
 
   if (mainWindow) mainWindow.webContents.send("settings-updated", cachedAdminSettings);
 
@@ -1631,25 +1724,52 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta =
     fs.writeFileSync(filePath, buffer);
     log("Saved recording to:", filePath);
 
-    if (cachedAdminSettings?.autoUpload && hasDropboxCredentials()) {
-      log("uploading to Dropbox:", filePath);
-      const safeName = cachedDisplayName ? String(cachedDisplayName).replace(/[\/:*?"<>|]/g, '-') : (currentUid || 'unknown');
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const dd = String(now.getDate()).padStart(2, '0');
-      const isoDate = `${yyyy}-${mm}-${dd}`;
+    const safeName = (cachedDisplayName ? String(cachedDisplayName) : (currentUid || 'unknown')).replace(/[\/:*?"<>|]/g, '-');
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const isoDate = `${yyyy}-${mm}-${dd}`;
+    const googleDriveFileName = `${safeName}-${isoDate}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
+    const uploadResults = [];
+
+    if (shouldUploadToDropbox()) {
       const dropboxPath = `/recordings/${safeName}/${isoDate}/${fileName}`;
-      const up = await uploadToDropboxWithPath(filePath, dropboxPath);
-      log("upload result:", up);
-      if (currentUid) {
-        await db.collection("agentStatus").doc(currentUid)
-          .set({ lastUpload: FieldValue.serverTimestamp(), lastUploadResult: up.success ? "ok" : "fail" }, { merge: true });
-      }
-      return { success: true, filePath, uploaded: up };
+      log("uploading to Dropbox:", dropboxPath);
+      const dropboxResult = await uploadToDropboxWithPath(filePath, dropboxPath);
+      uploadResults.push({ target: 'dropbox', path: dropboxPath, ...dropboxResult });
     }
 
-    return { success: true, filePath };
+    if (shouldUploadToGoogleSheets()) {
+      log("uploading to Google Drive/Sheets:", filePath);
+      const googleResult = await uploadRecordingToGoogleTargets({
+        filePath,
+        fileName,
+        safeName,
+        isoDate,
+        googleFileName: googleDriveFileName
+      });
+      uploadResults.push({ target: 'googleSheets', ...googleResult });
+    }
+
+    if (currentUid && uploadResults.length) {
+      const summary = uploadResults.map((entry) => ({
+        target: entry.target,
+        success: Boolean(entry.success),
+        error: entry.success ? null : (entry.error || entry.reason || null)
+      }));
+      const overallStatus = summary.every((s) => s.success)
+        ? 'ok'
+        : (summary.some((s) => s.success) ? 'partial' : 'fail');
+      await db.collection("agentStatus").doc(currentUid)
+        .set({
+          lastUpload: FieldValue.serverTimestamp(),
+          lastUploadResult: overallStatus,
+          lastUploadDetails: summary
+        }, { merge: true });
+    }
+
+    return { success: true, filePath, uploads: uploadResults };
   } catch(e){
     console.error("[notify-recording-saved] error", e);
     return { success: false, error: e.message };
@@ -1867,6 +1987,68 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
     return { success: true, meta: body };
   } catch (e) {
     return { success: false, error: e.message };
+  }
+}
+
+async function uploadRecordingToGoogleTargets(context = {}) {
+  try {
+    if (!shouldUploadToGoogleSheets()) {
+      return { success: false, skipped: true, reason: googleSetupError || "google-disabled" };
+    }
+
+    await ensureGoogleAuthorized();
+
+    const filePath = context.filePath;
+    const originalFileName = context.fileName;
+    const driveFileName = context.googleFileName || originalFileName;
+    if (!filePath || !fs.existsSync(filePath)) {
+      throw new Error("missing-file");
+    }
+
+    const parents = [];
+    if (cachedAdminSettings?.googleDriveFolderId) {
+      parents.push(cachedAdminSettings.googleDriveFolderId.trim());
+    }
+
+    const driveResult = await googleDriveClient.files.create({
+      requestBody: {
+        name: driveFileName,
+        parents: parents.length ? parents : undefined
+      },
+      media: {
+        mimeType: guessRecordingMimeType(driveFileName || filePath),
+        body: fs.createReadStream(filePath)
+      },
+      fields: "id,name,webViewLink,webContentLink"
+    });
+
+    const fileId = driveResult?.data?.id || null;
+    const fileUrl = driveResult?.data?.webViewLink
+      || driveResult?.data?.webContentLink
+      || (fileId ? `https://drive.google.com/file/d/${fileId}/view?usp=drivesdk` : null);
+
+    const tabName = getGoogleSheetTabName().replace(/'/g, "''");
+    const rowValues = [[
+      new Date().toISOString(),
+      context.safeName || currentUid || 'unknown',
+      originalFileName || driveFileName,
+      context.isoDate || '',
+      fileUrl || '',
+      fileId || '',
+      os.hostname()
+    ]];
+
+    await googleSheetsClient.spreadsheets.values.append({
+      spreadsheetId: cachedAdminSettings.googleSpreadsheetId,
+      range: `'${tabName}'!A1`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: rowValues }
+    });
+
+    return { success: true, fileId, fileUrl };
+  } catch (error) {
+    log("[google] Upload failed", error?.message || error);
+    return { success: false, error: error?.message || String(error) };
   }
 }
 

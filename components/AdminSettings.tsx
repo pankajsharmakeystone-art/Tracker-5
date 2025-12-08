@@ -53,10 +53,16 @@ const AdminSettings: React.FC = () => {
     const defaultSettings: AdminSettingsType = {
         allowRecording: false,
         autoUpload: false,
+        uploadToDropbox: true,
+        uploadToGoogleSheets: false,
         dropboxToken: '',
         dropboxRefreshToken: '',
         dropboxAppKey: '',
         dropboxAppSecret: '',
+        googleServiceAccountJson: '',
+        googleSpreadsheetId: '',
+        googleSpreadsheetTabName: 'Uploads',
+        googleDriveFolderId: '',
         idleTimeout: 300,
         recordingMode: 'manual',
         showRecordingNotification: false,
@@ -75,6 +81,7 @@ const AdminSettings: React.FC = () => {
     const [tokenGenerating, setTokenGenerating] = useState(false);
     const [tokenMessage, setTokenMessage] = useState<string | null>(null);
     const [showDropboxChecklist, setShowDropboxChecklist] = useState(false);
+    const [showGoogleSheetsChecklist, setShowGoogleSheetsChecklist] = useState(false);
     const dropboxSessionEndpoint = useMemo(() => resolveDropboxSessionEndpoint(), []);
     const dropboxCallbackHint = useMemo(() => {
         if (typeof window !== 'undefined' && window.location) {
@@ -110,7 +117,7 @@ const AdminSettings: React.FC = () => {
         return () => unsubscribe();
     }, []);
 
-    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value, type } = e.target;
         
         let finalValue: string | number = value;
@@ -300,12 +307,48 @@ const AdminSettings: React.FC = () => {
                     />
                 </FormField>
 
-                <FormField label="Auto-Upload Recordings" description="Automatically upload screen recordings to Dropbox. Requires a refresh token + app credentials.">
-                     <ToggleSwitch
-                        id="autoUpload"
-                        checked={settings.autoUpload ?? false}
-                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, autoUpload: e.target.checked }))}
-                    />
+                <FormField label="Auto-Upload Destinations" description="Automatically export screen recordings once they finish encoding. Choose Dropbox, Google Drive + Sheets, or keep both enabled for redundancy.">
+                    <div className="space-y-4">
+                        <ToggleSwitch
+                            id="autoUpload"
+                            checked={settings.autoUpload ?? false}
+                            onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, autoUpload: e.target.checked }))}
+                        />
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                            When disabled, recordings stay local on each desktop. Any destination toggles below are ignored.
+                        </p>
+                    </div>
+                    {settings.autoUpload && (
+                        <div className="mt-4 space-y-4">
+                            <div className="grid gap-4 sm:grid-cols-2">
+                                <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3 dark:border-gray-700 dark:bg-gray-800">
+                                    <div className="mr-3">
+                                        <p className="text-sm font-medium text-gray-900 dark:text-gray-50">Dropbox</p>
+                                        <p className="text-xs text-gray-500 dark:text-gray-400">Store raw recordings inside your Dropbox app folder.</p>
+                                    </div>
+                                    <ToggleSwitch
+                                        id="uploadToDropbox"
+                                        checked={settings.uploadToDropbox ?? true}
+                                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, uploadToDropbox: e.target.checked }))}
+                                    />
+                                </div>
+                                <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3 dark:border-gray-700 dark:bg-gray-800">
+                                    <div className="mr-3">
+                                        <p className="text-sm font-medium text-gray-900 dark:text-gray-50">Google Drive + Sheets</p>
+                                        <p className="text-xs text-gray-500 dark:text-gray-400">Upload files to Drive and log each entry inside a Google Sheet.</p>
+                                    </div>
+                                    <ToggleSwitch
+                                        id="uploadToGoogleSheets"
+                                        checked={settings.uploadToGoogleSheets ?? false}
+                                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, uploadToGoogleSheets: e.target.checked }))}
+                                    />
+                                </div>
+                            </div>
+                            <p className="text-xs text-gray-500 dark:text-gray-400">
+                                Enable one or both destinations. Google uploads require the service-account JSON, spreadsheet ID, and (optionally) a Drive folder ID shared with that service account.
+                            </p>
+                        </div>
+                    )}
                 </FormField>
 
                 <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-gray-800 dark:border-blue-900/40 dark:bg-blue-900/20 dark:text-blue-50">
@@ -342,6 +385,93 @@ const AdminSettings: React.FC = () => {
                         </div>
                     )}
                 </div>
+
+                <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-gray-800 dark:border-emerald-900/40 dark:bg-emerald-900/20 dark:text-emerald-50">
+                    <button
+                        type="button"
+                        onClick={() => setShowGoogleSheetsChecklist((prev) => !prev)}
+                        className="flex w-full items-center justify-between text-left font-semibold text-emerald-900 dark:text-emerald-100"
+                    >
+                        <span>Google Sheets setup checklist</span>
+                        <span>{showGoogleSheetsChecklist ? '− Hide' : '+ Show'}</span>
+                    </button>
+                    {showGoogleSheetsChecklist && (
+                        <div className="mt-3 space-y-2">
+                            <ol className="list-decimal list-inside space-y-2">
+                                <li>
+                                    Visit the <a className="text-emerald-700 underline dark:text-emerald-200" href="https://console.cloud.google.com/" target="_blank" rel="noreferrer">Google Cloud Console</a>, create/select a project, and enable both the <strong>Google Sheets API</strong> and <strong>Google Drive API</strong> from <em>APIs &amp; Services → Library</em>.
+                                </li>
+                                <li>
+                                    Navigate to <em>APIs &amp; Services → Credentials</em>, click <strong>Create Credentials → Service Account</strong>, and follow the wizard. When prompted for keys, choose <strong>Add Key → Create new key → JSON</strong> to download the service account JSON file.
+                                </li>
+                                <li>
+                                    Open that JSON file and note the <code>client_email</code>; this acts like the “bot” user. Keep the entire JSON safe—we will ask you to paste/upload it once Google uploads are ready.
+                                </li>
+                                <li>
+                                    Create or open the Google Sheet that should receive uploads, click <strong>Share</strong>, and grant edit access to the service account email from step 3. If you want files to land inside a specific Drive folder, share that folder with the same email as well.
+                                </li>
+                                <li>
+                                    Copy the <strong>Spreadsheet ID</strong> from the sheet URL (the long string between <code>/d/</code> and <code>/edit</code>). If you created a Drive folder, grab its ID from the folder URL too, plus the exact sheet/tab name if you want something other than the default.
+                                </li>
+                                <li>
+                                    Return here and provide the JSON + sheet ID in the upcoming Google Sheets fields. Once saved, the desktop uploader will push data automatically just like Dropbox.
+                                </li>
+                            </ol>
+                            <p className="text-xs text-gray-600 dark:text-emerald-200">
+                                Tip: service accounts do not count toward seat licenses. Rotate the JSON key periodically from the Cloud Console for best security.
+                            </p>
+                        </div>
+                    )}
+                </div>
+
+                <FormField label="Google Service Account JSON" description="Paste the JSON key you downloaded while following the checklist above. The contents are encrypted at rest.">
+                    <div className="space-y-2">
+                        <textarea
+                            name="googleServiceAccountJson"
+                            value={settings.googleServiceAccountJson || ''}
+                            onChange={handleInputChange}
+                            rows={8}
+                            className="w-full rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-emerald-500 focus:ring-emerald-500 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                            placeholder="{\n  \"type\": \"service_account\",\n  ...\n}"
+                        />
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                            We recommend rotating this key periodically from the Google Cloud Console. Remove any accidental whitespace at the beginning or end before saving.
+                        </p>
+                    </div>
+                </FormField>
+
+                <FormField label="Google Spreadsheet ID" description="The ID found between /d/ and /edit in the sheet URL (example: docs.google.com/spreadsheets/d/THIS_PART/edit).">
+                    <input
+                        type="text"
+                        name="googleSpreadsheetId"
+                        value={settings.googleSpreadsheetId || ''}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        placeholder="Spreadsheet ID"
+                    />
+                </FormField>
+
+                <FormField label="Google Sheet Tab Name" description="Optional: specify the tab/worksheet where new rows should be appended. Defaults to 'Uploads'.">
+                    <input
+                        type="text"
+                        name="googleSpreadsheetTabName"
+                        value={settings.googleSpreadsheetTabName || ''}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        placeholder="Uploads"
+                    />
+                </FormField>
+
+                <FormField label="Google Drive Folder ID" description="Optional: upload files into a specific shared folder. Leave blank to use the service account's root Drive.">
+                    <input
+                        type="text"
+                        name="googleDriveFolderId"
+                        value={settings.googleDriveFolderId || ''}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        placeholder="Drive Folder ID (optional)"
+                    />
+                </FormField>
 
                 <FormField label="Dropbox Refresh Token" description="Click Generate to run the Dropbox OAuth popup or paste an existing refresh token manually.">
                     <div className="flex flex-col gap-3">

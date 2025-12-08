@@ -107,6 +107,12 @@ export interface AdminSettingsType {
     dropboxTokenExpiry?: string | number;
     dropboxAppKey?: string;
     dropboxAppSecret?: string;
+    uploadToDropbox?: boolean;
+    uploadToGoogleSheets?: boolean;
+    googleServiceAccountJson?: string;
+    googleSpreadsheetId?: string;
+    googleSpreadsheetTabName?: string;
+    googleDriveFolderId?: string;
     recordingMode?: "auto" | "manual" | "off";
     requireLoginOnBoot?: boolean;
     autoUpload?: boolean;
