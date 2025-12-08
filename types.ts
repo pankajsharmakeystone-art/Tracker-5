@@ -101,6 +101,7 @@ export interface MonthlySchedule {
 export interface AdminSettingsType {
     autoClockOutEnabled: boolean;
     idleTimeout: number;
+    autoClockGraceMinutes?: number;
     dropboxToken?: string;
     dropboxRefreshToken?: string;
     dropboxAccessToken?: string;

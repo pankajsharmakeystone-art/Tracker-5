@@ -10,6 +10,7 @@ import { DateTime } from "luxon";
 admin.initializeApp();
 const db = admin.firestore();
 const DEFAULT_TIMEZONE = "Asia/Kolkata";
+const DEFAULT_AUTO_CLOCK_GRACE_MINUTES = 10;
 let cachedTimezone = DEFAULT_TIMEZONE;
 let lastTimezoneFetch = 0;
 
@@ -445,6 +446,13 @@ export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
 export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async () => {
   const now = new Date();
   const organizationTimezone = await getOrganizationTimezone();
+  const adminSettingsSnap = await db.collection("adminSettings").doc("global").get();
+  const adminSettings = adminSettingsSnap.exists ? (adminSettingsSnap.data() as { autoClockGraceMinutes?: number }) : {};
+  const autoClockGraceMinutesRaw = typeof adminSettings.autoClockGraceMinutes === "number"
+    ? adminSettings.autoClockGraceMinutes
+    : DEFAULT_AUTO_CLOCK_GRACE_MINUTES;
+  const autoClockGraceMinutes = autoClockGraceMinutesRaw < 0 ? 0 : autoClockGraceMinutesRaw;
+  const autoClockGraceMs = autoClockGraceMinutes * 60 * 1000;
   const snapshot = await db.collection("worklogs")
     .where("status", "in", ["working", "on_break", "break"])
     .get();
@@ -484,6 +492,21 @@ export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async () => 
     const shiftEndTs = admin.firestore.Timestamp.fromDate(shiftEndDate);
     const shiftEndMillis = shiftEndDate.getTime();
     const lastEventMillis = getTimestampMillis(data.lastEventTimestamp as TimestampLike);
+    const msSinceLastEvent = lastEventMillis != null ? (now.getTime() - lastEventMillis) : null;
+    const activitiesArray: GenericEntry[] = Array.isArray(data.activities) ? (data.activities as GenericEntry[]) : [];
+    const lastActivity = activitiesArray.length ? activitiesArray[activitiesArray.length - 1] : null;
+    const hasOpenActivity = Boolean(lastActivity && !lastActivity.endTime);
+
+    if (hasOpenActivity && msSinceLastEvent != null && msSinceLastEvent < autoClockGraceMs) {
+      console.log("[autoClockOut] Skipping due to recent activity", {
+        logId: docSnap.id,
+        userId: data.userId,
+        shiftEnd: shiftEndDate.toISOString(),
+        msSinceLastEvent,
+        graceMs: autoClockGraceMs
+      });
+      continue;
+    }
 
     const normalizedStatus = (data.status || "working").toString().toLowerCase();
     let workDelta = 0;
@@ -521,6 +544,14 @@ export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async () => 
     if (updatedBreaks) {
       updates.breaks = updatedBreaks;
     }
+
+    console.log("[autoClockOut] Closing session", {
+      logId: docSnap.id,
+      userId: data.userId,
+      shiftEnd: shiftEndDate.toISOString(),
+      autoClockGraceMinutes,
+      msSinceLastEvent
+    });
 
     batch.update(workLogRef, updates);
 

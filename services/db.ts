@@ -453,6 +453,9 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
         // Or if we came here after closing a zombie but today's log already existed (rare)
         const existing = docSnap.data();
         if (!existing.clockInTime) logData.clockInTime = serverTimestamp();
+        logData.clockOutTime = deleteField();
+        logData.status = 'working';
+        logData.lastEventTimestamp = serverTimestamp();
         const resumeActivityTs = Timestamp.now();
         let activities = closeLatestActivityEntry(existing.activities || [], resumeActivityTs);
         activities = appendActivityEntry(activities, {
