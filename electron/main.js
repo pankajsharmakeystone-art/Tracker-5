@@ -703,8 +703,11 @@ function startBackgroundRecording() {
     if (!recorderWindow || recorderWindow.isDestroyed()) return;
     const quality = String(cachedAdminSettings?.recordingQuality || "720p");
     recorderWindow.webContents.send('recorder-start', { recordingQuality: quality });
+    log('[recorder] start command sent', { quality });
   } catch (error) {
     log('[recorder] failed to start background recording', error?.message || error);
+    // If start failed, allow future attempts by clearing the active flag.
+    isRecordingActive = false;
   }
 }
 
@@ -1678,6 +1681,13 @@ async function applyAgentStatus(status) {
     throw new Error('no-uid');
   }
 
+  log('[applyAgentStatus] received', status, {
+    allowRecording: cachedAdminSettings?.allowRecording,
+    recordingMode: cachedAdminSettings?.recordingMode,
+    isRecordingActive,
+    agentClockedIn
+  });
+
   // Accept 'manual_break' from web/renderer when user starts a manual break
   if (status === 'manual_break') {
     agentClockedIn = true;
@@ -1736,6 +1746,7 @@ async function applyAgentStatus(status) {
     const safeSettings = cachedAdminSettings || {};
     const allowRecording = safeSettings.allowRecording !== false;
     const recordingMode = safeSettings.recordingMode || 'auto';
+    log('[applyAgentStatus] working/online branch', { allowRecording, recordingMode, isRecordingActive });
 
     if (recordingMode === 'auto' && allowRecording) {
       if (!isRecordingActive) {
