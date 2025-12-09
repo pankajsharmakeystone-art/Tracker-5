@@ -82,6 +82,9 @@ function hydrateEnv(filePath) {
 
 potentialEnvFiles.forEach(hydrateEnv);
 
+// Purge stale recordings early during startup to avoid uploading old files from prior sessions
+purgeOldRecordings();
+
 const devToolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
 
 const envOr = (...keys) => {
@@ -131,12 +134,76 @@ const DEFAULT_ORGANIZATION_TIMEZONE = "Asia/Kolkata";
 const RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings");
 if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 
+// Cleanup helper: delete stale recordings to prevent future re-uploads
+function purgeOldRecordings(maxAgeHours = 24) {
+  try {
+    const entries = fs.readdirSync(RECORDINGS_DIR);
+    const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
+    entries.forEach((name) => {
+      const full = path.join(RECORDINGS_DIR, name);
+      try {
+        const stat = fs.statSync(full);
+        if (stat.isFile() && stat.mtimeMs < cutoff) {
+          fs.unlinkSync(full);
+          log("[recordings] purged stale file", name);
+        }
+      } catch (err) {
+        log("[recordings] purge check failed", err?.message || err);
+      }
+    });
+  } catch (err) {
+    log("[recordings] purge failed", err?.message || err);
+  }
+}
+
+const UPLOAD_MANIFEST_PATH = path.join(app.getPath("userData"), "uploaded-recordings.json");
+let uploadedRecordingNames = new Set();
+
+function loadUploadedManifest() {
+  try {
+    if (fs.existsSync(UPLOAD_MANIFEST_PATH)) {
+      const raw = fs.readFileSync(UPLOAD_MANIFEST_PATH, "utf8");
+      const parsed = JSON.parse(raw || "[]");
+      if (Array.isArray(parsed)) {
+        uploadedRecordingNames = new Set(parsed.filter((x) => typeof x === "string"));
+      }
+    }
+  } catch (err) {
+    log("[uploads] failed to load manifest", err?.message || err);
+    uploadedRecordingNames = new Set();
+  }
+}
+
+function persistUploadedManifest() {
+  try {
+    const arr = Array.from(uploadedRecordingNames);
+    fs.writeFileSync(UPLOAD_MANIFEST_PATH, JSON.stringify(arr), "utf8");
+  } catch (err) {
+    log("[uploads] failed to persist manifest", err?.message || err);
+  }
+}
+
+function markRecordingUploaded(fileName) {
+  if (!fileName) return;
+  uploadedRecordingNames.add(fileName);
+  persistUploadedManifest();
+}
+
+function isRecordingAlreadyUploaded(fileName) {
+  if (!fileName) return false;
+  return uploadedRecordingNames.has(fileName);
+}
+
+loadUploadedManifest();
+
 // Path to the uploaded icon you asked to use for the popup
 const POPUP_ICON_PATH = "/mnt/data/a35a616b-074d-4238-a09e-5dcb70efb649.png"; 
 const ADMIN_SETTINGS_CACHE_PATH = path.join(app.getPath("userData"), "admin-settings.json");
 
 // ---------- GLOBALS ----------
 let mainWindow = null;
+let recorderWindow = null;
+let recorderFlushWait = null;
 let tray = null;
 let isQuiting = false;
 let cachedAdminSettings = {};
@@ -239,8 +306,8 @@ async function reconcileRecordingAfterRegister(uid) {
 
     if (!wasRecording) {
       try {
-        if (mainWindow) mainWindow.webContents.send('command-start-recording', { uid, reason: 'relogin-resume' });
         isRecordingActive = true;
+        startBackgroundRecording();
       } catch (e) {
         console.warn('[reconcileRecordingAfterRegister] start send failed', e?.message || e);
       }
@@ -290,13 +357,7 @@ async function resumeRecordingIfNeeded(uid) {
     .set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
     .catch(() => {});
   showRecordingPopup("Recording resumed");
-  if (mainWindow && mainWindow.webContents) {
-    try {
-      mainWindow.webContents.send("command-start-recording", { uid });
-    } catch (e) {
-      log("Failed to signal renderer about recording resume", e?.message || e);
-    }
-  }
+  startBackgroundRecording();
 }
 
 function scheduleAutoResumeRecording(options = {}) {
@@ -359,13 +420,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     .catch(() => {});
 
   if (wasRecording) showRecordingPopup("Recording stopped");
-  if (mainWindow) {
-    try {
-      mainWindow.webContents.send("command-stop-recording", { uid });
-    } catch (e) {
-      log("Failed to notify renderer about recording stop during force logout", e?.message || e);
-    }
-  }
+  stopBackgroundRecording();
 
   await db.collection('agentStatus').doc(uid).set({
     status: 'offline',
@@ -570,8 +625,8 @@ function createMainWindow() {
     height: 700,
     minWidth: 550,
     minHeight: 700,
-    resizable: false,
-    maximizable: false,
+    resizable: true,
+    maximizable: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -615,6 +670,86 @@ function createMainWindow() {
   });
 
   registerDevtoolsShortcuts(mainWindow);
+}
+
+function createRecorderWindow() {
+  try {
+    recorderWindow = new BrowserWindow({
+      width: 400,
+      height: 300,
+      show: false,
+      frame: false,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      webPreferences: {
+        preload: path.join(__dirname, "recorderPreload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    });
+    recorderWindow.loadURL('data:text/html,<html></html>');
+    recorderWindow.on('closed', () => { recorderWindow = null; });
+  } catch (error) {
+    log("[recorderWindow] failed to create", error?.message || error);
+  }
+}
+
+function startBackgroundRecording() {
+  try {
+    if (!recorderWindow) createRecorderWindow();
+    if (!recorderWindow || recorderWindow.isDestroyed()) return;
+    const quality = String(cachedAdminSettings?.recordingQuality || "720p");
+    recorderWindow.webContents.send('recorder-start', { recordingQuality: quality });
+  } catch (error) {
+    log('[recorder] failed to start background recording', error?.message || error);
+  }
+}
+
+function stopBackgroundRecording() {
+  try {
+    if (!recorderWindow || recorderWindow.isDestroyed()) return;
+    recorderWindow.webContents.send('recorder-stop');
+  } catch (error) {
+    log('[recorder] failed to stop background recording', error?.message || error);
+  }
+}
+
+function stopBackgroundRecordingAndFlush(timeoutMs = 7000) {
+  if (!recorderWindow || recorderWindow.isDestroyed()) return Promise.resolve();
+  if (recorderFlushWait) return recorderFlushWait;
+  recorderFlushWait = new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      recorderFlushWait = null;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      log('[recorder] flush timeout');
+      done();
+    }, timeoutMs);
+
+    const handler = () => {
+      clearTimeout(timer);
+      ipcMain.removeListener('recorder-flushed', handler);
+      done();
+    };
+
+    ipcMain.on('recorder-flushed', handler);
+    try {
+      recorderWindow.webContents.send('recorder-stop-and-flush');
+    } catch (err) {
+      log('[recorder] failed to request flush', err?.message || err);
+      clearTimeout(timer);
+      ipcMain.removeListener('recorder-flushed', handler);
+      done();
+    }
+  });
+  return recorderFlushWait;
 }
 
 // ---------- LOCK WINDOW ----------
@@ -1073,21 +1208,20 @@ function startCommandsWatch(uid) {
 
     if (cmd.startRecording) {
       log("command startRecording received");
-      if (mainWindow) mainWindow.webContents.send("command-start-recording", { uid });
-      // mark recording active and notify
       isRecordingActive = true;
       if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
       showRecordingPopup("Recording started by admin");
+      startBackgroundRecording();
       await db.collection("desktopCommands").doc(uid).update({ startRecording: false }).catch(()=>{});
     }
 
     if (cmd.stopRecording) {
       log("command stopRecording received");
-      if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid });
       isRecordingActive = false;
       resetAutoResumeRetry();
       if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
       showRecordingPopup("Recording stopped by admin");
+      stopBackgroundRecording();
       await db.collection("desktopCommands").doc(uid).update({ stopRecording: false }).catch(()=>{});
     }
 
@@ -1402,7 +1536,7 @@ async function performAutoClockOut() {
     log("[autoClockOut] performing auto clock out for uid:", currentUid);
 
     // Stop recording if active
-    // Force stop even if isRecordingActive is false (to clean up renderer state)
+    // Force stop even if isRecordingActive is false (to clean up)
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
     resetAutoResumeRetry();
@@ -1411,6 +1545,7 @@ async function performAutoClockOut() {
     
     // Always send stop command to renderer
     if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid: currentUid });
+    stopBackgroundRecording();
 
     // mark offline in agentStatus
     await db.collection('agentStatus').doc(currentUid).set({
@@ -1560,7 +1695,7 @@ async function applyAgentStatus(status) {
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
-    if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
+    stopBackgroundRecording();
 
     closeManualBreakReminderWindow();
     return { success: true };
@@ -1578,7 +1713,7 @@ async function applyAgentStatus(status) {
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording stopped');
-    if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
+    stopBackgroundRecording();
 
     await db.collection('agentStatus').doc(currentUid).set({
       status: 'offline',
@@ -1607,7 +1742,7 @@ async function applyAgentStatus(status) {
         isRecordingActive = true;
         await db.collection('agentStatus').doc(currentUid).set({ isRecording: true }, { merge: true }).catch(()=>{});
         showRecordingPopup('Recording started');
-        if (mainWindow) mainWindow.webContents.send('command-start-recording', { uid: currentUid });
+        startBackgroundRecording();
       } else {
         log('Online signal received, but recording is already active (ignoring)');
       }
@@ -1635,7 +1770,7 @@ async function applyAgentStatus(status) {
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
-    if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid: currentUid });
+    stopBackgroundRecording();
 
     await db.collection('agentStatus').doc(currentUid).set({
       status: 'break',
@@ -1686,27 +1821,14 @@ ipcMain.handle("start-recording", async () => {
     if (cachedAdminSettings.allowRecording === false) {
       return { success: false, error: "disabled" };
     }
-    const sources = await desktopCapturer.getSources({ types: ["screen", "window"] });
-    // mark recording active - the renderer should call notify-recording-saved when done
+    // This path is retained for compatibility but now simply starts the background recorder
     isRecordingActive = true;
     if (currentUid) {
       await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
     }
-    // show popup if admin enabled notifications
     showRecordingPopup("Recording started");
-    log("start-recording: provided sources count:", sources.length);
-
-    // RECORDING QUALITY: determine target width/height based on admin setting
-    const quality = String(cachedAdminSettings?.recordingQuality || "720p");
-    const mapping = {
-      "480p": { width: 640, height: 480, label: "480p" },
-      "720p": { width: 1280, height: 720, label: "720p" },
-      "1080p": { width: 1920, height: 1080, label: "1080p" }
-    };
-    const resolution = mapping[quality] || mapping["720p"];
-
-    // Return sources and resolution so renderer can apply proper getUserMedia constraints
-    return { success: true, sources: sources.map(s => ({ id: s.id, name: s.name })), resolution };
+    startBackgroundRecording();
+    return { success: true };
   } catch (e) {
     console.error("[start-recording] error", e);
     return { success: false, error: e.message };
@@ -1736,7 +1858,7 @@ ipcMain.handle("live-stream-get-sources", async () => {
 
 ipcMain.handle("stop-recording", async (_, meta = {}) => {
   try {
-    // called by renderer when it ends recording explicitly
+    // called by renderer; now forward to background recorder
     isRecordingActive = false;
     autoResumeInFlight = false;
     if (currentUid) {
@@ -1745,6 +1867,7 @@ ipcMain.handle("stop-recording", async (_, meta = {}) => {
     const popupMessage = meta?.autoRetry ? "Recording interrupted. Retrying..." : "Recording stopped";
     showRecordingPopup(popupMessage);
     resetAutoResumeRetry();
+    stopBackgroundRecording();
     if (meta?.autoRetry) {
       scheduleAutoResumeRetry(meta?.reason || "renderer-failed");
     }
@@ -1756,9 +1879,24 @@ ipcMain.handle("stop-recording", async (_, meta = {}) => {
   }
 });
 
-ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta = {}) => {
+ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
+  log("[recorder] background recorder failed", payload?.error || payload);
+  isRecordingActive = false;
+  resetAutoResumeRetry();
+  if (currentUid) {
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+  }
+  return { success: true };
+});
+
+const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
   const shouldEvaluateAutoResume = Boolean(meta?.isLastSession);
   try {
+    if (isRecordingAlreadyUploaded(fileName)) {
+      log("[uploads] skipping duplicate recording", fileName);
+      return { success: true, skipped: true, reason: "already-uploaded" };
+    }
+
     const buffer = Buffer.from(arrayBuffer);
     const filePath = path.join(RECORDINGS_DIR, fileName);
     fs.writeFileSync(filePath, buffer);
@@ -1809,6 +1947,15 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta =
         }, { merge: true });
     }
 
+    if (uploadResults.some((entry) => entry.success)) {
+      markRecordingUploaded(fileName);
+      try {
+        fs.unlinkSync(filePath);
+      } catch (unlinkErr) {
+        log("[uploads] failed to delete uploaded file", unlinkErr?.message || unlinkErr);
+      }
+    }
+
     return { success: true, filePath, uploads: uploadResults };
   } catch(e){
     console.error("[notify-recording-saved] error", e);
@@ -1818,7 +1965,10 @@ ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta =
       scheduleAutoResumeRecording();
     }
   }
-});
+};
+
+ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta = {}) => handleRecordingSaved(fileName, arrayBuffer, meta));
+ipcMain.handle("recorder-save", async (_event, fileName, arrayBuffer, meta = {}) => handleRecordingSaved(fileName, arrayBuffer, meta));
 
 ipcMain.handle("get-idle-time", () => {
   let idleLimit = Number(cachedAdminSettings?.idleTimeout);
@@ -2109,6 +2259,7 @@ function scheduleAutoUpdateCheck() {
 
 // ---------- APP INIT ----------
 app.whenReady().then(() => {
+  createRecorderWindow();
   createMainWindow();
   createTray();
   buildAppMenu();
@@ -2122,8 +2273,13 @@ app.whenReady().then(() => {
   scheduleAutoUpdateCheck();
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", async () => {
   isQuiting = true;
+  try {
+    await stopBackgroundRecordingAndFlush();
+  } catch (err) {
+    log('[recorder] flush on quit failed', err?.message || err);
+  }
 });
 
 app.on("will-quit", () => {

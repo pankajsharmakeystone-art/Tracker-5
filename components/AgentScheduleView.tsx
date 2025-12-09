@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { getScheduleForMonth } from '../services/db';
+import { getScheduleForMonth, streamScheduleForMonth } from '../services/db';
 import type { Schedule } from '../types';
 import Spinner from './Spinner';
 
@@ -31,8 +31,19 @@ const AgentScheduleView: React.FC<Props> = ({ userId, teamId }) => {
     }, [userId, teamId, year, month]);
 
     useEffect(() => {
+        // Start with a one-time fetch for fast paint, then subscribe for live updates
         fetchData();
-    }, [fetchData]);
+
+        const unsubscribe = streamScheduleForMonth(teamId, year, month + 1, (monthlySchedule) => {
+            const userShifts = monthlySchedule[userId] || {};
+            setSchedule({ userId, shifts: userShifts });
+            setLoading(false);
+        });
+
+        return () => {
+            if (typeof unsubscribe === 'function') unsubscribe();
+        };
+    }, [fetchData, teamId, userId, year, month]);
 
     const calendarGrid = useMemo(() => {
         const firstDayOfMonth = new Date(year, month, 1).getDay();

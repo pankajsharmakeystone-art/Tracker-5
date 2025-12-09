@@ -26,7 +26,12 @@ const LoginPage: React.FC = () => {
             navigate('/dashboard');
         } catch (err) {
             const authError = err as AuthError;
-            setError(authError.message);
+            const code = authError?.code || '';
+            if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
+                setError('Wrong email or password.');
+            } else {
+                setError(authError.message || 'Sign-in failed.');
+            }
         } finally {
             setLoading(false);
         }
@@ -40,7 +45,7 @@ const LoginPage: React.FC = () => {
             navigate('/dashboard');
         } catch (err) {
             const authError = err as AuthError;
-            setError(authError.message);
+            setError(authError.message || 'Sign-in failed.');
         } finally {
             setLoading(false);
         }
