@@ -225,6 +225,44 @@ configureGoogleIntegrations();
 
 const pendingAgentStatuses = [];
 
+async function reconcileRecordingAfterRegister(uid) {
+  try {
+    const snap = await db.collection('agentStatus').doc(uid).get();
+    if (!snap.exists) return;
+    const data = snap.data() || {};
+    const status = String(data.status || '').toLowerCase();
+    const isActive = status === 'working' || status === 'online';
+    if (!isActive) return;
+
+    // Rotate any stale recorder, then start fresh
+    isRecordingActive = false;
+    resetAutoResumeRetry();
+    try {
+      if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid, reason: 'relogin-rotate' });
+    } catch (e) {
+      console.warn('[reconcileRecordingAfterRegister] stop send failed', e?.message || e);
+    }
+
+    try {
+      if (mainWindow) mainWindow.webContents.send('command-start-recording', { uid, reason: 'relogin-resume' });
+      isRecordingActive = true;
+    } catch (e) {
+      console.warn('[reconcileRecordingAfterRegister] start send failed', e?.message || e);
+    }
+
+    await db.collection('agentStatus').doc(uid).set({
+      status: 'working',
+      isRecording: true,
+      isDesktopConnected: true,
+      lastUpdate: FieldValue.serverTimestamp()
+    }, { merge: true }).catch(() => {});
+
+    agentClockedIn = true;
+  } catch (err) {
+    console.warn('[reconcileRecordingAfterRegister] failed', err?.message || err);
+  }
+}
+
 const buildDesktopStatusMetadata = () => ({
   lastUpdate: FieldValue.serverTimestamp(),
   appVersion: app.getVersion(),
@@ -1457,6 +1495,8 @@ ipcMain.handle("register-uid", async (_, payload) => {
     startAgentStatusWatch(uid);
     startAutoClockConfigWatch(uid);
     await flushPendingAgentStatuses();
+
+    await reconcileRecordingAfterRegister(uid);
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
     log("Registered uid:", uid);

@@ -57,6 +57,26 @@ const DesktopEvents: React.FC = () => {
     listenersAttached.current = true;
   }, []);
 
+  // Ensure recordings are stopped and flushed if the renderer is about to unload (app quit/restart).
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      try {
+        stopDesktopRecording();
+      } catch (err) {
+        console.warn('Failed to stop recorder during unload', err);
+      }
+
+      try {
+        window.desktopAPI?.stopRecording?.({ reason: 'renderer-unload' });
+      } catch (err) {
+        console.warn('Failed to notify desktop about unload', err);
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
   return null; // This component does not render anything visually
 };
 

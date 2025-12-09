@@ -13,6 +13,14 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
 
     let canceled = false;
     let unsubscribeSettings: (() => void) | null = null;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+    const safeClearHeartbeat = () => {
+      if (heartbeat) {
+        clearInterval(heartbeat);
+        heartbeat = null;
+      }
+    };
 
     const bootstrap = async () => {
       try {
@@ -30,6 +38,40 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
 
     bootstrap();
 
+    // Heartbeat: if ping fails, try re-registering to recover the desktop bridge
+    heartbeat = setInterval(async () => {
+      if (canceled) return;
+      try {
+        const pong = await window.desktopAPI?.ping?.();
+        if (pong !== 'pong') {
+          await bootstrap();
+        }
+      } catch (err) {
+        // Backoff after a failure to avoid noisy retries/calls
+        safeClearHeartbeat();
+        console.warn('[DesktopBridge] ping failed, retrying registration with backoff');
+        setTimeout(() => {
+          if (canceled) return;
+          bootstrap();
+          // restart heartbeat after retry
+          heartbeat = setInterval(async () => {
+            if (canceled) return;
+            try {
+              const pong = await window.desktopAPI?.ping?.();
+              if (pong !== 'pong') {
+                await bootstrap();
+              }
+            } catch {
+              safeClearHeartbeat();
+              setTimeout(() => {
+                if (!canceled) bootstrap();
+              }, 30000);
+            }
+          }, 15000);
+        }, 30000);
+      }
+    }, 15000);
+
     unsubscribeSettings = streamGlobalAdminSettings((settings: AdminSettingsType | null) => {
       const sync = window.desktopAPI?.syncAdminSettings;
       if (!sync) return;
@@ -40,6 +82,7 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
 
     return () => {
       canceled = true;
+      safeClearHeartbeat();
       unsubscribeSettings?.();
       window.desktopAPI?.unregisterUid?.();
     };
