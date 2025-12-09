@@ -234,20 +234,19 @@ async function reconcileRecordingAfterRegister(uid) {
     const isActive = status === 'working' || status === 'online';
     if (!isActive) return;
 
-    // Rotate any stale recorder, then start fresh
-    isRecordingActive = false;
+    const wasRecording = Boolean(data.isRecording);
     resetAutoResumeRetry();
-    try {
-      if (mainWindow) mainWindow.webContents.send('command-stop-recording', { uid, reason: 'relogin-rotate' });
-    } catch (e) {
-      console.warn('[reconcileRecordingAfterRegister] stop send failed', e?.message || e);
-    }
 
-    try {
-      if (mainWindow) mainWindow.webContents.send('command-start-recording', { uid, reason: 'relogin-resume' });
+    if (!wasRecording) {
+      try {
+        if (mainWindow) mainWindow.webContents.send('command-start-recording', { uid, reason: 'relogin-resume' });
+        isRecordingActive = true;
+      } catch (e) {
+        console.warn('[reconcileRecordingAfterRegister] start send failed', e?.message || e);
+      }
+    } else {
+      // Keep the existing recording running; just sync flags.
       isRecordingActive = true;
-    } catch (e) {
-      console.warn('[reconcileRecordingAfterRegister] start send failed', e?.message || e);
     }
 
     await db.collection('agentStatus').doc(uid).set({
