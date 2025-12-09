@@ -17,6 +17,28 @@ const formatDuration = (totalSeconds: number): string => {
         .join(':');
 };
 
+const normalizeDate = (value: any): Date | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (typeof value.toDate === 'function') return value.toDate();
+    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const formatTimeOfDay = (value: any): string => {
+    const date = normalizeDate(value);
+    if (!date) return '';
+    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+};
+
+const formatLateMinutes = (minutes?: number): string => {
+    if (!minutes || minutes <= 0) return '00:00';
+    const hrs = Math.floor(minutes / 60);
+    const mins = Math.floor(minutes % 60);
+    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+};
+
 const ReportsPanel: React.FC<Props> = ({ teamId }) => {
     const today = new Date().toISOString().split('T')[0];
     const [startDate, setStartDate] = useState(today);
@@ -80,12 +102,17 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             });
 
             // Generate CSV
-            let csvContent = "data:text/csv;charset=utf-8,Date,User Name,Total Work Time,Total Break Time\n";
+            let csvContent = "data:text/csv;charset=utf-8,Date,User Name,Clock In Time,Clock Out Time,Late Login (HH:MM),Total Work Time,Total Break Time\n";
             logs.forEach((log: WorkLog) => {
                 const logDate = (log.date as any).toDate().toISOString().split('T')[0];
                 const workTime = formatDuration(log.totalWorkSeconds);
                 const breakTime = formatDuration(log.totalBreakSeconds);
-                csvContent += `${logDate},"${log.userDisplayName}",${workTime},${breakTime}\n`;
+                const clockIn = formatTimeOfDay(log.clockInTime);
+                const clockOut = formatTimeOfDay(log.clockOutTime);
+                const lateLogin = formatLateMinutes(log.lateMinutes);
+                const safeClockIn = clockIn ? `"${clockIn}"` : '""';
+                const safeClockOut = clockOut ? `"${clockOut}"` : '""';
+                csvContent += `${logDate},"${log.userDisplayName}",${safeClockIn},${safeClockOut},${lateLogin},${workTime},${breakTime}\n`;
             });
 
             // Trigger download
