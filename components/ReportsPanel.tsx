@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getWorkLogsForDateRange, getUsersByTeam } from '../services/db';
+import { getWorkLogsForDateRange, getUsersByTeam, streamGlobalAdminSettings } from '../services/db';
 import type { WorkLog, UserData } from '../types';
 
 interface Props {
@@ -26,10 +26,27 @@ const normalizeDate = (value: any): Date | null => {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
-const formatTimeOfDay = (value: any): string => {
+const formatLocalDate = (value: any, timeZone?: string | null): string => {
     const date = normalizeDate(value);
     if (!date) return '';
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+        timeZone: timeZone || undefined,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    });
+    return fmt.format(date);
+};
+
+const formatTimeOfDay = (value: any, timeZone?: string | null): string => {
+    const date = normalizeDate(value);
+    if (!date) return '';
+    return date.toLocaleTimeString(undefined, {
+        timeZone: timeZone || undefined,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
 };
 
 const formatLateMinutes = (minutes?: number): string => {
@@ -72,6 +89,7 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
     const [error, setError] = useState<string | null>(null);
     const [users, setUsers] = useState<UserData[]>([]);
     const [selectedUserId, setSelectedUserId] = useState('all'); // 'all' or a user UID
+    const [organizationTimezone, setOrganizationTimezone] = useState<string | null>(null);
 
     useEffect(() => {
         const fetchUsers = async () => {
@@ -87,6 +105,13 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
         };
         fetchUsers();
     }, [teamId]);
+
+    useEffect(() => {
+        const unsubscribe = streamGlobalAdminSettings((settings) => {
+            setOrganizationTimezone(settings?.organizationTimezone || null);
+        });
+        return () => unsubscribe?.();
+    }, []);
 
 
     const handleDownload = async () => {
@@ -129,11 +154,11 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             // Generate CSV
             let csvContent = "data:text/csv;charset=utf-8,Date,User Name,Clock In Time,Clock Out Time,Late Login (HH:MM),Total Work Time,Manual Break Time,Idle Break Time,Total Break Time\n";
             logs.forEach((log: WorkLog) => {
-                const logDate = (log.date as any).toDate().toISOString().split('T')[0];
+                const logDate = formatLocalDate(log.date, organizationTimezone);
                 const workTime = formatDuration(log.totalWorkSeconds);
                 const breakTime = formatDuration(log.totalBreakSeconds);
-                const clockIn = formatTimeOfDay(log.clockInTime);
-                const clockOut = formatTimeOfDay(log.clockOutTime);
+                const clockIn = formatTimeOfDay(log.clockInTime, organizationTimezone);
+                const clockOut = formatTimeOfDay(log.clockOutTime, organizationTimezone);
                 const lateLogin = formatLateMinutes(log.lateMinutes);
                 const { manualSeconds, idleSeconds } = computeBreakBuckets(log);
                 const manualBreak = formatDuration(manualSeconds);
