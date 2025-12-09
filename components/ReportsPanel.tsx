@@ -39,6 +39,31 @@ const formatLateMinutes = (minutes?: number): string => {
     return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
 };
 
+const deriveBreakCause = (entry: any): 'manual' | 'idle' => {
+    const raw = (entry?.cause || entry?.reason || entry?.type || entry?.source || '').toString().toLowerCase();
+    if (raw.includes('idle')) return 'idle';
+    if (entry?.auto === true || entry?.isIdle === true) return 'idle';
+    return 'manual';
+};
+
+const computeBreakBuckets = (log: WorkLog) => {
+    const breaks = Array.isArray((log as any)?.breaks) ? (log as any).breaks : [];
+    let manualSeconds = 0;
+    let idleSeconds = 0;
+    const fallbackEnd = normalizeDate(log.clockOutTime) || normalizeDate(log.lastEventTimestamp) || new Date();
+
+    breaks.forEach((entry: any) => {
+        const start = normalizeDate(entry?.startTime);
+        const end = normalizeDate(entry?.endTime) || fallbackEnd;
+        if (!start || !end || end <= start) return;
+        const duration = (end.getTime() - start.getTime()) / 1000;
+        if (deriveBreakCause(entry) === 'idle') idleSeconds += duration;
+        else manualSeconds += duration;
+    });
+
+    return { manualSeconds, idleSeconds };
+};
+
 const ReportsPanel: React.FC<Props> = ({ teamId }) => {
     const today = new Date().toISOString().split('T')[0];
     const [startDate, setStartDate] = useState(today);
@@ -102,7 +127,7 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             });
 
             // Generate CSV
-            let csvContent = "data:text/csv;charset=utf-8,Date,User Name,Clock In Time,Clock Out Time,Late Login (HH:MM),Total Work Time,Total Break Time\n";
+            let csvContent = "data:text/csv;charset=utf-8,Date,User Name,Clock In Time,Clock Out Time,Late Login (HH:MM),Total Work Time,Manual Break Time,Idle Break Time,Total Break Time\n";
             logs.forEach((log: WorkLog) => {
                 const logDate = (log.date as any).toDate().toISOString().split('T')[0];
                 const workTime = formatDuration(log.totalWorkSeconds);
@@ -110,9 +135,12 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
                 const clockIn = formatTimeOfDay(log.clockInTime);
                 const clockOut = formatTimeOfDay(log.clockOutTime);
                 const lateLogin = formatLateMinutes(log.lateMinutes);
+                const { manualSeconds, idleSeconds } = computeBreakBuckets(log);
+                const manualBreak = formatDuration(manualSeconds);
+                const idleBreak = formatDuration(idleSeconds);
                 const safeClockIn = clockIn ? `"${clockIn}"` : '""';
                 const safeClockOut = clockOut ? `"${clockOut}"` : '""';
-                csvContent += `${logDate},"${log.userDisplayName}",${safeClockIn},${safeClockOut},${lateLogin},${workTime},${breakTime}\n`;
+                csvContent += `${logDate},"${log.userDisplayName}",${safeClockIn},${safeClockOut},${lateLogin},${workTime},${manualBreak},${idleBreak},${breakTime}\n`;
             });
 
             // Trigger download
