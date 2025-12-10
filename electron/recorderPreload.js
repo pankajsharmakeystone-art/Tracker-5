@@ -27,7 +27,16 @@ const buildConstraints = (sourceId, resolution) => {
 async function startRecorderForSource(source, resolution) {
   const { id, name } = source;
   const constraints = buildConstraints(id, resolution);
-  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  const mediaDevices = navigator.mediaDevices;
+  const legacyGetUserMedia = (navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia)?.bind(navigator);
+  const getUserMediaFn = (mediaDevices && mediaDevices.getUserMedia) ? mediaDevices.getUserMedia.bind(mediaDevices) : legacyGetUserMedia;
+
+  if (!getUserMediaFn) {
+    console.error('[recorder] mediaDevices missing in recorder window');
+    throw new Error('getUserMedia unavailable in recorder window');
+  }
+
+  const stream = await getUserMediaFn(constraints);
   const mimeType = 'video/webm; codecs=vp9';
   const options = {
     mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm'

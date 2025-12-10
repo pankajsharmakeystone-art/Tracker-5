@@ -5,7 +5,7 @@
 // 2. ADDED a check (!isRecordingActive) in the "Return from Idle" block. (Prevents "Already Active" error if recording never stopped).
 // 3. ADDED a check (!isRecordingActive) in the Manual "End Break" handler. (Safety check to prevent double-start errors).
 
-const { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, Tray, Menu, nativeImage, screen, dialog, globalShortcut } = require("electron");
+const { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, Tray, Menu, nativeImage, screen, dialog, globalShortcut, session } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -278,6 +278,24 @@ function resetAutoResumeRetry() {
 let cachedDropboxAccessToken = null;
 let cachedDropboxRefreshToken = null;
 let dropboxTokenExpiry = null;
+
+// Allow media (screen) capture in the recorder window without prompting
+function ensureMediaPermissions(webContentsInstance) {
+  try {
+    if (!webContentsInstance || !webContentsInstance.session) return;
+    const ses = webContentsInstance.session;
+    if (ses.__mediaHandlerSet) return;
+    ses.setPermissionRequestHandler((wc, permission, callback) => {
+      if (permission === 'media') {
+        return callback(true);
+      }
+      callback(false);
+    });
+    ses.__mediaHandlerSet = true;
+  } catch (err) {
+    log('[permissions] failed to set media handler', err?.message || err);
+  }
+}
 
 const GOOGLE_UPLOAD_SCOPES = [
   "https://www.googleapis.com/auth/drive.file",
@@ -685,12 +703,16 @@ function createRecorderWindow() {
       maximizable: false,
       webPreferences: {
         preload: path.join(__dirname, "recorderPreload.js"),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: false
+        contextIsolation: false,
+        nodeIntegration: true,
+        sandbox: false,
+        webSecurity: false,
+        backgroundThrottling: false,
+        enableBlinkFeatures: "MediaCapture"
       }
     });
-    recorderWindow.loadURL('data:text/html,<html></html>');
+    ensureMediaPermissions(recorderWindow.webContents);
+    recorderWindow.loadFile(path.join(__dirname, 'recorder.html'));
     recorderWindow.on('closed', () => { recorderWindow = null; });
   } catch (error) {
     log("[recorderWindow] failed to create", error?.message || error);

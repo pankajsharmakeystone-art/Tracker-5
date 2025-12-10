@@ -40,12 +40,17 @@ const buildShiftBoundary = (logStartDate: Date, timeStr: string | undefined, use
   if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
 
   const base = DateTime.fromJSDate(logStartDate, { zone: timezone || DEFAULT_TIMEZONE });
-  const referenceDay = useOvernight ? base.plus({ days: 1 }) : base;
+  let referenceDay = useOvernight ? base.plus({ days: 1 }) : base;
 
-  return referenceDay
-    .set({ hour, minute, second: 0, millisecond: 0 })
-    .toUTC()
-    .toJSDate();
+  let target = referenceDay.set({ hour, minute, second: 0, millisecond: 0 });
+
+  // Safety: if the computed shift end is not after the start (common when overnight flag is missing)
+  // bump it to the next day to avoid back-dated clock-outs like 00:00 durations.
+  if (target <= base) {
+    target = target.plus({ days: 1 });
+  }
+
+  return target.toUTC().toJSDate();
 };
 
 const inferProjectId = (): string => {
