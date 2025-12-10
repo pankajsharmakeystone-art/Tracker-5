@@ -404,7 +404,7 @@ export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
       const data = doc.data();
       
       // Rule N1 Exception: Overnight shifts are allowed to cross midnight.
-      // They will be closed by `autoClockOutAtShiftEnd` or manual action.
+      // ...existing code...
         if (shouldTreatAsOvernight(data)) {
           console.log(`Skipping overnight shift: ${doc.id}`);
           return; 

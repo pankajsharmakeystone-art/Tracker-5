@@ -79,7 +79,7 @@ const AdminSettings: React.FC = () => {
         recordingMode: 'manual',
         showRecordingNotification: false,
         recordingQuality: '720p',
-        autoClockOutEnabled: false,
+        // ...existing code...
         manualBreakTimeoutMinutes: 30,
         organizationTimezone: 'Asia/Kolkata',
         showLiveTeamStatusToAgents: true,

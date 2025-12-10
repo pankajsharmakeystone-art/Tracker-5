@@ -293,12 +293,11 @@ hydrateAdminSettingsFromDisk();
 
 let lastForceLogoutRequestId = null;
 let forceLogoutRequestInFlight = false;
-
-let autoClockOutInterval = null;
-let lastAutoClockOutTargetKey = null;
 let agentStatusUnsub = null; // remote Firestore watch for agentStatus
-let autoClockConfigUnsub = null;
-let autoClockSlots = {};
+let currentShiftDate = null;
+let manualBreakActive = false;
+let autoResumeInFlight = false;
+const AUTO_RESUME_BASE_DELAY_MS = 5000;
 let currentShiftDate = null;
 let manualBreakActive = false;
 let autoResumeInFlight = false;

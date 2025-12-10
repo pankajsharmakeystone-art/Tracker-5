@@ -59,13 +59,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
     return () => ipcRenderer.removeListener("desktop-request-end-break", handler);
   },
 
-  // auto-clocked-out notification
-  onAutoClockOut: (cb) => {
-    if (typeof cb !== "function") return () => {};
-    const handler = (_event, data) => cb(data);
-    ipcRenderer.on("auto-clocked-out", handler);
-    return () => ipcRenderer.removeListener("auto-clocked-out", handler);
-  },
+  // ...existing code...
 
   // basic ping
   ping: () => ipcRenderer.invoke("ping"),
