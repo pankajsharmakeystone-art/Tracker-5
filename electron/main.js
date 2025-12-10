@@ -18,6 +18,7 @@ const { google } = require("googleapis");
 const { autoUpdater } = require("electron-updater");
 
 const isDev = process.env.ELECTRON_DEV === 'true' || process.env.NODE_ENV === 'development';
+const APP_USER_MODEL_ID = 'com.trackerfive.desktop';
 
 electronLog.initialize?.();
 if (electronLog?.transports?.file) {
@@ -25,6 +26,7 @@ if (electronLog?.transports?.file) {
 }
 autoUpdater.logger = electronLog;
 autoUpdater.autoDownload = true;
+app.setAppUserModelId(APP_USER_MODEL_ID);
 
 // ---------- HELPER FUNCTIONS ----------
 function log(...args){ console.log("[electron]", ...args); }
@@ -1527,14 +1529,11 @@ function getAutoClockTargetDate(now = new Date()) {
   if (!cachedAdminSettings?.autoClockOutEnabled) return null;
   if (!currentUid || !agentClockedIn) return null;
 
+  // Only honor per-day slot. If no slot or already past, do nothing.
   if (currentShiftDate) {
     const slot = autoClockSlots?.[currentShiftDate];
     const slotTarget = buildDateFromSlot(slot, currentShiftDate);
-    if (slotTarget) return slotTarget;
-  }
-
-  if (cachedAdminSettings?.autoClockOutTime) {
-    return buildDateFromTime(now, cachedAdminSettings.autoClockOutTime);
+    if (slotTarget && now < slotTarget) return slotTarget;
   }
 
   return null;
