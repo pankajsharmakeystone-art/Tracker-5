@@ -219,6 +219,7 @@ let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
+const APP_BASE_URL = process.env.APP_BASE_URL || 'https://tracker-5.vercel.app';
 // Use .ico on Windows for proper taskbar/shortcut branding; png elsewhere.
 // Resolve icon for dev (repo path) and packaged builds (resourcesPath).
 const ICON_CANDIDATES = [
@@ -698,13 +699,15 @@ function createMainWindow() {
     icon: APP_ICON
   });
 
-  // Dev/prod URL switching
-  if (isDev) {
-    mainWindow.loadURL(`https://tracker-5.vercel.app/${DEFAULT_LOGIN_ROUTE_HASH}`);
-  } else {
-    // Load built Vite app (adjust path if needed)
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: DEFAULT_LOGIN_ROUTE_HASH });
-  }
+  // Load hosted app to keep origin authorized for Firebase OAuth; fallback to local file if it fails.
+  const hostedUrl = `${APP_BASE_URL}/${DEFAULT_LOGIN_ROUTE_HASH}`;
+  mainWindow.loadURL(hostedUrl).catch(() => {
+    try {
+      mainWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: DEFAULT_LOGIN_ROUTE_HASH });
+    } catch (e) {
+      log('Failed to load hosted or local app', e?.message || e);
+    }
+  });
 
   // Send handshake to renderer
   mainWindow.webContents.on("did-finish-load", () => {
