@@ -684,9 +684,9 @@ function registerDevtoolsShortcuts(windowInstance) {
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 550,
+    width: 700,
     height: 700,
-    minWidth: 550,
+    minWidth: 700,
     minHeight: 700,
     resizable: true,
     maximizable: true,
