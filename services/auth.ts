@@ -4,6 +4,8 @@ import {
   signInWithEmailAndPassword,
   signOut,
   sendPasswordResetEmail,
+  verifyPasswordResetCode,
+  confirmPasswordReset,
   GoogleAuthProvider,
   signInWithPopup,
   updateProfile,
@@ -62,5 +64,12 @@ export const logout = (): Promise<void> => {
 
 // Password Reset
 export const resetPassword = (email: string): Promise<void> => {
-  return sendPasswordResetEmail(auth, email);
+  const actionCodeSettings = {
+    url: `${window.location.origin}/#/reset-password`,
+    handleCodeInApp: true,
+  };
+  return sendPasswordResetEmail(auth, email, actionCodeSettings);
 };
+
+export const verifyResetCode = (code: string) => verifyPasswordResetCode(auth, code);
+export const applyResetPassword = (code: string, newPassword: string) => confirmPasswordReset(auth, code, newPassword);

@@ -217,7 +217,28 @@ let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
-const ICON_PATH = path.join(__dirname, 'build', 'icon.png');
+// Use .ico on Windows for proper taskbar/shortcut branding; png elsewhere.
+const ICON_PATH = path.join(
+  __dirname,
+  'build',
+  process.platform === 'win32' ? 'icon.ico' : 'icon.png'
+);
+
+// Single-instance lock prevents duplicate processes and tray icons.
+const singleInstanceLock = app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createMainWindow();
+    }
+  });
+}
 
 let manualBreakReminderWindow = null;
 let manualBreakReminderPayloadKey = null;
