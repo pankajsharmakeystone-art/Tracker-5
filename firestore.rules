@@ -42,6 +42,12 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    // Allow invite validation to read team metadata without auth.
+    match /teams/{teamId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
     match /{document=**} {
       allow read, write: if isSignedIn();
     }
