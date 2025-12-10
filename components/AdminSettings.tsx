@@ -572,15 +572,7 @@ const AdminSettings: React.FC = () => {
                     </select>
                 </FormField>
 
-                <FormField label="Auto Clock-Out" description="Enable automatic clock-out based on the agent's scheduled shift end time.">
-                    <div className="flex items-center gap-4">
-                        <ToggleSwitch
-                            id="autoClockOutEnabled"
-                            checked={settings.autoClockOutEnabled}
-                            onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, autoClockOutEnabled: e.target.checked }))}
-                        />
-                    </div>
-                </FormField>
+                {/* Auto Clock-Out toggle removed */}
                 
                  <div className="mt-8 flex items-center gap-4">
                     <button type="submit" disabled={saving} className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800 disabled:opacity-50">

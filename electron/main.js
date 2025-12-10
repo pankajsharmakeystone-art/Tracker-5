@@ -496,7 +496,6 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
   stopAgentStatusWatch();
-  stopAutoClockConfigWatch();
   pendingAgentStatuses.length = 0;
   manualBreakActive = false;
   lastIdleState = false;
@@ -504,7 +503,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   currentUid = null;
   currentShiftDate = null;
-  lastAutoClockOutTargetKey = null;
+    // ...existing code...
 
   try { await clientAuth.signOut(); } catch (err) { console.warn('[clockOutAndSignOutDesktop] signOut failed', err?.message || err); }
 
@@ -525,6 +524,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   return true;
 }
 
+  // Auto clock out variables removed
 async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
   if (!uid) return;
   await db.collection("agentStatus").doc(uid)
@@ -1258,15 +1258,10 @@ function applyAdminSettings(next) {
     const updatedDateKey = toScheduleDateKey();
     if (currentShiftDate !== updatedDateKey) {
       currentShiftDate = updatedDateKey;
-      lastAutoClockOutTargetKey = null;
+        // ...existing code...
     }
   }
-
-  if (cachedAdminSettings?.autoClockOutEnabled) {
-    startAutoClockOutWatcher();
-  } else {
-    stopAutoClockOutWatcher();
-  }
+    // ...existing code...
 
 }
 
@@ -1501,28 +1496,9 @@ function startAgentStatusWatch(uid) {
   }
 }
 
-function stopAutoClockConfigWatch() {
-  if (autoClockConfigUnsub) {
-    try { autoClockConfigUnsub(); } catch (e) { log("autoClockConfig watch cleanup failed", e?.message || e); }
-    autoClockConfigUnsub = null;
-  }
-}
+// Auto clock config/watchers removed
 
-function startAutoClockConfigWatch(uid) {
-  try {
-    stopAutoClockConfigWatch();
-    if (!uid) return;
-    const docRef = db.collection('autoClockConfigs').doc(uid);
-    autoClockConfigUnsub = docRef.onSnapshot((snap) => {
-      autoClockSlots = snap.exists ? (snap.data() || {}) : {};
-      lastAutoClockOutTargetKey = null;
-    }, (error) => {
-      console.error('[autoClockConfigWatch] listener error', error?.message || error);
-    });
-  } catch (e) {
-    console.error('[startAutoClockConfigWatch] failed', e?.message || e);
-  }
-}
+// Auto clock config/watchers removed
 
 const toScheduleDateKey = (date = new Date()) => {
   const timezone = getOrganizationTimezone();
@@ -1550,105 +1526,14 @@ const buildDateFromTime = (now, timeStr) => {
   return buildDateFromComponents(dateKey, timeStr, timezone, false);
 };
 
-function getAutoClockTargetDate(now = new Date()) {
-  if (!cachedAdminSettings?.autoClockOutEnabled) return null;
-  if (!currentUid || !agentClockedIn) return null;
-
-  // Only honor per-day slot. If no slot or already past, do nothing.
-  if (currentShiftDate) {
-    const slot = autoClockSlots?.[currentShiftDate];
-    const slotTarget = buildDateFromSlot(slot, currentShiftDate);
-    if (slotTarget && now < slotTarget) return slotTarget;
-  }
-
-  return null;
-}
+// Auto clock target logic removed
 
 // ---------- AUTO CLOCK-OUT WATCHER ----------
-function startAutoClockOutWatcher() {
-  try {
-    if (autoClockOutInterval) return;
-    // check every 60 seconds
-    autoClockOutInterval = setInterval(async () => {
-      try {
-        const target = getAutoClockTargetDate();
-        if (!target) return;
-        const now = new Date();
-        if (now >= target) {
-          const key = target.toISOString();
-          if (lastAutoClockOutTargetKey === key) return;
-          await performAutoClockOut();
-          lastAutoClockOutTargetKey = key;
-        }
-      } catch (e) {
-        console.error("[autoClockOutWatcher] error", e);
-      }
-    }, 60 * 1000);
-    log("autoClockOutWatcher started");
-  } catch (e) {
-    console.error("[startAutoClockOutWatcher] error", e);
-  }
-}
+// Auto clock out watcher removed
 
-function stopAutoClockOutWatcher() {
-  try {
-    if (autoClockOutInterval) {
-      clearInterval(autoClockOutInterval);
-      autoClockOutInterval = null;
-    }
-    log("autoClockOutWatcher stopped");
-  } catch (e) {
-    console.error("[stopAutoClockOutWatcher] error", e);
-  }
-}
+// Auto clock out watcher removed
 
-async function performAutoClockOut() {
-  try {
-    if (!currentUid) return;
-    log("[autoClockOut] performing auto clock out for uid:", currentUid);
-
-    // Stop recording if active
-    // Force stop even if isRecordingActive is false (to clean up)
-    const wasRecording = isRecordingActive;
-    isRecordingActive = false;
-    resetAutoResumeRetry();
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
-    if (wasRecording) showRecordingPopup("Recording stopped (auto clock-out)");
-    
-    // Always send stop command to renderer
-    if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid: currentUid });
-    stopBackgroundRecording();
-
-    // mark offline in agentStatus
-    await db.collection('agentStatus').doc(currentUid).set({
-      status: 'offline',
-      isIdle: false,
-      isDesktopConnected: false,
-      lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).catch(()=>{});
-
-    // inform renderer
-    if (mainWindow) mainWindow.webContents.send("auto-clocked-out", { uid: currentUid });
-
-    // ensure renderer clears any locally-stored desktop UID so app won't auto-register on restart
-    try {
-      if (mainWindow && mainWindow.webContents) {
-        mainWindow.webContents.send("clear-desktop-uid");
-      }
-    } catch(e) { console.warn("[performAutoClockOut] failed to send clear-desktop-uid", e); }
-
-    // optionally: perform any upload logic if you want here (your current Dropbox uploads happen on save)
-    // keep currentUid as-is but mark agentClockedIn false
-    agentClockedIn = false;
-    stopAgentStatusLoop();
-    currentShiftDate = null;
-    lastAutoClockOutTargetKey = null;
-    closeManualBreakReminderWindow();
-
-  } catch (e) {
-    console.error("[performAutoClockOut] error", e);
-  }
-}
+// Auto clock out logic removed
 
 // ---------- IPC ----------
 ipcMain.handle("ping", () => "pong");

@@ -788,20 +788,7 @@ const computeIsOvernightShift = (entry: ShiftEntry | undefined): boolean => {
     return entry.endTime < entry.startTime;
 };
 
-const persistAutoClockSlot = async (userId: string, date: string, entry: ShiftEntry | undefined, timezone: string) => {
-    const ref = doc(db, 'autoClockConfigs', userId);
-    if (isShiftEntryObject(entry)) {
-        const slot = {
-            shiftStartTime: entry.startTime,
-            shiftEndTime: entry.endTime ?? null,
-            isOvernightShift: computeIsOvernightShift(entry),
-            timezone
-        };
-        await setDoc(ref, { [date]: slot }, { merge: true });
-    } else {
-        await setDoc(ref, { [date]: deleteField() }, { merge: true });
-    }
-};
+// Auto clock slot logic removed
 
 const collectChangedScheduleSlots = (previous: MonthlySchedule | undefined, next: MonthlySchedule) => {
     const changes: Array<{ userId: string; date: string; entry: ShiftEntry | undefined }> = [];
@@ -861,7 +848,7 @@ const reconcileLateMinutesForScheduleChanges = async (previous: MonthlySchedule 
     const changes = collectChangedScheduleSlots(previous, next);
     for (const change of changes) {
         await recalculateLateMinutesForSlot(change.userId, change.date, change.entry, timezone);
-        await persistAutoClockSlot(change.userId, change.date, change.entry, timezone);
+        // ...existing code...
     }
 };
 
