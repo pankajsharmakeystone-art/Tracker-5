@@ -1569,7 +1569,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     currentUid = uid;
     currentShiftDate = null;
-    lastAutoClockOutTargetKey = null;
+    // ...existing code...
 
     // fetch and cache displayName for nicer Dropbox folders
     try {
@@ -1583,7 +1583,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
     startCommandsWatch(uid);
     startAgentStatusLoop(uid); // loop will only do idle logic if agentClockedIn === true
     startAgentStatusWatch(uid);
-    startAutoClockConfigWatch(uid);
+    // ...existing code...
     await flushPendingAgentStatuses();
 
     await reconcileRecordingAfterRegister(uid);
@@ -1601,7 +1601,7 @@ ipcMain.handle("unregister-uid", async () => {
     if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
     stopAgentStatusLoop();
     stopAgentStatusWatch();
-    stopAutoClockConfigWatch();
+    // ...existing code...
     pendingAgentStatuses.length = 0;
     if (currentUid) {
       await db.collection("agentStatus").doc(currentUid).set({ isDesktopConnected: false, status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
@@ -1619,7 +1619,7 @@ ipcMain.handle("unregister-uid", async () => {
     isRecordingActive = false;
     resetAutoResumeRetry();
     currentShiftDate = null;
-    lastAutoClockOutTargetKey = null;
+    // ...existing code...
     closeManualBreakReminderWindow();
     try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
     return { success: true };
@@ -1668,7 +1668,7 @@ async function applyAgentStatus(status) {
     agentClockedIn = false;
     stopAgentStatusLoop();
     currentShiftDate = null;
-    lastAutoClockOutTargetKey = null;
+    // ...existing code...
 
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
@@ -1692,7 +1692,7 @@ async function applyAgentStatus(status) {
     const dateKey = toScheduleDateKey();
     if (currentShiftDate !== dateKey) {
       currentShiftDate = dateKey;
-      lastAutoClockOutTargetKey = null;
+      // ...existing code...
     }
     startAgentStatusLoop(currentUid);
 
