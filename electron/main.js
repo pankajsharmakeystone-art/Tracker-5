@@ -84,9 +84,6 @@ function hydrateEnv(filePath) {
 
 potentialEnvFiles.forEach(hydrateEnv);
 
-// Purge stale recordings early during startup to avoid uploading old files from prior sessions
-purgeOldRecordings();
-
 const devToolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
 
 const envOr = (...keys) => {
@@ -135,6 +132,9 @@ const DEFAULT_ORGANIZATION_TIMEZONE = "Asia/Kolkata";
 // ---------- CONFIG ----------
 const RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings");
 if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+
+// Purge stale recordings early during startup to avoid uploading old files from prior sessions
+purgeOldRecordings();
 
 // Cleanup helper: delete stale recordings to prevent future re-uploads
 function purgeOldRecordings(maxAgeHours = 24) {
@@ -220,11 +220,31 @@ let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
 // Use .ico on Windows for proper taskbar/shortcut branding; png elsewhere.
-const ICON_PATH = path.join(
-  __dirname,
-  'build',
-  process.platform === 'win32' ? 'icon.ico' : 'icon.png'
-);
+// Resolve icon for dev (repo path) and packaged builds (resourcesPath).
+const ICON_CANDIDATES = [
+  path.join(__dirname, 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
+  process.resourcesPath ? path.join(process.resourcesPath, process.platform === 'win32' ? 'icon.ico' : 'icon.png') : null
+].filter(Boolean);
+
+const resolveAppIcon = () => {
+  for (const candidate of ICON_CANDIDATES) {
+    if (candidate && fs.existsSync(candidate)) {
+      try {
+        const img = nativeImage.createFromPath(candidate);
+        if (!img.isEmpty()) {
+          log('[icon] using', candidate);
+          return img;
+        }
+      } catch (err) {
+        log('[icon] failed to load', candidate, err?.message || err);
+      }
+    }
+  }
+  log('[icon] no icon found, falling back to default');
+  return undefined;
+};
+
+const APP_ICON = resolveAppIcon();
 
 // Single-instance lock prevents duplicate processes and tray icons.
 const singleInstanceLock = app.requestSingleInstanceLock();
@@ -662,7 +682,6 @@ function registerDevtoolsShortcuts(windowInstance) {
 }
 
 function createMainWindow() {
-  const iconPath = fs.existsSync(ICON_PATH) ? ICON_PATH : undefined;
   mainWindow = new BrowserWindow({
     width: 550,
     height: 700,
@@ -676,7 +695,7 @@ function createMainWindow() {
       nodeIntegration: false,
     },
     show: false,
-    icon: iconPath
+    icon: APP_ICON
   });
 
   // Dev/prod URL switching
@@ -712,6 +731,10 @@ function createMainWindow() {
       mainWindow.hide();
     }
   });
+
+  if (!APP_ICON) {
+    log('[icon] BrowserWindow is using default icon (APP_ICON missing)');
+  }
 
   registerDevtoolsShortcuts(mainWindow);
 }
@@ -807,8 +830,7 @@ function stopBackgroundRecordingAndFlush(timeoutMs = 7000) {
 // ---------- TRAY ----------
 function createTray() {
   try {
-    const image = fs.existsSync(ICON_PATH) ? nativeImage.createFromPath(ICON_PATH) : undefined;
-    tray = new Tray(image || undefined);
+    tray = new Tray(APP_ICON || undefined);
     const menu = Menu.buildFromTemplate([
       { label: "Open App", click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
       { label: "Quit", click: () => { isQuiting = true; app.quit(); } }
