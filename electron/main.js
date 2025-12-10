@@ -703,10 +703,10 @@ function createRecorderWindow() {
       maximizable: false,
       webPreferences: {
         preload: path.join(__dirname, "recorderPreload.js"),
-        contextIsolation: false,
-        nodeIntegration: true,
-        sandbox: false,
-        webSecurity: false,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
         backgroundThrottling: false,
         enableBlinkFeatures: "MediaCapture"
       }

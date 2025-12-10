@@ -24,6 +24,12 @@ View your app in AI Studio: https://ai.studio/apps/drive/1Cn17wxMG8487klqzHJ60Op
 4. Run the app:
    `npm run dev`
 
+## Security Notes
+
+- Deploy the new Firestore rules (`firebase deploy --only firestore:rules`) so `adminSettings/global` and Dropbox tokens stay admin-only.
+- Sensitive API keys should stay server-side; the client bundle no longer injects `GEMINI_API_KEY`.
+- Desktop builds load `.env.desktop`; keep only client-safe keys there to avoid shipping secrets inside the installer.
+
 ## Desktop Firebase Client Setup (no admin keys)
 
 The Electron app now uses the standard Firebase **client SDK** instead of `firebase-admin`, so you never have to ship a service-account JSON to users. After an agent signs into the web dashboard:

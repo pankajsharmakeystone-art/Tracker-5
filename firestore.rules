@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.role == 'admin' ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+      );
+    }
+
+    function targetUserId(doc) {
+      return doc.data.userId != null ? doc.data.userId : null;
+    }
+
+    match /adminSettings/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /dropboxOauthSessions/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow write: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+    }
+
+    match /worklogs/{logId} {
+      allow read, write: if isAdmin() || (
+        isSignedIn() && (
+          targetUserId(resource) == request.auth.uid ||
+          (request.resource != null && targetUserId(request.resource) == request.auth.uid)
+        )
+      );
+    }
+
+    match /schedules/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}
