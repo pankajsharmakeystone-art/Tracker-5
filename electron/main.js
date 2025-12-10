@@ -217,6 +217,7 @@ let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
+const ICON_PATH = path.join(__dirname, 'build', 'icon.png');
 
 let manualBreakReminderWindow = null;
 let manualBreakReminderPayloadKey = null;
@@ -638,6 +639,7 @@ function registerDevtoolsShortcuts(windowInstance) {
 }
 
 function createMainWindow() {
+  const iconPath = fs.existsSync(ICON_PATH) ? ICON_PATH : undefined;
   mainWindow = new BrowserWindow({
     width: 550,
     height: 700,
@@ -650,7 +652,8 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-    show: false
+    show: false,
+    icon: iconPath
   });
 
   // Dev/prod URL switching
@@ -781,8 +784,7 @@ function stopBackgroundRecordingAndFlush(timeoutMs = 7000) {
 // ---------- TRAY ----------
 function createTray() {
   try {
-    const iconPath = path.join(__dirname, "icon.png");
-    const image = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
+    const image = fs.existsSync(ICON_PATH) ? nativeImage.createFromPath(ICON_PATH) : undefined;
     tray = new Tray(image || undefined);
     const menu = Menu.buildFromTemplate([
       { label: "Open App", click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
