@@ -181,6 +181,18 @@ const EditTimeModal = ({ log, onClose, timezone }: { log: WorkLog, onClose: () =
                 clockOutTime: endDate ? Timestamp.fromDate(endDate) : null,
             };
 
+            const closeLastOpenActivity = (activities: any[] | undefined, end: Date) => {
+                if (!Array.isArray(activities) || !end) return undefined;
+                const copy = activities.map((a) => ({ ...a }));
+                for (let i = copy.length - 1; i >= 0; i -= 1) {
+                    if (!copy[i]?.endTime) {
+                        copy[i] = { ...copy[i], endTime: Timestamp.fromDate(end) };
+                        return copy;
+                    }
+                }
+                return undefined;
+            };
+
             const newStartMillis = startDate.getTime();
             const newEndMillis = endDate ? endDate.getTime() : Date.now();
             
@@ -221,6 +233,10 @@ const EditTimeModal = ({ log, onClose, timezone }: { log: WorkLog, onClose: () =
             // If we are setting an end time, ensure status is clocked_out
             if (endDate) {
                 updates.status = 'clocked_out';
+                const updatedActivities = closeLastOpenActivity((log as any).activities, endDate);
+                if (updatedActivities) {
+                    updates.activities = updatedActivities;
+                }
             } else if (log.status === 'clocked_out' && !endDate) {
                 // If we are clearing the end time, set back to working
                 updates.status = 'working';
