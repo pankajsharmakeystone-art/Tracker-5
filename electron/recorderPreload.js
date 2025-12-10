@@ -105,7 +105,12 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
     };
     const resolution = mapping[quality] || mapping['720p'];
 
-    const sourcesResult = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+    const res = await ipcRenderer.invoke('recorder-get-sources');
+    if (!res?.success) {
+      throw new Error(res?.error || 'no-sources');
+    }
+
+    const sourcesResult = res.sources || [];
     const screenSources = sourcesResult.filter((src) => src.id?.startsWith('screen') || /screen/i.test(src.name));
     const targets = screenSources.length > 0 ? screenSources : sourcesResult;
 

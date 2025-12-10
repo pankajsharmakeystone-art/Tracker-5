@@ -1867,6 +1867,20 @@ ipcMain.handle("live-stream-get-sources", async () => {
   }
 });
 
+// Background recorder helper: expose sources to recorder window (avoids missing desktopCapturer in preload)
+ipcMain.handle('recorder-get-sources', async () => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+    return {
+      success: true,
+      sources: sources.map((s) => ({ id: s.id, name: s.name }))
+    };
+  } catch (error) {
+    console.error('[recorder] get-sources failed', error?.message || error);
+    return { success: false, error: error?.message || String(error) };
+  }
+});
+
 ipcMain.handle("stop-recording", async (_, meta = {}) => {
   try {
     // called by renderer; now forward to background recorder
