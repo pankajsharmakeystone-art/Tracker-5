@@ -400,6 +400,13 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     }, [teamId, selectedDate, isToday]);
 
     // Calculate live values
+    const normalizeStatus = (raw: any): WorkLog['status'] => {
+        const val = String(raw || '').toLowerCase();
+        if (val === 'working' || val === 'online' || val === 'active') return 'working';
+        if (val === 'on_break' || val === 'break') return 'on_break';
+        return 'clocked_out';
+    };
+
     const agents = useMemo(() => {
         return rawLogs.map(log => {
             const desktopStatus = agentStatuses?.[log.userId];
@@ -443,11 +450,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 ? computedLateMinutes
                 : (typeof log.lateMinutes === 'number' ? Math.round(log.lateMinutes) : 0);
 
-            const effectiveStatus = (isStale)
-                ? 'offline'
+            const effectiveStatus: WorkLog['status'] = isStale
+                ? 'clocked_out'
                 : ((remoteStatus && ['working', 'online'].includes(remoteStatus) && !remoteManualBreak)
                     ? 'working'
-                    : log.status);
+                    : normalizeStatus(log.status));
 
             return {
                 ...log,
@@ -542,11 +549,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         }
     };
 
-    const getRecordingIndicator = (meta: { isConnected?: boolean; isRecording?: boolean; status?: string; isStale?: boolean }) => {
+    const getRecordingIndicator = (meta: { isConnected?: boolean; isRecording?: boolean; status?: WorkLog['status']; isStale?: boolean }) => {
         const { isConnected, isRecording, status, isStale } = meta;
-        const agentState = String(status || '').toLowerCase();
+        const agentState = status;
 
-        if (!isConnected || agentState === 'offline' || agentState === 'clocked_out' || isStale) {
+        if (!isConnected || agentState === 'clocked_out' || isStale) {
             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200">Rec Off</span>;
         }
 
