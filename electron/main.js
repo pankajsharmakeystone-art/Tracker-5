@@ -354,6 +354,21 @@ let googleSetupError = null;
 configureGoogleIntegrations();
 
 const pendingAgentStatuses = [];
+let pendingStatusRetryTimer = null;
+
+function schedulePendingStatusFlush(delayMs = 3000) {
+  if (pendingStatusRetryTimer) return;
+  pendingStatusRetryTimer = setTimeout(async () => {
+    pendingStatusRetryTimer = null;
+    try {
+      await flushPendingAgentStatuses();
+    } catch (err) {
+      log('[pending-status] flush failed', err?.message || err);
+      // backoff retry to avoid dropping status updates on transient failures
+      schedulePendingStatusFlush(Math.min(delayMs * 2, 30000));
+    }
+  }, delayMs);
+}
 
 async function reconcileRecordingAfterRegister(uid) {
   try {
@@ -1878,14 +1893,27 @@ async function applyAgentStatus(status) {
 }
 
 async function flushPendingAgentStatuses() {
+  if (pendingStatusRetryTimer) {
+    clearTimeout(pendingStatusRetryTimer);
+    pendingStatusRetryTimer = null;
+  }
   if (!currentUid || pendingAgentStatuses.length === 0) return;
+
   const queued = pendingAgentStatuses.splice(0, pendingAgentStatuses.length);
+  const failed = [];
+
   for (const status of queued) {
     try {
       await applyAgentStatus(status);
     } catch (err) {
       log('Failed to apply queued agent status', status, err?.message || err);
+      failed.push(status);
     }
+  }
+
+  if (failed.length) {
+    pendingAgentStatuses.unshift(...failed);
+    schedulePendingStatusFlush();
   }
 }
 
@@ -1895,12 +1923,16 @@ ipcMain.handle("set-agent-status", async (_, status) => {
     if (!currentUid) {
       log('Desktop not registered yet. Queuing status:', status);
       pendingAgentStatuses.push(status);
+      schedulePendingStatusFlush();
       return { success: true, queued: true };
     }
 
     return await applyAgentStatus(status);
   } catch (e) {
-    return { success: false, error: e.message };
+    log('[set-agent-status] failed, queuing for retry', e?.message || e);
+    pendingAgentStatuses.push(status);
+    schedulePendingStatusFlush();
+    return { success: false, queued: true, error: e.message };
   }
 });
 
