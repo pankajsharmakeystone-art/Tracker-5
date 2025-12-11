@@ -306,6 +306,10 @@ const AUTO_RESUME_BASE_DELAY_MS = 5000;
 const AUTO_RESUME_MAX_DELAY_MS = 60000;
 let autoResumeRetryDelayMs = AUTO_RESUME_BASE_DELAY_MS;
 let autoResumeRetryTimer = null;
+let lastStatusWriteMs = Date.now();
+let statusHealthInterval = null;
+const HEARTBEAT_MIN_INTERVAL_MS = 60000; // throttle heartbeat writes to ~1/min
+let lastHeartbeatWriteMs = 0;
 
 function clearAutoResumeRetryTimer() {
   if (autoResumeRetryTimer) {
@@ -317,6 +321,32 @@ function clearAutoResumeRetryTimer() {
 function resetAutoResumeRetry() {
   clearAutoResumeRetryTimer();
   autoResumeRetryDelayMs = AUTO_RESUME_BASE_DELAY_MS;
+}
+
+function recordStatusWriteSuccess() {
+  lastStatusWriteMs = Date.now();
+  lastHeartbeatWriteMs = Date.now();
+}
+
+function startStatusHealthCheck() {
+  if (statusHealthInterval) return;
+  statusHealthInterval = setInterval(() => {
+    if (!currentUid) return;
+    const age = Date.now() - lastStatusWriteMs;
+    if (age > 300000) { // 5 minutes without a successful status write
+      log('[status-watchdog] no recent status write, reasserting desktop status');
+      reassertDesktopStatus(currentUid);
+      flushPendingAgentStatuses();
+      recordStatusWriteSuccess();
+    }
+  }, 30000); // check every 30s
+}
+
+function stopStatusHealthCheck() {
+  if (statusHealthInterval) {
+    clearInterval(statusHealthInterval);
+    statusHealthInterval = null;
+  }
 }
 
 // Dropbox token management
@@ -456,9 +486,11 @@ async function resumeRecordingIfNeeded(uid) {
   }
 
   isRecordingActive = true;
-  await db.collection('agentStatus').doc(uid)
-    .set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
-    .catch(() => {});
+  try {
+    await db.collection('agentStatus').doc(uid)
+      .set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true });
+    recordStatusWriteSuccess();
+  } catch (_) {}
   showRecordingPopup("Recording resumed");
   startBackgroundRecording();
 }
@@ -567,30 +599,34 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
 async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
   if (!uid) return;
-  await db.collection("agentStatus").doc(uid)
-    .set({
-      status: "break",
-      isIdle: true,
-      idleSecs,
-      idleReason: reason || null,
-      lockedBySystem: reason === 'system_lock',
-      ...buildDesktopStatusMetadata()
-    }, { merge: true })
-    .catch(() => {});
+  try {
+    await db.collection("agentStatus").doc(uid)
+      .set({
+        status: "break",
+        isIdle: true,
+        idleSecs,
+        idleReason: reason || null,
+        lockedBySystem: reason === 'system_lock',
+        ...buildDesktopStatusMetadata()
+      }, { merge: true });
+    recordStatusWriteSuccess();
+  } catch (_) {}
 }
 
 async function pushActiveStatus(uid, { idleSecs } = {}) {
   if (!uid) return;
-  await db.collection("agentStatus").doc(uid)
-    .set({
-      status: "online",
-      isIdle: false,
-      idleSecs,
-      idleReason: FieldValue.delete(),
-      lockedBySystem: false,
-      ...buildDesktopStatusMetadata()
-    }, { merge: true })
-    .catch(() => {});
+  try {
+    await db.collection("agentStatus").doc(uid)
+      .set({
+        status: "online",
+        isIdle: false,
+        idleSecs,
+        idleReason: FieldValue.delete(),
+        lockedBySystem: false,
+        ...buildDesktopStatusMetadata()
+      }, { merge: true });
+    recordStatusWriteSuccess();
+  } catch (_) {}
   await resumeRecordingIfNeeded(uid);
 }
 
@@ -1391,14 +1427,19 @@ function startAgentStatusLoop(uid) {
     try {
       // If not clocked in → only send heartbeat, no idle logic
       if (!agentClockedIn) {
-        // Keep a minimal heartbeat so UI shows desktop connected when relevant
-        await db.collection("agentStatus").doc(uid).set({
-          isDesktopConnected: !!currentUid,
-          lastUpdate: FieldValue.serverTimestamp(),
-          appVersion: app.getVersion(),
-          platform: process.platform,
-          machineName: os.hostname()
-        }, { merge: true }).catch(()=>{});
+        const now = Date.now();
+        if (now - lastHeartbeatWriteMs >= HEARTBEAT_MIN_INTERVAL_MS) {
+          try {
+            await db.collection("agentStatus").doc(uid).set({
+              isDesktopConnected: !!currentUid,
+              lastUpdate: FieldValue.serverTimestamp(),
+              appVersion: app.getVersion(),
+              platform: process.platform,
+              machineName: os.hostname()
+            }, { merge: true });
+            recordStatusWriteSuccess();
+          } catch (_) {}
+        }
         return;
       }
 
@@ -1472,24 +1513,37 @@ function startAgentStatusLoop(uid) {
 
       closeManualBreakReminderWindow();
 
-      // --------------------------
-      // Idle detected (idleLimit>0)
-      // --------------------------
-      if (shouldForceIdle && !lastIdleState) {
-        lastIdleState = true;
-        log("User idle detected — setting status to break");
-        await pushIdleStatus(uid, { idleSecs, reason: idleReason });
-        return;
-      }
+  // --------------------------
+  // Idle detected (idleLimit>0)
+  // --------------------------
+  if (shouldForceIdle && !lastIdleState) {
+    lastIdleState = true;
+    log("User idle detected — setting status to break");
+    await pushIdleStatus(uid, { idleSecs, reason: idleReason });
+    return;
+  }
 
-      if (!shouldForceIdle && lastIdleState) {
-        lastIdleState = false;
-        log("Idle cleared — setting status to online");
-        await pushActiveStatus(uid, { idleSecs });
-        return;
-      }
+  if (!shouldForceIdle && lastIdleState) {
+    lastIdleState = false;
+    log("Idle cleared — setting status to online");
+    await pushActiveStatus(uid, { idleSecs });
+    return;
+  }
 
-      // No transition -> do nothing (we intentionally avoid extra periodic writes here)
+      // No transition -> low-rate heartbeat to keep presence fresh without spamming writes
+      const now = Date.now();
+      if (now - lastHeartbeatWriteMs >= HEARTBEAT_MIN_INTERVAL_MS) {
+        try {
+          await db.collection("agentStatus").doc(uid).set({
+            isDesktopConnected: true,
+            lastUpdate: FieldValue.serverTimestamp(),
+            appVersion: app.getVersion(),
+            platform: process.platform,
+            machineName: os.hostname()
+          }, { merge: true });
+          recordStatusWriteSuccess();
+        } catch (_) {}
+      }
 
     } catch(e){ console.error("[statusLoop] error", e); }
   }, 3000);
@@ -1545,6 +1599,7 @@ function startAgentStatusWatch(uid) {
       }
     }, (error) => {
       console.error('[agentStatusWatch] listener error', error?.message || error);
+      setTimeout(() => startAgentStatusWatch(uid), 5000);
     });
   } catch (e) {
     console.error('[startAgentStatusWatch] failed', e?.message || e);
@@ -1757,6 +1812,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
     startAgentStatusLoop(uid); // loop will only do idle logic if agentClockedIn === true
     startAgentStatusWatch(uid);
     startAutoClockConfigWatch(uid);
+    startStatusHealthCheck();
     await flushPendingAgentStatuses();
 
     await reconcileRecordingAfterRegister(uid);
@@ -1776,6 +1832,7 @@ ipcMain.handle("unregister-uid", async () => {
     stopAgentStatusLoop();
     stopAgentStatusWatch();
     stopAutoClockConfigWatch();
+    stopStatusHealthCheck();
     pendingAgentStatuses.length = 0;
     if (currentUid) {
       await db.collection("agentStatus").doc(currentUid).set({ isDesktopConnected: false, status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
@@ -1824,12 +1881,12 @@ async function applyAgentStatus(status) {
       breakStartedAt: FieldValue.serverTimestamp(),
       isIdle: false,
       lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).catch(()=>{});
+    }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
 
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
     resetAutoResumeRetry();
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
     stopBackgroundRecording();
@@ -1847,7 +1904,7 @@ async function applyAgentStatus(status) {
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
     resetAutoResumeRetry();
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording stopped');
     stopBackgroundRecording();
@@ -1857,7 +1914,7 @@ async function applyAgentStatus(status) {
       isIdle: false,
       isDesktopConnected: false,
       lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).catch(()=>{});
+    }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
     return { success: true };
   }
 
@@ -1878,7 +1935,7 @@ async function applyAgentStatus(status) {
     if (recordingMode === 'auto' && allowRecording) {
       if (!isRecordingActive) {
         isRecordingActive = true;
-        await db.collection('agentStatus').doc(currentUid).set({ isRecording: true }, { merge: true }).catch(()=>{});
+        await db.collection('agentStatus').doc(currentUid).set({ isRecording: true }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
         showRecordingPopup('Recording started');
         startBackgroundRecording();
       } else {
@@ -1893,7 +1950,7 @@ async function applyAgentStatus(status) {
       lastUpdate: FieldValue.serverTimestamp(),
       manualBreak: false,
       breakStartedAt: FieldValue.delete()
-    }, { merge: true }).catch(()=>{});
+    }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
 
     closeManualBreakReminderWindow();
     return { success: true };
@@ -1905,7 +1962,7 @@ async function applyAgentStatus(status) {
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
     resetAutoResumeRetry();
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
     stopBackgroundRecording();
@@ -1914,7 +1971,7 @@ async function applyAgentStatus(status) {
       status: 'break',
       isIdle: true,
       lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).catch(()=>{});
+    }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
     return { success: true };
   }
 

@@ -185,13 +185,17 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                             : null;
                                     
                                         const agentStatus = agentStatuses[log.userId];
-                                        const isConnected = agentStatus?.isDesktopConnected === true;
-                                        const isRecording = agentStatus?.isRecording === true;
+                                        const lastUpdateRaw = agentStatus?.lastUpdate;
+                                        const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
+                                        const isStale = typeof lastUpdateMs === 'number' ? (Date.now() - lastUpdateMs > 120000) : false;
+                                        const isConnected = agentStatus?.isDesktopConnected === true && !isStale;
                                         const remoteStatus = agentStatus?.status;
-                                        const displayStatus = (remoteStatus && ['working', 'online'].includes(remoteStatus) && agentStatus?.manualBreak !== true)
-                                            ? 'working'
-                                            : log.status;
-                                        const displayRecording = isRecording === true;
+                                        const displayStatus = isStale
+                                            ? 'offline'
+                                            : ((remoteStatus && ['working', 'online'].includes(remoteStatus) && agentStatus?.manualBreak !== true)
+                                                ? 'working'
+                                                : log.status);
+                                        const displayRecording = isConnected && agentStatus?.isRecording === true;
 
                                         return (
                                             <div 

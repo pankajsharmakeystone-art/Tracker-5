@@ -405,6 +405,9 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             const desktopStatus = agentStatuses?.[log.userId];
             const remoteStatus = desktopStatus?.status;
             const remoteManualBreak = desktopStatus?.manualBreak === true;
+            const lastUpdateRaw = desktopStatus?.lastUpdate;
+            const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
+            const isStale = typeof lastUpdateMs === 'number' ? (Date.now() - lastUpdateMs > 120000) : false;
             const isActive = log.status !== 'clocked_out';
             const isZombie = isSessionStale(log) && isActive;
             
@@ -440,9 +443,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 ? computedLateMinutes
                 : (typeof log.lateMinutes === 'number' ? Math.round(log.lateMinutes) : 0);
 
-            const effectiveStatus = (remoteStatus && ['working', 'online'].includes(remoteStatus) && !remoteManualBreak)
-                ? 'working'
-                : log.status;
+            const effectiveStatus = (isStale)
+                ? 'offline'
+                : ((remoteStatus && ['working', 'online'].includes(remoteStatus) && !remoteManualBreak)
+                    ? 'working'
+                    : log.status);
 
             return {
                 ...log,
@@ -453,7 +458,12 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 idleBreakSeconds: idleSeconds,
                 isZombie,
                 isOvernight,
-                lateMinutes
+                lateMinutes,
+                __desktop: {
+                    isStale,
+                    isConnected: desktopStatus?.isDesktopConnected === true && !isStale,
+                    isRecording: desktopStatus?.isRecording === true && !isStale
+                }
             };
         });
     }, [rawLogs, now, selectedDate, organizationTimezone, agentStatuses]);
@@ -532,14 +542,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         }
     };
 
-    const getRecordingIndicator = (uid: string) => {
-        const status = agentStatuses?.[uid];
-        const isConnected = status?.isDesktopConnected === true;
-        const isRecording = status?.isRecording === true;
-        const agentState = String(status?.status || '').toLowerCase();
+    const getRecordingIndicator = (meta: { isConnected?: boolean; isRecording?: boolean; status?: string; isStale?: boolean }) => {
+        const { isConnected, isRecording, status, isStale } = meta;
+        const agentState = String(status || '').toLowerCase();
 
-        // If offline/clocked_out or disconnected, recorder cannot be running
-        if (!isConnected || agentState === 'offline' || agentState === 'clocked_out') {
+        if (!isConnected || agentState === 'offline' || agentState === 'clocked_out' || isStale) {
             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200">Rec Off</span>;
         }
 
@@ -642,7 +649,12 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                     {formatDuration(agent.idleBreakSeconds ?? 0)}
                                 </td>
                                 <td className="py-4 px-6 text-center">
-                                    {getRecordingIndicator(agent.userId)}
+                                    {getRecordingIndicator({
+                                        isConnected: agent.__desktop?.isConnected,
+                                        isRecording: agent.__desktop?.isRecording,
+                                        status: agent.status,
+                                        isStale: agent.__desktop?.isStale
+                                    })}
                                 </td>
                                 <td className="py-4 px-6 flex gap-2 items-center">
                                     <button
