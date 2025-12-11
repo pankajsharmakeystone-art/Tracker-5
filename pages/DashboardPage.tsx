@@ -14,8 +14,10 @@ const DashboardPage: React.FC = () => {
     const navigate = useNavigate();
     const [showError, setShowError] = useState(false);
     const [autoClockOutMessage, setAutoClockOutMessage] = useState<string | null>(null);
+    const [agentWebBlocked, setAgentWebBlocked] = useState(false);
     const currentUid = userData?.uid || user?.uid || null;
     const currentUidRef = useRef<string | null>(currentUid);
+    const isDesktopEnv = typeof window !== 'undefined' && Boolean(window.desktopAPI);
 
     useEffect(() => {
         currentUidRef.current = currentUid;
@@ -37,6 +39,14 @@ const DashboardPage: React.FC = () => {
         // If loading or userData changes, clear any pending error display.
         return () => clearTimeout(timer);
     }, [loading, userData]);
+
+    useEffect(() => {
+        if (!loading && userData?.role === 'agent') {
+            setAgentWebBlocked(!isDesktopEnv);
+        } else {
+            setAgentWebBlocked(false);
+        }
+    }, [loading, userData, isDesktopEnv]);
 
     useEffect(() => {
         if (!window.desktopAPI || !window.desktopAPI.onAutoClockOut) return;
@@ -70,6 +80,10 @@ const DashboardPage: React.FC = () => {
         }
         await logout();
         navigate('/login');
+    };
+
+    const handleAgentWebBlockedSignOut = async () => {
+        await performLogout();
     };
 
     const handleSignOutClick = async () => {
@@ -131,6 +145,24 @@ const DashboardPage: React.FC = () => {
                 <Spinner />
             </div>
         )
+    }
+
+    if (agentWebBlocked) {
+        return (
+            <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 dark:bg-gray-900 p-4 text-center">
+                <div className="w-full max-w-md bg-white rounded-lg shadow-xl p-8 dark:bg-gray-800 dark:border dark:border-gray-700">
+                    <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Use Desktop App</h1>
+                    <p className="mt-3 text-gray-600 dark:text-gray-300">
+                        Agent access is restricted to the desktop app. Please sign in using the desktop application to continue.
+                    </p>
+                    <button
+                        onClick={handleAgentWebBlockedSignOut}
+                        className="mt-6 w-full inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium text-center text-white bg-blue-600 rounded-lg hover:bg-blue-700 focus:ring-4 focus:ring-blue-300 dark:focus:ring-blue-900">
+                        Sign Out
+                    </button>
+                </div>
+            </div>
+        );
     }
     
     const displayName = userData?.displayName || user?.displayName || user?.email;
