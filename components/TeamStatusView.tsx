@@ -35,6 +35,13 @@ const getStatusIndicator = (status: WorkLog['status']) => {
     }
 };
 
+const normalizeStatus = (raw: any): WorkLog['status'] => {
+    const val = String(raw || '').toLowerCase();
+    if (val === 'working' || val === 'online' || val === 'active') return 'working';
+    if (val === 'on_break' || val === 'break') return 'on_break';
+    return 'clocked_out';
+};
+
 const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable = false, canControlRecording = false }) => {
     const [isMinimized, setIsMinimized] = useState(false);
     const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
@@ -190,11 +197,13 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                         const isStale = typeof lastUpdateMs === 'number' ? (Date.now() - lastUpdateMs > 120000) : false;
                                         const isConnected = agentStatus?.isDesktopConnected === true && !isStale;
                                         const remoteStatus = agentStatus?.status;
-                                        const displayStatus = isStale
-                                            ? 'offline'
-                                            : ((remoteStatus && ['working', 'online'].includes(remoteStatus) && agentStatus?.manualBreak !== true)
-                                                ? 'working'
-                                                : log.status);
+                                        const displayStatus = normalizeStatus(
+                                            isStale
+                                                ? 'clocked_out'
+                                                : ((remoteStatus && ['working', 'online'].includes(remoteStatus) && agentStatus?.manualBreak !== true)
+                                                    ? 'working'
+                                                    : log.status)
+                                        );
                                         const displayRecording = isConnected && agentStatus?.isRecording === true;
 
                                         return (
