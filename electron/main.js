@@ -1221,7 +1221,13 @@ async function fetchDisplayName(uid) {
 
 // ---------- ADMIN SETTINGS SYNC ----------
 function applyAdminSettings(next) {
-  cachedAdminSettings = next || {};
+  // Normalize autoClockOutEnabled to a strict boolean to avoid truthy string issues
+  const normalizedAutoClockOutEnabled = next?.autoClockOutEnabled === true;
+
+  cachedAdminSettings = {
+    ...next,
+    autoClockOutEnabled: normalizedAutoClockOutEnabled
+  };
   log("adminSettings updated:", cachedAdminSettings);
   persistAdminSettingsCache(cachedAdminSettings);
 
@@ -1262,7 +1268,8 @@ function applyAdminSettings(next) {
     }
   }
 
-  if (cachedAdminSettings?.autoClockOutEnabled) {
+  // Start/stop poller based on normalized flag
+  if (cachedAdminSettings.autoClockOutEnabled) {
     startAutoClockOutWatcher();
   } else {
     stopAutoClockOutWatcher();
@@ -1539,7 +1546,8 @@ const buildDateFromComponents = (dateKey, timeStr, timezone, isOvernight) => {
 
 const buildDateFromSlot = (slot, dateKey) => {
   if (!slot?.shiftEndTime) return null;
-  const timezone = slot.timezone || getOrganizationTimezone();
+  // Always use organization timezone for auto clock-out calculations
+  const timezone = getOrganizationTimezone();
   return buildDateFromComponents(dateKey, slot.shiftEndTime, timezone, Boolean(slot.isOvernightShift));
 };
 
@@ -1571,6 +1579,8 @@ function startAutoClockOutWatcher() {
     // check every 60 seconds
     autoClockOutInterval = setInterval(async () => {
       try {
+        // Guard against stale intervals when the setting is turned off
+        if (!cachedAdminSettings?.autoClockOutEnabled) return;
         const target = getAutoClockTargetDate();
         if (!target) return;
         const now = new Date();
@@ -1605,6 +1615,10 @@ function stopAutoClockOutWatcher() {
 async function performAutoClockOut() {
   try {
     if (!currentUid) return;
+    if (!cachedAdminSettings?.autoClockOutEnabled) {
+      log("[autoClockOut] skipped because setting is disabled");
+      return;
+    }
     log("[autoClockOut] performing auto clock out for uid:", currentUid);
 
     // Stop recording if active
