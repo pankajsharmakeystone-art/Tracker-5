@@ -414,7 +414,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             const remoteManualBreak = desktopStatus?.manualBreak === true;
             const lastUpdateRaw = desktopStatus?.lastUpdate;
             const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
-            const isStale = typeof lastUpdateMs === 'number' ? (Date.now() - lastUpdateMs > 120000) : false;
+            const isStale = false; // show the Firestore status as-is; no stale override
             const isActive = log.status !== 'clocked_out';
             const isZombie = isSessionStale(log) && isActive;
             
@@ -450,11 +450,10 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 ? computedLateMinutes
                 : (typeof log.lateMinutes === 'number' ? Math.round(log.lateMinutes) : 0);
 
-            const effectiveStatus: WorkLog['status'] = isStale
-                ? 'clocked_out'
-                : ((remoteStatus && ['working', 'online'].includes(remoteStatus) && !remoteManualBreak)
+            const effectiveStatus: WorkLog['status'] =
+                (remoteStatus && ['working', 'online'].includes(remoteStatus) && !remoteManualBreak)
                     ? 'working'
-                    : normalizeStatus(log.status));
+                    : normalizeStatus(log.status);
 
             return {
                 ...log,
@@ -468,8 +467,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 lateMinutes,
                 __desktop: {
                     isStale,
-                    isConnected: desktopStatus?.isDesktopConnected === true && !isStale,
-                    isRecording: desktopStatus?.isRecording === true && !isStale
+                    isConnected: desktopStatus?.isDesktopConnected === true,
+                    isRecording: desktopStatus?.isRecording === true
                 }
             };
         });
