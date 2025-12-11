@@ -402,6 +402,9 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     // Calculate live values
     const agents = useMemo(() => {
         return rawLogs.map(log => {
+            const desktopStatus = agentStatuses?.[log.userId];
+            const remoteStatus = desktopStatus?.status;
+            const remoteManualBreak = desktopStatus?.manualBreak === true;
             const isActive = log.status !== 'clocked_out';
             const isZombie = isSessionStale(log) && isActive;
             
@@ -437,8 +440,13 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 ? computedLateMinutes
                 : (typeof log.lateMinutes === 'number' ? Math.round(log.lateMinutes) : 0);
 
+            const effectiveStatus = (remoteStatus && ['working', 'online'].includes(remoteStatus) && !remoteManualBreak)
+                ? 'working'
+                : log.status;
+
             return {
                 ...log,
+                status: effectiveStatus,
                 displayWork: totalWork,
                 displayBreak: totalBreak,
                 manualBreakSeconds: manualSeconds,
@@ -448,7 +456,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 lateMinutes
             };
         });
-    }, [rawLogs, now, selectedDate, organizationTimezone]);
+    }, [rawLogs, now, selectedDate, organizationTimezone, agentStatuses]);
 
     const handleForceClose = async (log: WorkLog) => {
         if (window.confirm("Force close this session? This marks it as clocked out at the last active time.")) {

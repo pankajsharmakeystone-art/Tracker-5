@@ -407,6 +407,31 @@ async function reconcileRecordingAfterRegister(uid) {
   }
 }
 
+async function reassertDesktopStatus(uid) {
+  if (!uid) return;
+  try {
+    const snap = await db.collection('agentStatus').doc(uid).get();
+    if (!snap.exists) return;
+    const data = snap.data() || {};
+    const status = String(data.status || '').toLowerCase();
+    const manualBreak = data.manualBreak === true;
+    // Only refresh when the server already thinks we're online/working and not on manual break
+    if (manualBreak) return;
+    if (status === 'working' || status === 'online') {
+      await db.collection('agentStatus').doc(uid).set({
+        status: 'online',
+        manualBreak: false,
+        breakStartedAt: FieldValue.delete(),
+        isIdle: false,
+        isDesktopConnected: true,
+        lastUpdate: FieldValue.serverTimestamp()
+      }, { merge: true }).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('[reassertDesktopStatus] failed', err?.message || err);
+  }
+}
+
 const buildDesktopStatusMetadata = () => ({
   lastUpdate: FieldValue.serverTimestamp(),
   appVersion: app.getVersion(),
@@ -1732,6 +1757,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
     await flushPendingAgentStatuses();
 
     await reconcileRecordingAfterRegister(uid);
+    await reassertDesktopStatus(uid);
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
     log("Registered uid:", uid);

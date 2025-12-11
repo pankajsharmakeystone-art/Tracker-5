@@ -183,10 +183,15 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                         const duration = (log.status === 'working' || log.status === 'on_break' || (log.status as any) === 'break') && log.lastEventTimestamp
                                             ? formatDuration(Math.max(0, Math.floor((now - (log.lastEventTimestamp as Timestamp).toDate().getTime()) / 1000)))
                                             : null;
-                                        
+                                    
                                         const agentStatus = agentStatuses[log.userId];
                                         const isConnected = agentStatus?.isDesktopConnected === true;
                                         const isRecording = agentStatus?.isRecording === true;
+                                        const remoteStatus = agentStatus?.status;
+                                        const displayStatus = (remoteStatus && ['working', 'online'].includes(remoteStatus) && agentStatus?.manualBreak !== true)
+                                            ? 'working'
+                                            : log.status;
+                                        const displayRecording = isRecording === true;
 
                                         return (
                                             <div 
@@ -208,7 +213,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                         <div className="flex items-center gap-2 w-32 justify-center">
                                                             <button
                                                                 onClick={() => handleStartRecording(log.userId)}
-                                                                disabled={!isConnected || isRecording}
+                                                                disabled={!isConnected || displayRecording}
                                                                 className="p-1.5 bg-blue-100 text-blue-600 rounded hover:bg-blue-200 disabled:opacity-50 disabled:cursor-not-allowed dark:bg-blue-900/50 dark:text-blue-300 dark:hover:bg-blue-900"
                                                                 title="Start Recording"
                                                             >
@@ -216,7 +221,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                             </button>
                                                             <button
                                                                 onClick={() => handleStopRecording(log.userId)}
-                                                                disabled={!isConnected || !isRecording}
+                                                                disabled={!isConnected || !displayRecording}
                                                                 className="p-1.5 bg-red-100 text-red-600 rounded hover:bg-red-200 disabled:opacity-50 disabled:cursor-not-allowed dark:bg-red-900/50 dark:text-red-300 dark:hover:bg-red-900"
                                                                 title="Stop Recording"
                                                             >
@@ -226,7 +231,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                     )}
 
                                                     <div className="flex items-center gap-4 w-32 justify-end">
-                                                        {getStatusIndicator(log.status)}
+                                                        {getStatusIndicator(displayStatus as any)}
                                                         <span className="font-mono text-sm text-gray-500 dark:text-gray-400 w-16 text-right">
                                                             {duration || '--:--'}
                                                         </span>
