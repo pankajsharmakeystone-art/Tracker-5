@@ -10,6 +10,7 @@ const luxon_1 = require("luxon");
 admin.initializeApp();
 const db = admin.firestore();
 const DEFAULT_TIMEZONE = "Asia/Kolkata";
+const DEFAULT_AUTO_CLOCK_GRACE_MINUTES = 10;
 let cachedTimezone = DEFAULT_TIMEZONE;
 let lastTimezoneFetch = 0;
 const getOrganizationTimezone = async () => {
@@ -41,11 +42,14 @@ const buildShiftBoundary = (logStartDate, timeStr, useOvernight, timezone) => {
     if (Number.isNaN(hour) || Number.isNaN(minute))
         return null;
     const base = luxon_1.DateTime.fromJSDate(logStartDate, { zone: timezone || DEFAULT_TIMEZONE });
-    const referenceDay = useOvernight ? base.plus({ days: 1 }) : base;
-    return referenceDay
-        .set({ hour, minute, second: 0, millisecond: 0 })
-        .toUTC()
-        .toJSDate();
+    let referenceDay = useOvernight ? base.plus({ days: 1 }) : base;
+    let target = referenceDay.set({ hour, minute, second: 0, millisecond: 0 });
+    // Safety: if the computed shift end is not after the start (common when overnight flag is missing)
+    // bump it to the next day to avoid back-dated clock-outs like 00:00 durations.
+    if (target <= base) {
+        target = target.plus({ days: 1 });
+    }
+    return target.toUTC().toJSDate();
 };
 const inferProjectId = () => {
     if (process.env.GCLOUD_PROJECT)
@@ -390,6 +394,18 @@ exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", 
     var _a;
     const now = new Date();
     const organizationTimezone = await getOrganizationTimezone();
+    const adminSettingsSnap = await db.collection("adminSettings").doc("global").get();
+    const adminSettings = adminSettingsSnap.exists ? adminSettingsSnap.data() : {};
+    const autoClockOutEnabled = (adminSettings === null || adminSettings === void 0 ? void 0 : adminSettings.autoClockOutEnabled) === true;
+    if (!autoClockOutEnabled) {
+        console.log("[autoClockOut] Skipping: autoClockOutEnabled is false");
+        return;
+    }
+    const autoClockGraceMinutesRaw = typeof adminSettings.autoClockGraceMinutes === "number"
+        ? adminSettings.autoClockGraceMinutes
+        : DEFAULT_AUTO_CLOCK_GRACE_MINUTES;
+    const autoClockGraceMinutes = autoClockGraceMinutesRaw < 0 ? 0 : autoClockGraceMinutesRaw;
+    const autoClockGraceMs = autoClockGraceMinutes * 60 * 1000;
     const snapshot = await db.collection("worklogs")
         .where("status", "in", ["working", "on_break", "break"])
         .get();
@@ -418,7 +434,8 @@ exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", 
         const scheduledEnd = (slot === null || slot === void 0 ? void 0 : slot.shiftEndTime) || data.scheduledEnd;
         if (!scheduledEnd)
             continue;
-        const timezoneForLog = (slot === null || slot === void 0 ? void 0 : slot.timezone) || organizationTimezone;
+        // Always use the organization timezone for schedule calculations
+        const timezoneForLog = organizationTimezone;
         const useOvernight = (_a = slot === null || slot === void 0 ? void 0 : slot.isOvernightShift) !== null && _a !== void 0 ? _a : shouldTreatAsOvernight(data);
         const shiftEndDate = buildShiftBoundary(logStartDate, scheduledEnd, useOvernight, timezoneForLog);
         if (!shiftEndDate)
@@ -428,6 +445,20 @@ exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", 
         const shiftEndTs = admin.firestore.Timestamp.fromDate(shiftEndDate);
         const shiftEndMillis = shiftEndDate.getTime();
         const lastEventMillis = getTimestampMillis(data.lastEventTimestamp);
+        const msSinceLastEvent = lastEventMillis != null ? (now.getTime() - lastEventMillis) : null;
+        const activitiesArray = Array.isArray(data.activities) ? data.activities : [];
+        const lastActivity = activitiesArray.length ? activitiesArray[activitiesArray.length - 1] : null;
+        const hasOpenActivity = Boolean(lastActivity && !lastActivity.endTime);
+        if (hasOpenActivity && msSinceLastEvent != null && msSinceLastEvent < autoClockGraceMs) {
+            console.log("[autoClockOut] Skipping due to recent activity", {
+                logId: docSnap.id,
+                userId: data.userId,
+                shiftEnd: shiftEndDate.toISOString(),
+                msSinceLastEvent,
+                graceMs: autoClockGraceMs
+            });
+            continue;
+        }
         const normalizedStatus = (data.status || "working").toString().toLowerCase();
         let workDelta = 0;
         let breakDelta = 0;
@@ -460,6 +491,13 @@ exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", 
         if (updatedBreaks) {
             updates.breaks = updatedBreaks;
         }
+        console.log("[autoClockOut] Closing session", {
+            logId: docSnap.id,
+            userId: data.userId,
+            shiftEnd: shiftEndDate.toISOString(),
+            autoClockGraceMinutes,
+            msSinceLastEvent
+        });
         batch.update(workLogRef, updates);
         batch.set(db.collection("agentStatus").doc(data.userId), {
             status: "offline",

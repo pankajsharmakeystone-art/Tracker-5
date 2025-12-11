@@ -452,7 +452,12 @@ export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async () => 
   const now = new Date();
   const organizationTimezone = await getOrganizationTimezone();
   const adminSettingsSnap = await db.collection("adminSettings").doc("global").get();
-  const adminSettings = adminSettingsSnap.exists ? (adminSettingsSnap.data() as { autoClockGraceMinutes?: number }) : {};
+  const adminSettings = adminSettingsSnap.exists ? (adminSettingsSnap.data() as { autoClockGraceMinutes?: number; autoClockOutEnabled?: boolean }) : {};
+  const autoClockOutEnabled = adminSettings?.autoClockOutEnabled === true;
+  if (!autoClockOutEnabled) {
+    console.log("[autoClockOut] Skipping: autoClockOutEnabled is false");
+    return;
+  }
   const autoClockGraceMinutesRaw = typeof adminSettings.autoClockGraceMinutes === "number"
     ? adminSettings.autoClockGraceMinutes
     : DEFAULT_AUTO_CLOCK_GRACE_MINUTES;
@@ -488,7 +493,8 @@ export const autoClockOutAtShiftEnd = onSchedule("every 5 minutes", async () => 
     const scheduledEnd: string | undefined = slot?.shiftEndTime || data.scheduledEnd;
     if (!scheduledEnd) continue;
 
-    const timezoneForLog = slot?.timezone || organizationTimezone;
+    // Always use the organization timezone for schedule calculations
+    const timezoneForLog = organizationTimezone;
     const useOvernight = slot?.isOvernightShift ?? shouldTreatAsOvernight(data);
     const shiftEndDate = buildShiftBoundary(logStartDate, scheduledEnd, useOvernight, timezoneForLog);
     if (!shiftEndDate) continue;
