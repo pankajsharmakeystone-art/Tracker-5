@@ -536,8 +536,16 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         const status = agentStatuses?.[uid];
         const isConnected = status?.isDesktopConnected === true;
         const isRecording = status?.isRecording === true;
-        if (!isConnected) return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">No Desktop</span>;
-        if (isRecording) return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Rec On</span>;
+        const agentState = String(status?.status || '').toLowerCase();
+
+        // If offline/clocked_out or disconnected, recorder cannot be running
+        if (!isConnected || agentState === 'offline' || agentState === 'clocked_out') {
+            return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200">Rec Off</span>;
+        }
+
+        if (isRecording) {
+            return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Rec On</span>;
+        }
         return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-200">Rec Off</span>;
     };
     
