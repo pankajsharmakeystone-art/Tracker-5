@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
 import { DateTime } from 'luxon';
-import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent } from '../services/db';
+import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, streamAllAgentStatuses } from '../services/db';
 import { useAuth } from '../hooks/useAuth';
 import type { WorkLog } from '../types';
 import Spinner from './Spinner';
@@ -334,6 +334,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const { userData } = useAuth();
     const [rawLogs, setRawLogs] = useState<WorkLog[]>([]);
     const [loading, setLoading] = useState(true);
+    const [agentStatuses, setAgentStatuses] = useState<Record<string, any>>({});
     const [editingLog, setEditingLog] = useState<WorkLog | null>(null);
     const [viewingLog, setViewingLog] = useState<WorkLog | null>(null);
     const [liveStreamAgent, setLiveStreamAgent] = useState<{ uid: string; displayName: string; teamId?: string } | null>(null);
@@ -376,6 +377,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     useEffect(() => {
         setLoading(true);
         let unsubscribe;
+        const unsubscribeStatuses = streamAllAgentStatuses((statuses) => setAgentStatuses(statuses || {}));
 
         if (isToday) {
             // Queries for: Today's logs + ANY active logs (including yesterday's)
@@ -393,6 +395,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
         return () => {
             if (unsubscribe) unsubscribe();
+            if (unsubscribeStatuses) unsubscribeStatuses();
         };
     }, [teamId, selectedDate, isToday]);
 
@@ -520,6 +523,15 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 return null;
         }
     };
+
+    const getRecordingIndicator = (uid: string) => {
+        const status = agentStatuses?.[uid];
+        const isConnected = status?.isDesktopConnected === true;
+        const isRecording = status?.isRecording === true;
+        if (!isConnected) return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">No Desktop</span>;
+        if (isRecording) return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Rec On</span>;
+        return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-200">Rec Off</span>;
+    };
     
     if (loading && !rawLogs.length) return <div className="p-8 flex justify-center"><Spinner /></div>;
 
@@ -575,6 +587,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                             <th scope="col" className="py-3 px-6">Work Duration</th>
                             <th scope="col" className="py-3 px-6">Manual Break</th>
                             <th scope="col" className="py-3 px-6">Idle Break</th>
+                            <th scope="col" className="py-3 px-6 text-center">Recorder</th>
                             <th scope="col" className="py-3 px-6">Actions</th>
                         </tr>
                     </thead>
@@ -611,6 +624,9 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                 </td>
                                 <td className="py-4 px-6 font-mono text-gray-600 dark:text-gray-300">
                                     {formatDuration(agent.idleBreakSeconds ?? 0)}
+                                </td>
+                                <td className="py-4 px-6 text-center">
+                                    {getRecordingIndicator(agent.userId)}
                                 </td>
                                 <td className="py-4 px-6 flex gap-2 items-center">
                                     <button
@@ -660,7 +676,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                             </tr>
                         )) : (
                             <tr>
-                                <td colSpan={9} className="py-4 px-6 text-center text-gray-500 dark:text-gray-400">
+                                <td colSpan={10} className="py-4 px-6 text-center text-gray-500 dark:text-gray-400">
                                     No activity found.
                                 </td>
                             </tr>

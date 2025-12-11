@@ -35,17 +35,6 @@ const getStatusIndicator = (status: WorkLog['status']) => {
     }
 };
 
-const getRecordingIndicator = (opts: { isConnected?: boolean; isRecording?: boolean }) => {
-    const { isConnected, isRecording } = opts;
-    if (!isConnected) {
-        return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">No Desktop</span>;
-    }
-    if (isRecording) {
-        return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Rec On</span>;
-    }
-    return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-200">Rec Off</span>;
-};
-
 const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable = false, canControlRecording = false }) => {
     const [isMinimized, setIsMinimized] = useState(false);
     const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
@@ -184,7 +173,6 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                     <div className="flex justify-between items-center text-sm font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">
                                         <span>Team Member</span>
                                         <div className="flex items-center gap-4">
-                                            <span className="w-28 text-center">Recorder</span>
                                             {showRecordingControls && <span className="w-32 text-center">Controls</span>}
                                             <span className="w-32 text-right">Status / Duration</span>
                                         </div>
@@ -216,9 +204,6 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                 </div>
                                                 
                                                 <div className="flex items-center gap-4 flex-wrap justify-end">
-                                                    <div className="flex items-center justify-center w-28">
-                                                        {getRecordingIndicator({ isConnected, isRecording })}
-                                                    </div>
                                                     {showRecordingControls && (
                                                         <div className="flex items-center gap-2 w-32 justify-center">
                                                             <button
