@@ -308,8 +308,7 @@ let autoResumeRetryDelayMs = AUTO_RESUME_BASE_DELAY_MS;
 let autoResumeRetryTimer = null;
 let lastStatusWriteMs = Date.now();
 let statusHealthInterval = null;
-const HEARTBEAT_MIN_INTERVAL_MS = 60000; // throttle heartbeat writes to ~1/min
-let lastHeartbeatWriteMs = 0;
+let lastDesktopToken = null;
 
 function clearAutoResumeRetryTimer() {
   if (autoResumeRetryTimer) {
@@ -325,21 +324,10 @@ function resetAutoResumeRetry() {
 
 function recordStatusWriteSuccess() {
   lastStatusWriteMs = Date.now();
-  lastHeartbeatWriteMs = Date.now();
 }
 
 function startStatusHealthCheck() {
-  if (statusHealthInterval) return;
-  statusHealthInterval = setInterval(() => {
-    if (!currentUid) return;
-    const age = Date.now() - lastStatusWriteMs;
-    if (age > 300000) { // 5 minutes without a successful status write
-      log('[status-watchdog] no recent status write, reasserting desktop status');
-      reassertDesktopStatus(currentUid);
-      flushPendingAgentStatuses();
-      recordStatusWriteSuccess();
-    }
-  }, 30000); // check every 30s
+  // watchdog disabled for transitions-only flow
 }
 
 function stopStatusHealthCheck() {
@@ -347,6 +335,31 @@ function stopStatusHealthCheck() {
     clearInterval(statusHealthInterval);
     statusHealthInterval = null;
   }
+}
+
+async function ensureDesktopAuth() {
+  try {
+    if (!currentUid) {
+      log('[ensureDesktopAuth] no currentUid');
+      return false;
+    }
+    const user = clientAuth.currentUser;
+    if (user && user.uid === currentUid) return true;
+    if (lastDesktopToken) {
+      try {
+        await clientAuth.signInWithCustomToken(lastDesktopToken);
+        log('[ensureDesktopAuth] re-signed in with cached desktop token');
+        return true;
+      } catch (err) {
+        console.warn('[ensureDesktopAuth] reauth failed', err?.message || err);
+      }
+    } else {
+      log('[ensureDesktopAuth] missing desktop token for reauth');
+    }
+  } catch (err) {
+    console.warn('[ensureDesktopAuth] error', err?.message || err);
+  }
+  return false;
 }
 
 // Dropbox token management
@@ -599,6 +612,11 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
 async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
   if (!uid) return;
+  const authed = await ensureDesktopAuth();
+  if (!authed) {
+    log('[pushIdleStatus] auth missing, skipping write');
+    return;
+  }
   try {
     await db.collection("agentStatus").doc(uid)
       .set({
@@ -607,6 +625,7 @@ async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
         idleSecs,
         idleReason: reason || null,
         lockedBySystem: reason === 'system_lock',
+        isDesktopConnected: true,
         ...buildDesktopStatusMetadata()
       }, { merge: true });
     recordStatusWriteSuccess();
@@ -615,6 +634,11 @@ async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
 
 async function pushActiveStatus(uid, { idleSecs } = {}) {
   if (!uid) return;
+  const authed = await ensureDesktopAuth();
+  if (!authed) {
+    log('[pushActiveStatus] auth missing, skipping write');
+    return;
+  }
   try {
     await db.collection("agentStatus").doc(uid)
       .set({
@@ -623,6 +647,7 @@ async function pushActiveStatus(uid, { idleSecs } = {}) {
         idleSecs,
         idleReason: FieldValue.delete(),
         lockedBySystem: false,
+        isDesktopConnected: true,
         ...buildDesktopStatusMetadata()
       }, { merge: true });
     recordStatusWriteSuccess();
@@ -1427,19 +1452,6 @@ function startAgentStatusLoop(uid) {
     try {
       // If not clocked in → only send heartbeat, no idle logic
       if (!agentClockedIn) {
-        const now = Date.now();
-        if (now - lastHeartbeatWriteMs >= HEARTBEAT_MIN_INTERVAL_MS) {
-          try {
-            await db.collection("agentStatus").doc(uid).set({
-              isDesktopConnected: !!currentUid,
-              lastUpdate: FieldValue.serverTimestamp(),
-              appVersion: app.getVersion(),
-              platform: process.platform,
-              machineName: os.hostname()
-            }, { merge: true });
-            recordStatusWriteSuccess();
-          } catch (_) {}
-        }
         return;
       }
 
@@ -1530,20 +1542,7 @@ function startAgentStatusLoop(uid) {
     return;
   }
 
-      // No transition -> low-rate heartbeat to keep presence fresh without spamming writes
-      const now = Date.now();
-      if (now - lastHeartbeatWriteMs >= HEARTBEAT_MIN_INTERVAL_MS) {
-        try {
-          await db.collection("agentStatus").doc(uid).set({
-            isDesktopConnected: true,
-            lastUpdate: FieldValue.serverTimestamp(),
-            appVersion: app.getVersion(),
-            platform: process.platform,
-            machineName: os.hostname()
-          }, { merge: true });
-          recordStatusWriteSuccess();
-        } catch (_) {}
-      }
+      // No transition -> do nothing (transitions-only)
 
     } catch(e){ console.error("[statusLoop] error", e); }
   }, 3000);
@@ -1782,6 +1781,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
     if (!uid) return { success: false, error: "no-uid" };
 
     if (desktopToken) {
+      lastDesktopToken = desktopToken;
       try {
         if (clientAuth.currentUser && clientAuth.currentUser.uid !== uid) {
           await clientAuth.signOut().catch(() => undefined);
@@ -1865,6 +1865,12 @@ async function applyAgentStatus(status) {
     throw new Error('no-uid');
   }
 
+  const authed = await ensureDesktopAuth();
+  if (!authed) {
+    log('[applyAgentStatus] auth missing, skipping');
+    return { success: false, error: 'auth-missing' };
+  }
+
   log('[applyAgentStatus] received', status, {
     allowRecording: cachedAdminSettings?.allowRecording,
     recordingMode: cachedAdminSettings?.recordingMode,
@@ -1880,6 +1886,7 @@ async function applyAgentStatus(status) {
       manualBreak: true,
       breakStartedAt: FieldValue.serverTimestamp(),
       isIdle: false,
+      isDesktopConnected: true,
       lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
 
@@ -1935,7 +1942,7 @@ async function applyAgentStatus(status) {
     if (recordingMode === 'auto' && allowRecording) {
       if (!isRecordingActive) {
         isRecordingActive = true;
-        await db.collection('agentStatus').doc(currentUid).set({ isRecording: true }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
+        await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, isDesktopConnected: true }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
         showRecordingPopup('Recording started');
         startBackgroundRecording();
       } else {
