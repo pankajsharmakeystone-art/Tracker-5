@@ -2477,7 +2477,7 @@ function scheduleAutoUpdateCheck() {
 
   const delay = Number(process.env.AUTO_UPDATE_DELAY_MS || 3000);
   setTimeout(() => {
-    autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+    autoUpdater.checkForUpdates().catch((error) => {
       emitAutoUpdateStatus("error", { message: error?.message || String(error) });
     });
   }, isNaN(delay) ? 3000 : delay);
