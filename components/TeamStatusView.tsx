@@ -192,17 +192,12 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                             : null;
                                     
                                         const agentStatus = agentStatuses[log.userId];
-                                        const lastUpdateRaw = agentStatus?.lastUpdate;
-                                        const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
-                                        const isStale = typeof lastUpdateMs === 'number' ? (Date.now() - lastUpdateMs > 120000) : false;
-                                        const isConnected = agentStatus?.isDesktopConnected === true && !isStale;
+                                        const isConnected = agentStatus?.isDesktopConnected === true;
                                         const remoteStatus = agentStatus?.status;
                                         const displayStatus = normalizeStatus(
-                                            isStale
-                                                ? 'clocked_out'
-                                                : ((remoteStatus && ['working', 'online'].includes(remoteStatus) && agentStatus?.manualBreak !== true)
-                                                    ? 'working'
-                                                    : log.status)
+                                            agentStatus?.manualBreak
+                                                ? 'on_break'
+                                                : (remoteStatus || log.status)
                                         );
                                         const displayRecording = isConnected && agentStatus?.isRecording === true;
 
