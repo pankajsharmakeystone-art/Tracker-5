@@ -14,6 +14,7 @@ const DashboardPage: React.FC = () => {
     const navigate = useNavigate();
     const [showError, setShowError] = useState(false);
     const [autoClockOutMessage, setAutoClockOutMessage] = useState<string | null>(null);
+    const [signingOut, setSigningOut] = useState(false);
     const [agentWebBlocked, setAgentWebBlocked] = useState(false);
     const currentUid = userData?.uid || user?.uid || null;
     const currentUidRef = useRef<string | null>(currentUid);
@@ -87,36 +88,45 @@ const DashboardPage: React.FC = () => {
     };
 
     const handleSignOutClick = async () => {
-        if (window.desktopAPI && window.desktopAPI.requestSignOut) {
-            try {
-                await window.desktopAPI.requestSignOut();
-            } catch (error) {
-                console.error("Error requesting sign out status:", error);
+        if (signingOut) return;
+        setSigningOut(true);
+        try {
+            if (window.desktopAPI && window.desktopAPI.requestSignOut) {
+                try {
+                    await window.desktopAPI.requestSignOut();
+                } catch (error) {
+                    console.error("Error requesting sign out status:", error);
+                }
             }
+            // Don’t let a hung desktop IPC block logout; race with a timeout
+            const desktopClockOut = (async () => {
+                if (window.desktopAPI?.clockOutAndSignOut) {
+                    try {
+                        await window.desktopAPI.clockOutAndSignOut();
+                    } catch (error) {
+                        console.error("Error performing desktop clock out and sign out:", error);
+                    }
+                }
+            })();
+            await Promise.race([desktopClockOut, new Promise((resolve) => setTimeout(resolve, 5000))]);
+
+            // Web-side clock out + logout
+            if (currentUid) {
+                 try {
+                     await performClockOut(currentUid);
+                 } catch (e) {
+                     console.error("Error performing DB clock out:", e);
+                 }
+            }
+            await performLogout();
+        } finally {
+            setSigningOut(false);
         }
-        await handleClockOutAndSignOut();
     };
 
+    // Kept for backward compatibility, but main sign-out flow now lives in handleSignOutClick
     const handleClockOutAndSignOut = async () => {
-        // 1. Notify Desktop
-        if (window.desktopAPI && window.desktopAPI.clockOutAndSignOut) {
-            try {
-                await window.desktopAPI.clockOutAndSignOut();
-            } catch (error) {
-                console.error("Error performing clock out and sign out:", error);
-            }
-        }
-        
-        // 2. Perform DB updates (Worklog, AgentStatus, UserDoc)
-        if (currentUid) {
-             try {
-                 await performClockOut(currentUid);
-             } catch (e) {
-                 console.error("Error performing DB clock out:", e);
-             }
-        }
-
-        await performLogout();
+        return handleSignOutClick();
     };
 
     if (showError) {
@@ -214,8 +224,9 @@ const DashboardPage: React.FC = () => {
                      <div className="flex items-center gap-4">
                         <button
                             onClick={handleSignOutClick}
-                            className="w-full sm:w-auto inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium text-center text-white bg-red-600 rounded-lg hover:bg-red-700 focus:ring-4 focus:ring-red-300 dark:focus:ring-red-900">
-                            Sign Out
+                            disabled={signingOut}
+                            className="w-full sm:w-auto inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium text-center text-white bg-red-600 rounded-lg hover:bg-red-700 focus:ring-4 focus:ring-red-300 dark:focus:ring-red-900 disabled:opacity-60 disabled:cursor-not-allowed">
+                            {signingOut ? 'Signing Out…' : 'Sign Out'}
                         </button>
                     </div>
                 </div>

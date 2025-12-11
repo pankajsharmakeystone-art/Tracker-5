@@ -739,6 +739,9 @@ function createMainWindow() {
     icon: APP_ICON
   });
 
+  // Ensure live stream captures and other media requests are auto-approved in the main renderer
+  ensureMediaPermissions(mainWindow.webContents);
+
   // Load hosted app to keep origin authorized for Firebase OAuth; fallback to local file if it fails.
   const hostedUrl = `${APP_BASE_URL}/${DEFAULT_LOGIN_ROUTE_HASH}`;
   mainWindow.loadURL(hostedUrl).catch(() => {
