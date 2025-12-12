@@ -342,6 +342,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [organizationTimezone, setOrganizationTimezone] = useState<string>('UTC');
     const [forceLogoutPending, setForceLogoutPending] = useState<string | null>(null);
     const [reconnectPending, setReconnectPending] = useState<string | null>(null);
+    const reconnectRequestRef = React.useRef<{ uid: string; requestId: string } | null>(null);
+    const reconnectTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     
     const [selectedDate, setSelectedDate] = useState(() => {
         const d = new Date();
@@ -528,14 +530,46 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         if (!log?.userId) return;
         setReconnectPending(log.userId);
         try {
-            await requestDesktopReconnect(log.userId);
+            const requestId = await requestDesktopReconnect(log.userId);
+            if (!requestId) return;
+            reconnectRequestRef.current = { uid: log.userId, requestId };
+
+            // Implicit "ping": if no ack arrives soon, treat desktop as offline/unresponsive.
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+                reconnectTimeoutRef.current = null;
+            }
+            reconnectTimeoutRef.current = setTimeout(() => {
+                const pending = reconnectRequestRef.current;
+                if (!pending || pending.uid !== log.userId || pending.requestId !== requestId) return;
+                setReconnectPending(null);
+                reconnectRequestRef.current = null;
+                reconnectTimeoutRef.current = null;
+                alert('Desktop appears offline or not responding.');
+            }, 10000);
         } catch (error) {
             console.error('[LiveMonitoringDashboard] Failed to request desktop reconnect', error);
             alert('Failed to request desktop reconnect. Please try again.');
         } finally {
-            setReconnectPending(null);
+            // Cleared when ack arrives or timeout triggers.
         }
     };
+
+    useEffect(() => {
+        const pending = reconnectRequestRef.current;
+        if (!pending) return;
+        if (reconnectPending !== pending.uid) return;
+        const status = agentStatuses?.[pending.uid];
+        if (status?.reconnectAckId && status.reconnectAckId === pending.requestId) {
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+                reconnectTimeoutRef.current = null;
+            }
+            reconnectRequestRef.current = null;
+            setReconnectPending(null);
+            alert('Reconnect successful.');
+        }
+    }, [agentStatuses, reconnectPending]);
 
     const closeLiveStreamModal = () => {
         setIsLiveModalOpen(false);
