@@ -469,7 +469,16 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
     Object.keys(logData).forEach(key => logData[key] === undefined && delete logData[key]);
 
     await setDoc(newLogRef, logData, { merge: true });
-    await updateAgentStatus(uid, 'online');
+
+    // If an admin previously issued a force logout while the desktop was offline,
+    // the request fields can remain stuck and keep the desktop presence showing offline.
+    // Clear force-logout metadata on a successful clock-in.
+    await updateAgentStatus(uid, 'online', {
+        forceLogoutRequestId: deleteField(),
+        forceLogoutRequestedAt: deleteField(),
+        forceLogoutRequestedBy: deleteField(),
+        forceLogoutCompletedAt: deleteField()
+    });
 };
 
 /**

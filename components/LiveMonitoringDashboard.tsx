@@ -410,8 +410,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const agents = useMemo(() => {
         return rawLogs.map(log => {
             const desktopStatus = agentStatuses?.[log.userId];
-            const remoteStatus = desktopStatus?.status;
-            const remoteManualBreak = desktopStatus?.manualBreak === true;
             const lastUpdateRaw = desktopStatus?.lastUpdate;
             const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
             const isStale = false; // show the Firestore status as-is; no stale override
@@ -450,10 +448,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 ? computedLateMinutes
                 : (typeof log.lateMinutes === 'number' ? Math.round(log.lateMinutes) : 0);
 
-            const effectiveStatus: WorkLog['status'] =
-                (remoteStatus && ['working', 'online'].includes(remoteStatus) && !remoteManualBreak)
-                    ? 'working'
-                    : normalizeStatus(log.status);
+            // Status must come from worklogs only (single source of truth).
+            const effectiveStatus: WorkLog['status'] = normalizeStatus(log.status);
 
             return {
                 ...log,

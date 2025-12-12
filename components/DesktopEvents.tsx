@@ -1,6 +1,8 @@
 
 import React, { useEffect, useRef } from 'react';
+import { signOut } from 'firebase/auth';
 import { startDesktopRecording, stopDesktopRecording } from '../desktop/recorder';
+import { auth } from '../services/firebase';
 
 interface DesktopSource {
   id: string;
@@ -53,6 +55,18 @@ const DesktopEvents: React.FC = () => {
     window.desktopAPI.onCommandStopRecording(() => {
       console.log("IPC Command: Stop Recording");
       stopDesktopRecording();
+    });
+
+    // Listener for forced sign-out events from the desktop main process.
+    // Without this, the renderer can remain authenticated, preventing the desktop bridge
+    // from re-registering in the same app session after a force logout.
+    window.desktopAPI.onSignedOut?.(async ({ reason }: { reason?: string } = {}) => {
+      console.log("IPC Event: Signed Out", reason || '');
+      try {
+        await signOut(auth);
+      } catch (e) {
+        console.error("Failed to sign out renderer after desktop sign-out", e);
+      }
     });
 
     listenersAttached.current = true;

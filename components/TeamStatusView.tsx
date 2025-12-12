@@ -193,12 +193,9 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                     
                                         const agentStatus = agentStatuses[log.userId];
                                         const isConnected = agentStatus?.isDesktopConnected === true;
-                                        const remoteStatus = agentStatus?.status;
-                                        const displayStatus = normalizeStatus(
-                                            agentStatus?.manualBreak
-                                                ? 'on_break'
-                                                : (remoteStatus || log.status)
-                                        );
+
+                                        // Status must come from worklogs only (single source of truth).
+                                        const displayStatus = normalizeStatus(log.status);
                                         const displayRecording = isConnected && agentStatus?.isRecording === true;
 
                                         return (

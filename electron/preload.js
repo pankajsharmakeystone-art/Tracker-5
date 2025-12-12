@@ -67,6 +67,14 @@ contextBridge.exposeInMainWorld("desktopAPI", {
     return () => ipcRenderer.removeListener("auto-clocked-out", handler);
   },
 
+  // signed-out notification (desktop forced logout / manual sign-out)
+  onSignedOut: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("signed-out", handler);
+    return () => ipcRenderer.removeListener("signed-out", handler);
+  },
+
   // basic ping
   ping: () => ipcRenderer.invoke("ping"),
 

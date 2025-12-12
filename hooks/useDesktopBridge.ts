@@ -14,6 +14,9 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
     let canceled = false;
     let unsubscribeSettings: (() => void) | null = null;
     let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let isRegistered = false;
+    let retryDelayMs = 3000;
 
     const safeClearHeartbeat = () => {
       if (heartbeat) {
@@ -22,8 +25,26 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
       }
     };
 
+    const safeClearRetry = () => {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+
+    const scheduleRetry = () => {
+      if (canceled) return;
+      if (retryTimer) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        void bootstrap();
+      }, retryDelayMs);
+      retryDelayMs = Math.min(retryDelayMs * 2, 30000);
+    };
+
     const bootstrap = async () => {
       try {
+        safeClearRetry();
         const token = await requestDesktopToken();
         if (canceled) return;
         if (!window.desktopAPI?.registerUid) return;
@@ -31,17 +52,31 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
         if (!result?.success) {
           throw new Error(result?.error || 'desktop-register-failed');
         }
+        isRegistered = true;
+        retryDelayMs = 3000;
       } catch (error) {
         console.error('[DesktopBridge] Failed to register desktop session:', error);
+        isRegistered = false;
+        scheduleRetry();
       }
     };
 
     bootstrap();
 
+    window.desktopAPI?.onRegistered?.(() => {
+      isRegistered = true;
+      retryDelayMs = 3000;
+      safeClearRetry();
+    });
+
     // Heartbeat: if ping fails, try re-registering to recover the desktop bridge
     heartbeat = setInterval(async () => {
       if (canceled) return;
       try {
+        if (!isRegistered) {
+          await bootstrap();
+          return;
+        }
         const pong = await window.desktopAPI?.ping?.();
         if (pong !== 'pong') {
           await bootstrap();
@@ -83,6 +118,7 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
     return () => {
       canceled = true;
       safeClearHeartbeat();
+      safeClearRetry();
       unsubscribeSettings?.();
       window.desktopAPI?.unregisterUid?.();
     };

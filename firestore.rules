@@ -5,15 +5,38 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isAdmin() {
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+
+    function hasRole(role) {
       return isSignedIn() && (
-        request.auth.token.role == 'admin' ||
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+        request.auth.token.role == role ||
+        userDoc(request.auth.uid).role == role
       );
     }
 
-    function targetUserId(doc) {
-      return doc.data.userId != null ? doc.data.userId : null;
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isManager() {
+      return hasRole('manager');
+    }
+
+    function teamsForUser(uid) {
+      let u = userDoc(uid);
+      return u.teamIds != null
+        ? u.teamIds
+        : (u.teamId != null ? [u.teamId] : []);
+    }
+
+    function isManagerOfUser(targetUid) {
+      return isManager() && teamsForUser(targetUid).hasAny(teamsForUser(request.auth.uid));
+    }
+
+    function isManagerOfTeam(teamId) {
+      return isManager() && teamsForUser(request.auth.uid).hasAny([teamId]);
     }
 
     match /adminSettings/{docId} {
@@ -25,17 +48,37 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
-      allow write: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == userId) || isManagerOfUser(userId);
+
+      // Managers may need to update limited operational fields for users on their team
+      // (e.g., during force logout / clock-out flows).
+      allow create: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow update: if isAdmin()
+        || (isSignedIn() && request.auth.uid == userId)
+        || (
+          isManagerOfUser(userId)
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            "isLoggedIn",
+            "activeSession",
+            "lastClockOut",
+            "sessionClearedAt"
+          ])
+        );
+      allow delete: if isAdmin();
     }
 
     match /worklogs/{logId} {
-      allow read, write: if isAdmin() || (
-        isSignedIn() && (
-          targetUserId(resource) == request.auth.uid ||
-          (request.resource != null && targetUserId(request.resource) == request.auth.uid)
-        )
-      );
+      allow read: if isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid)
+        || isManagerOfTeam(resource.data.teamId);
+
+      allow create: if isAdmin()
+        || (isSignedIn() && request.resource.data.userId == request.auth.uid);
+
+      // Allow managers to update logs for teams they manage (used by Monitoring actions like force logout).
+      allow update, delete: if isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid)
+        || isManagerOfTeam(resource.data.teamId);
     }
 
     match /schedules/{docId} {
@@ -46,6 +89,14 @@ service cloud.firestore {
     match /teams/{teamId} {
       allow read: if true;
       allow write: if isAdmin();
+    }
+
+    match /agentStatus/{uid} {
+      allow read, write: if isAdmin() || (isSignedIn() && request.auth.uid == uid) || isManagerOfUser(uid);
+    }
+
+    match /desktopCommands/{uid} {
+      allow read, write: if isAdmin() || (isSignedIn() && request.auth.uid == uid) || isManagerOfUser(uid);
     }
 
     match /{document=**} {

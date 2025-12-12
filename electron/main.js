@@ -554,6 +554,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   const notifyRenderer = options?.notifyRenderer !== false;
   const uid = currentUid;
+  const forceLogoutSource = options?.forceLogoutSource || null;
 
   agentClockedIn = false;
   stopAgentStatusLoop();
@@ -578,6 +579,42 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     isDesktopConnected: false,
     lastUpdate: FieldValue.serverTimestamp()
   }, { merge: true }).catch(()=>{});
+
+  // Keep the user profile in sync when desktop drives the clock-out/sign-out flow.
+  // (The web flow uses services/db.ts performClockOut(), but desktop can sign out independently.)
+  try {
+    await db.collection("users").doc(uid).set({
+      isLoggedIn: false,
+      activeSession: FieldValue.delete(),
+      lastClockOut: FieldValue.serverTimestamp(),
+      sessionClearedAt: FieldValue.serverTimestamp()
+    }, { merge: true });
+  } catch (e) {
+    log("[clockOutAndSignOutDesktop] failed to update users.lastClockOut", e?.message || e);
+  }
+
+  // If we were forced logged out (via desktopCommands or remote requestId), clear the flag(s)
+  // while we're still authenticated; otherwise these writes will fail after signOut and the
+  // command/request can remain stuck.
+  try {
+    await db.collection("desktopCommands").doc(uid).set({
+      forceLogout: false
+    }, { merge: true });
+  } catch (e) {
+    log("[forceLogout] failed to clear desktopCommands.forceLogout", e?.message || e);
+  }
+
+  try {
+    const clearPayload = {
+      forceLogoutRequestId: FieldValue.delete(),
+      forceLogoutRequestedAt: FieldValue.delete(),
+      forceLogoutRequestedBy: FieldValue.delete(),
+      forceLogoutCompletedAt: FieldValue.serverTimestamp()
+    };
+    await db.collection("agentStatus").doc(uid).set(clearPayload, { merge: true });
+  } catch (e) {
+    log("[forceLogout] failed to clear agentStatus forceLogout fields", e?.message || e);
+  }
 
   if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
   stopAgentStatusWatch();
@@ -803,9 +840,24 @@ function createMainWindow() {
   // Ensure live stream captures and other media requests are auto-approved in the main renderer
   ensureMediaPermissions(mainWindow.webContents);
 
-  // Load hosted app to keep origin authorized for Firebase OAuth; fallback to local file if it fails.
+  // Dev mode should load the local Vite dev server so changes take effect immediately.
+  // Production prefers the hosted app (OAuth-friendly) and falls back to the packaged build.
   const hostedUrl = `${APP_BASE_URL}/${DEFAULT_LOGIN_ROUTE_HASH}`;
-  mainWindow.loadURL(hostedUrl).catch(() => {
+  const devUrl = process.env.ELECTRON_START_URL || `http://localhost:5173/${DEFAULT_LOGIN_ROUTE_HASH}`;
+  const primaryUrl = isDev ? devUrl : hostedUrl;
+  const fallbackUrl = isDev ? hostedUrl : null;
+
+  mainWindow.loadURL(primaryUrl).catch(() => {
+    if (fallbackUrl) {
+      mainWindow.loadURL(fallbackUrl).catch(() => {
+        try {
+          mainWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: DEFAULT_LOGIN_ROUTE_HASH });
+        } catch (e) {
+          log('Failed to load hosted or local app', e?.message || e);
+        }
+      });
+      return;
+    }
     try {
       mainWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: DEFAULT_LOGIN_ROUTE_HASH });
     } catch (e) {
@@ -1295,11 +1347,12 @@ async function handleRemoteForceLogoutRequest(requestId) {
   forceLogoutRequestInFlight = true;
   log('[agentStatusWatch] Force logout request detected', requestId);
   try {
-    await clockOutAndSignOutDesktop('force_logout_remote', { notifyRenderer: true });
+    // Clear the remote request while we're still signed in so it doesn't get stuck.
+    await acknowledgeForceLogoutRequest(targetUid);
+    await clockOutAndSignOutDesktop('force_logout_remote', { notifyRenderer: true, forceLogoutSource: 'remote_request' });
   } catch (error) {
     console.error('[forceLogout] Failed to process remote request', error?.message || error);
   } finally {
-    await acknowledgeForceLogoutRequest(targetUid);
     forceLogoutRequestInFlight = false;
     lastForceLogoutRequestId = null;
   }
@@ -1372,12 +1425,10 @@ function applyAdminSettings(next) {
     }
   }
 
-  // Start/stop poller based on normalized flag
-  if (cachedAdminSettings.autoClockOutEnabled) {
-    startAutoClockOutWatcher();
-  } else {
-    stopAutoClockOutWatcher();
-  }
+  // Desktop-side auto clock-out has historically caused trouble (unexpected sign-outs, recording stops,
+  // and state mismatches). Auto clock-out is enforced server-side via the scheduled Cloud Function.
+  // Keep the desktop watcher disabled to avoid conflicting enforcement.
+  stopAutoClockOutWatcher();
 
 }
 
@@ -1413,8 +1464,9 @@ function startCommandsWatch(uid) {
 
     if (cmd.forceLogout) {
       log("command forceLogout received");
+      // Clear the command immediately while still authenticated; clockOutAndSignOutDesktop signs out.
+      await db.collection("desktopCommands").doc(uid).set({ forceLogout: false }, { merge: true }).catch(()=>{});
       await clockOutAndSignOutDesktop("force_logout", { notifyRenderer: true });
-      await db.collection("desktopCommands").doc(uid).update({ forceLogout: false }).catch(()=>{});
       return;
     }
 
@@ -1738,6 +1790,18 @@ async function performAutoClockOut() {
       lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(()=>{});
 
+    // Keep the user profile in sync on desktop-driven auto clock-out.
+    try {
+      await db.collection("users").doc(currentUid).set({
+        isLoggedIn: false,
+        activeSession: FieldValue.delete(),
+        lastClockOut: FieldValue.serverTimestamp(),
+        sessionClearedAt: FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (e) {
+      log("[performAutoClockOut] failed to update users.lastClockOut", e?.message || e);
+    }
+
     // inform renderer
     if (mainWindow) mainWindow.webContents.send("auto-clocked-out", { uid: currentUid });
 
@@ -1817,6 +1881,15 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     await reconcileRecordingAfterRegister(uid);
     await reassertDesktopStatus(uid);
+
+    // If a force-logout (desktopCommands/agentStatus) fired during registration,
+    // clockOutAndSignOutDesktop() will have cleared currentUid. In that case, do not
+    // report a successful registration to the renderer (it will keep queuing statuses,
+    // and idle/uploads won't run).
+    if (currentUid !== uid) {
+      log("[register-uid] aborted (uid cleared during registration)");
+      return { success: false, error: "registration-aborted" };
+    }
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
     log("Registered uid:", uid);

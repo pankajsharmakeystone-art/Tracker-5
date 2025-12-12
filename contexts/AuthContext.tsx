@@ -2,8 +2,8 @@
 import React, { createContext, useState, useEffect, ReactNode } from 'react';
 import { onAuthStateChanged, type User as FirebaseUser } from 'firebase/auth';
 import { auth } from '../services/firebase';
-import { getUserDocument } from '../services/db';
-import type { User, AuthContextType, UserData } from '../types';
+import { createUserDocument, getUserDocument } from '../services/db';
+import type { Role, User, AuthContextType, UserData } from '../types';
 
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -49,6 +49,22 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
               // Wait for a short period to allow for Firestore document creation and then retry
               await new Promise(resolve => setTimeout(resolve, 2000));
               data = await getUserDocument(currentUser.uid);
+          }
+
+          // Desktop integration (issueDesktopToken) requires a user profile document.
+          // Ensure a minimal user doc exists for accounts created outside the web signup flow.
+          if (!data) {
+            try {
+              const tokenResult = await currentUser.getIdTokenResult();
+              const claimedRole = (tokenResult?.claims as any)?.role;
+              const role: Role = (claimedRole === 'admin' || claimedRole === 'manager' || claimedRole === 'agent')
+                ? claimedRole
+                : 'agent';
+              await createUserDocument(currentUser, { role });
+              data = await getUserDocument(currentUser.uid);
+            } catch (createError) {
+              console.error("Failed to create missing user profile:", createError);
+            }
           }
           
           setUserData(data);
