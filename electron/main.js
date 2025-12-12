@@ -1624,6 +1624,25 @@ function startAgentStatusWatch(uid) {
       const data = snap.data() || {};
       const remoteForceLogoutRequestId = data.forceLogoutRequestId || null;
       if (remoteForceLogoutRequestId) {
+        // If the request was already completed, just clear the request fields so a user
+        // can log back in without getting immediately kicked again.
+        try {
+          const requestedAtMs = data.forceLogoutRequestedAt?.toMillis?.()
+            ?? data.forceLogoutRequestedAt?.toDate?.()?.getTime?.()
+            ?? null;
+          const completedAtMs = data.forceLogoutCompletedAt?.toMillis?.()
+            ?? data.forceLogoutCompletedAt?.toDate?.()?.getTime?.()
+            ?? null;
+          if (requestedAtMs != null && completedAtMs != null && completedAtMs >= requestedAtMs) {
+            db.collection('agentStatus').doc(uid).set({
+              forceLogoutRequestId: FieldValue.delete(),
+              forceLogoutRequestedAt: FieldValue.delete(),
+              forceLogoutRequestedBy: FieldValue.delete()
+            }, { merge: true }).catch(() => {});
+            return;
+          }
+        } catch (_) {}
+
         if (remoteForceLogoutRequestId !== lastForceLogoutRequestId) {
           lastForceLogoutRequestId = remoteForceLogoutRequestId;
           handleRemoteForceLogoutRequest(remoteForceLogoutRequestId).catch((error) => {
