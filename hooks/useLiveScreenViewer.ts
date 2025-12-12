@@ -129,6 +129,7 @@ export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) =>
     const sessionRef = getLiveSessionRef(agent.uid);
     setState('requesting');
     setError(null);
+    let offerTimeout: ReturnType<typeof setTimeout> | null = null;
 
     createViewerRequest({
       agentUid: agent.uid,
@@ -142,6 +143,20 @@ export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) =>
         processedAgentCandidates.current = new Set();
         setState('waiting');
 
+        // If the agent never produces an offer, stop waiting and mark the session expired.
+        offerTimeout = setTimeout(async () => {
+          if (!activeRequestIdRef.current || activeRequestIdRef.current !== requestId) return;
+          if (pcRef.current) return;
+          setError('Agent did not start the live stream in time.');
+          setState('error');
+          try {
+            await endLiveSession(sessionRef, 'expired');
+          } catch (err) {
+            console.warn('Failed to expire live session', err);
+          }
+          await cleanup('error');
+        }, 20000);
+
         const unsubscribe = onSnapshot(sessionRef, async (snapshot) => {
           const data = snapshot.exists() ? (snapshot.data() as LiveSessionDoc) : null;
           if (!data || !data.requestId || data.requestId !== activeRequestIdRef.current) {
@@ -154,6 +169,10 @@ export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) =>
           }
 
           if (data.offer && !pcRef.current) {
+            if (offerTimeout) {
+              clearTimeout(offerTimeout);
+              offerTimeout = null;
+            }
             try {
               const pc = new RTCPeerConnection(getRtcConfiguration());
               pcRef.current = pc;
@@ -209,6 +228,10 @@ export const useLiveScreenViewer = (agent: AgentMeta | null, isOpen: boolean) =>
       });
 
     return () => {
+      if (offerTimeout) {
+        clearTimeout(offerTimeout);
+        offerTimeout = null;
+      }
       cleanup('viewer_closed');
     };
   }, [agent, isOpen, userData?.uid, cleanup, addRemoteFeed]);

@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
 import { DateTime } from 'luxon';
-import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, streamAllAgentStatuses } from '../services/db';
+import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses } from '../services/db';
 import { useAuth } from '../hooks/useAuth';
 import type { WorkLog } from '../types';
 import Spinner from './Spinner';
@@ -341,6 +341,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
     const [organizationTimezone, setOrganizationTimezone] = useState<string>('UTC');
     const [forceLogoutPending, setForceLogoutPending] = useState<string | null>(null);
+    const [reconnectPending, setReconnectPending] = useState<string | null>(null);
     
     const [selectedDate, setSelectedDate] = useState(() => {
         const d = new Date();
@@ -522,6 +523,20 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         }
     };
 
+    const handleReconnectDesktop = async (log: WorkLog) => {
+        if (!canForceLogoutAgent(log)) return;
+        if (!log?.userId) return;
+        setReconnectPending(log.userId);
+        try {
+            await requestDesktopReconnect(log.userId);
+        } catch (error) {
+            console.error('[LiveMonitoringDashboard] Failed to request desktop reconnect', error);
+            alert('Failed to request desktop reconnect. Please try again.');
+        } finally {
+            setReconnectPending(null);
+        }
+    };
+
     const closeLiveStreamModal = () => {
         setIsLiveModalOpen(false);
         setLiveStreamAgent(null);
@@ -689,6 +704,16 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             title="Force Close Session"
                                         >
                                             Close
+                                        </button>
+                                    )}
+                                    {canForceLogoutAgent(agent) && (
+                                        <button
+                                            onClick={() => handleReconnectDesktop(agent)}
+                                            disabled={reconnectPending === agent.userId}
+                                            className="font-medium text-amber-600 dark:text-amber-400 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="Ask the desktop app to re-connect if it's stuck"
+                                        >
+                                            Reconnect
                                         </button>
                                     )}
                                     {canForceLogoutAgent(agent) && (

@@ -71,7 +71,14 @@ export const useAgentLiveStream = () => {
     const startBroadcast = async (requestId: string) => {
       try {
         const captures = await captureDesktopStreamsForLive();
-        if (!captures.length) return;
+        if (!captures.length) {
+          try {
+            await endLiveSession(sessionRef, 'error');
+          } catch (err) {
+            console.warn('Failed to end live session after capture failure', err);
+          }
+          return;
+        }
         const pc = new RTCPeerConnection(getRtcConfiguration());
         captures.forEach((capture) => {
           capture.stream.getTracks().forEach((track) => pc.addTrack(track, capture.stream));

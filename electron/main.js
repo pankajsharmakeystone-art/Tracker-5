@@ -21,6 +21,7 @@ const isDev = process.env.ELECTRON_DEV === 'true' || process.env.NODE_ENV === 'd
 const APP_USER_MODEL_ID = 'com.trackerfive.desktop';
 // Online-only force logout: ignore pending force-logout commands/requests older than this TTL.
 const FORCE_LOGOUT_TTL_MS = 5 * 1000;
+const RECONNECT_TTL_MS = 60 * 1000;
 
 electronLog.initialize?.();
 if (electronLog?.transports?.file) {
@@ -1444,6 +1445,55 @@ function startCommandsWatch(uid) {
     if (!snap.exists) return;
     const cmd = snap.data();
     if (!cmd) return;
+
+    if (cmd.reconnectRequestId) {
+      const requestId = String(cmd.reconnectRequestId || '');
+      try {
+        const tsMs = cmd.timestamp?.toMillis?.()
+          ?? cmd.timestamp?.toDate?.()?.getTime?.()
+          ?? null;
+        const ageMs = tsMs != null ? (Date.now() - tsMs) : 0;
+        if (Number.isFinite(ageMs) && ageMs > RECONNECT_TTL_MS) {
+          log('[reconnect] ignoring stale reconnect request', { requestId, ageMs });
+          await db.collection("desktopCommands").doc(uid).set({
+            reconnectRequestId: FieldValue.delete()
+          }, { merge: true }).catch(()=>{});
+          return;
+        }
+      } catch (_) {}
+
+      log('[reconnect] request received', requestId);
+      try {
+        await ensureDesktopAuth();
+        // Restart watches/loops to recover from a stuck state.
+        stopAgentStatusLoop();
+        startAgentStatusLoop(uid);
+        stopAgentStatusWatch();
+        startAgentStatusWatch(uid);
+        stopAutoClockConfigWatch();
+        startAutoClockConfigWatch(uid);
+        await flushPendingAgentStatuses();
+        await reassertDesktopStatus(uid);
+        await db.collection("agentStatus").doc(uid).set({
+          reconnectAckId: requestId,
+          reconnectAckAt: FieldValue.serverTimestamp(),
+          lastUpdate: FieldValue.serverTimestamp(),
+          isDesktopConnected: true
+        }, { merge: true }).catch(()=>{});
+      } catch (e) {
+        log('[reconnect] failed', e?.message || e);
+        await db.collection("agentStatus").doc(uid).set({
+          reconnectAckId: requestId,
+          reconnectAckAt: FieldValue.serverTimestamp(),
+          reconnectError: e?.message || String(e),
+          lastUpdate: FieldValue.serverTimestamp()
+        }, { merge: true }).catch(()=>{});
+      } finally {
+        await db.collection("desktopCommands").doc(uid).set({
+          reconnectRequestId: FieldValue.delete()
+        }, { merge: true }).catch(()=>{});
+      }
+    }
 
     if (cmd.startRecording) {
       log("command startRecording received");
