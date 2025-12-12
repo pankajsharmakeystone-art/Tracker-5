@@ -223,6 +223,69 @@ let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
 const APP_BASE_URL = process.env.APP_BASE_URL || 'https://tracker-5.vercel.app';
+
+// ---------- HEALTH / CRASH TELEMETRY (best-effort) ----------
+const HEALTH_EVENT_STACK_LIMIT = 2000;
+
+const safeStringify = (value) => {
+  try { return JSON.stringify(value); } catch { return String(value); }
+};
+
+const trimStack = (stack) => {
+  if (!stack) return undefined;
+  const raw = String(stack);
+  return raw.length > HEALTH_EVENT_STACK_LIMIT ? raw.slice(0, HEALTH_EVENT_STACK_LIMIT) : raw;
+};
+
+async function writeAgentHealth(uid, payload = {}) {
+  if (!uid) return false;
+  try {
+    const authed = await ensureDesktopAuth();
+    if (!authed) return false;
+    await db.collection("agentStatus").doc(uid).set({
+      ...payload,
+      lastUpdate: FieldValue.serverTimestamp()
+    }, { merge: true });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function recordHealthEvent(type, details) {
+  const uid = currentUid;
+  if (!uid) return false;
+  const message = typeof details === 'string'
+    ? details
+    : (details?.message || details?.reason || details?.error || safeStringify(details));
+  const stack = trimStack(details?.stack);
+  return await writeAgentHealth(uid, {
+    lastHealthEventAt: FieldValue.serverTimestamp(),
+    lastHealthEventType: String(type || 'unknown'),
+    lastHealthEventMessage: String(message || type || 'unknown'),
+    lastHealthEventStack: stack ? String(stack) : FieldValue.delete()
+  });
+}
+
+process.on("uncaughtException", (err) => {
+  console.error("[main] uncaughtException", err);
+  recordHealthEvent("main_uncaughtException", { message: err?.message, stack: err?.stack });
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[main] unhandledRejection", reason);
+  recordHealthEvent("main_unhandledRejection", { message: safeStringify(reason) });
+});
+
+app.on("render-process-gone", (_event, _webContents, details) => {
+  console.error("[app] render-process-gone", details);
+  recordHealthEvent("render_process_gone", details || {});
+});
+
+app.on("child-process-gone", (_event, details) => {
+  console.error("[app] child-process-gone", details);
+  recordHealthEvent("child_process_gone", details || {});
+});
 // Use .ico on Windows for proper taskbar/shortcut branding; png elsewhere.
 // Resolve icon for dev (repo path) and packaged builds (resourcesPath).
 const ICON_CANDIDATES = [
@@ -1928,6 +1991,15 @@ async function performAutoClockOut() {
 // ---------- IPC ----------
 ipcMain.handle("ping", () => "pong");
 
+ipcMain.handle("report-renderer-error", async (_event, payload = {}) => {
+  try {
+    await recordHealthEvent("renderer_error", payload || {});
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e?.message || String(e) };
+  }
+});
+
 ipcMain.handle("sync-admin-settings", async (_event, settings) => {
   try {
     applyAdminSettings(settings || {});
@@ -2287,6 +2359,7 @@ ipcMain.handle("stop-recording", async (_, meta = {}) => {
 
 ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
   log("[recorder] background recorder failed", payload?.error || payload);
+  await recordHealthEvent("recorder_failed", payload || {});
   isRecordingActive = false;
   resetAutoResumeRetry();
   if (currentUid) {

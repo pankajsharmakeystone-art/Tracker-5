@@ -149,6 +149,7 @@ declare global {
             syncAdminSettings?: (settings: AdminSettingsType | null) => Promise<any>;
             onAutoClockOut: (callback: (data: any) => void) => (() => void) | void;
             onSignedOut?: (callback: (data?: { reason?: string }) => void) => (() => void) | void;
+            reportError?: (payload: any) => Promise<any>;
             onAutoUpdateStatus?: (callback: (data: { event: string; version?: string; percent?: number; message?: string }) => void) => (() => void) | void;
             requestImmediateUpdateCheck?: () => Promise<any>;
             installPendingUpdate?: () => Promise<any>;

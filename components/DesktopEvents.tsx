@@ -11,6 +11,7 @@ interface DesktopSource {
 
 const DesktopEvents: React.FC = () => {
   const listenersAttached = useRef(false);
+  const lastErrorReportAt = useRef(0);
 
   useEffect(() => {
     if (!window.desktopAPI || listenersAttached.current) return;
@@ -69,7 +70,49 @@ const DesktopEvents: React.FC = () => {
       }
     });
 
+    // Best-effort crash/health telemetry from the renderer to Electron main.
+    const maybeReport = (payload: any) => {
+      try {
+        const report = window.desktopAPI?.reportError;
+        if (!report) return;
+        const now = Date.now();
+        // Throttle to avoid spamming Firestore on noisy pages.
+        if (now - lastErrorReportAt.current < 60000) return;
+        lastErrorReportAt.current = now;
+        report(payload).catch(() => undefined);
+      } catch {
+        // ignore
+      }
+    };
+
+    const onError = (event: ErrorEvent) => {
+      maybeReport({
+        message: event?.message || 'renderer_error',
+        source: event?.filename,
+        line: event?.lineno,
+        column: event?.colno,
+        stack: (event?.error && (event.error as any).stack) ? String((event.error as any).stack) : undefined
+      });
+    };
+
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = (event as any)?.reason;
+      maybeReport({
+        message: 'renderer_unhandled_rejection',
+        reason: typeof reason === 'string' ? reason : undefined,
+        stack: reason?.stack ? String(reason.stack) : undefined
+      });
+    };
+
+    window.addEventListener('error', onError);
+    window.addEventListener('unhandledrejection', onRejection as any);
+
     listenersAttached.current = true;
+
+    return () => {
+      window.removeEventListener('error', onError);
+      window.removeEventListener('unhandledrejection', onRejection as any);
+    };
   }, []);
 
   // Recording now lives in a background window; do not stop on renderer unload.

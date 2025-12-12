@@ -75,6 +75,9 @@ contextBridge.exposeInMainWorld("desktopAPI", {
     return () => ipcRenderer.removeListener("signed-out", handler);
   },
 
+  // renderer -> main error reporting (best-effort crash telemetry)
+  reportError: (payload) => ipcRenderer.invoke("report-renderer-error", payload),
+
   // basic ping
   ping: () => ipcRenderer.invoke("ping"),
 
