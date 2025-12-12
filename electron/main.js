@@ -226,6 +226,7 @@ const APP_BASE_URL = process.env.APP_BASE_URL || 'https://tracker-5.vercel.app';
 
 // ---------- HEALTH / CRASH TELEMETRY (best-effort) ----------
 const HEALTH_EVENT_STACK_LIMIT = 2000;
+const HEALTH_LOG_PATH = path.join(app.getPath("userData"), "health-events.jsonl");
 
 const safeStringify = (value) => {
   try { return JSON.stringify(value); } catch { return String(value); }
@@ -235,6 +236,15 @@ const trimStack = (stack) => {
   if (!stack) return undefined;
   const raw = String(stack);
   return raw.length > HEALTH_EVENT_STACK_LIMIT ? raw.slice(0, HEALTH_EVENT_STACK_LIMIT) : raw;
+};
+
+const appendHealthLogLine = (entry) => {
+  try {
+    const line = `${safeStringify(entry)}\n`;
+    fs.appendFileSync(HEALTH_LOG_PATH, line, { encoding: "utf8" });
+  } catch (_) {
+    // ignore
+  }
 };
 
 async function writeAgentHealth(uid, payload = {}) {
@@ -254,11 +264,22 @@ async function writeAgentHealth(uid, payload = {}) {
 
 async function recordHealthEvent(type, details) {
   const uid = currentUid;
-  if (!uid) return false;
   const message = typeof details === 'string'
     ? details
     : (details?.message || details?.reason || details?.error || safeStringify(details));
   const stack = trimStack(details?.stack);
+
+  // Always persist locally so we can debug "silent" crashes where Firestore writes aren't possible.
+  appendHealthLogLine({
+    at: new Date().toISOString(),
+    type: String(type || "unknown"),
+    message: String(message || type || "unknown"),
+    stack: stack ? String(stack) : null,
+    uid: uid || null
+  });
+
+  if (!uid) return false;
+
   return await writeAgentHealth(uid, {
     lastHealthEventAt: FieldValue.serverTimestamp(),
     lastHealthEventType: String(type || 'unknown'),
@@ -2053,6 +2074,29 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     await reconcileRecordingAfterRegister(uid);
     await reassertDesktopStatus(uid);
+
+    // Upload the latest locally persisted health event (if any) so crashes that couldn't
+    // write to Firestore still become visible after the next successful login.
+    try {
+      if (fs.existsSync(HEALTH_LOG_PATH)) {
+        const raw = fs.readFileSync(HEALTH_LOG_PATH, "utf8");
+        const lines = raw.trim().split(/\r?\n/).filter(Boolean);
+        const last = lines.length ? lines[lines.length - 1] : null;
+        if (last) {
+          const parsed = JSON.parse(last);
+          if (parsed && parsed.type && parsed.message) {
+            await writeAgentHealth(uid, {
+              lastHealthEventAt: FieldValue.serverTimestamp(),
+              lastHealthEventType: String(parsed.type),
+              lastHealthEventMessage: String(parsed.message),
+              lastHealthEventStack: parsed.stack ? String(parsed.stack) : FieldValue.delete()
+            });
+          }
+        }
+      }
+    } catch (_) {
+      // ignore
+    }
 
     // If a force-logout (desktopCommands/agentStatus) fired during registration,
     // clockOutAndSignOutDesktop() will have cleared currentUid. In that case, do not
