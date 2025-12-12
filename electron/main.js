@@ -19,6 +19,8 @@ const { autoUpdater } = require("electron-updater");
 
 const isDev = process.env.ELECTRON_DEV === 'true' || process.env.NODE_ENV === 'development';
 const APP_USER_MODEL_ID = 'com.trackerfive.desktop';
+// Online-only force logout: ignore pending force-logout commands/requests older than this TTL.
+const FORCE_LOGOUT_TTL_MS = 5 * 1000;
 
 electronLog.initialize?.();
 if (electronLog?.transports?.file) {
@@ -1464,6 +1466,19 @@ function startCommandsWatch(uid) {
 
     if (cmd.forceLogout) {
       log("command forceLogout received");
+      // Online-only policy: ignore stale force-logout commands so users don't have to "log in twice".
+      try {
+        const tsMs = cmd.timestamp?.toMillis?.()
+          ?? cmd.timestamp?.toDate?.()?.getTime?.()
+          ?? null;
+        const ageMs = tsMs != null ? (Date.now() - tsMs) : Number.POSITIVE_INFINITY;
+        if (!Number.isFinite(ageMs) || ageMs > FORCE_LOGOUT_TTL_MS) {
+          log("[forceLogout] ignoring stale desktopCommands.forceLogout", { ageMs });
+          await db.collection("desktopCommands").doc(uid).set({ forceLogout: false }, { merge: true }).catch(()=>{});
+          return;
+        }
+      } catch (_) {}
+
       // Clear the command immediately while still authenticated; clockOutAndSignOutDesktop signs out.
       await db.collection("desktopCommands").doc(uid).set({ forceLogout: false }, { merge: true }).catch(()=>{});
       await clockOutAndSignOutDesktop("force_logout", { notifyRenderer: true });
@@ -1624,6 +1639,22 @@ function startAgentStatusWatch(uid) {
       const data = snap.data() || {};
       const remoteForceLogoutRequestId = data.forceLogoutRequestId || null;
       if (remoteForceLogoutRequestId) {
+        // Online-only policy: ignore stale force-logout requests.
+        try {
+          const requestedAtMs = data.forceLogoutRequestedAt?.toMillis?.()
+            ?? data.forceLogoutRequestedAt?.toDate?.()?.getTime?.()
+            ?? null;
+          const ageMs = requestedAtMs != null ? (Date.now() - requestedAtMs) : Number.POSITIVE_INFINITY;
+          if (!Number.isFinite(ageMs) || ageMs > FORCE_LOGOUT_TTL_MS) {
+            db.collection('agentStatus').doc(uid).set({
+              forceLogoutRequestId: FieldValue.delete(),
+              forceLogoutRequestedAt: FieldValue.delete(),
+              forceLogoutRequestedBy: FieldValue.delete()
+            }, { merge: true }).catch(() => {});
+            return;
+          }
+        } catch (_) {}
+
         // If the request was already completed, just clear the request fields so a user
         // can log back in without getting immediately kicked again.
         try {
