@@ -29,17 +29,17 @@ const DashboardPage: React.FC = () => {
         // If loading is complete but we still don't have user data,
         // it might be a transient state or a real error.
         // We'll wait a brief moment before concluding it's an error.
-        if (!loading && !userData) {
+        if (!loading && user && !userData) {
             timer = window.setTimeout(() => {
                 setShowError(true);
-            }, 1500); // 1.5 seconds grace period
+            }, 15000); // 15 seconds grace period (profile fetch can be slow on reload)
         } else {
              setShowError(false);
         }
 
         // If loading or userData changes, clear any pending error display.
         return () => clearTimeout(timer);
-    }, [loading, userData]);
+    }, [loading, user, userData]);
 
     useEffect(() => {
         if (!loading && userData?.role === 'agent') {

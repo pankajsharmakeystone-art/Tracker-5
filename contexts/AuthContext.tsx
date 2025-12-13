@@ -28,6 +28,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       try {
         if (import.meta.env.DEV) {
@@ -49,13 +51,24 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
         
         try {
-          let data = await getUserDocument(currentUser.uid);
+          const fetchUserDataWithRetries = async () => {
+            const baseDelayMs = 500;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              const data = await getUserDocument(currentUser.uid);
+              if (data) return data;
+              // If it might be a transient error/offline state, retry a few times.
+              await sleep(baseDelayMs * (attempt + 1));
+            }
+            return null;
+          };
+
+          let data = await fetchUserDataWithRetries();
           
           // Handle race condition on new user signup where Firestore doc creation might be slightly delayed
           if (!data && isNewUser(currentUser)) {
               // Wait for a short period to allow for Firestore document creation and then retry
               await new Promise(resolve => setTimeout(resolve, 2000));
-              data = await getUserDocument(currentUser.uid);
+              data = await fetchUserDataWithRetries();
           }
 
           // Desktop integration (issueDesktopToken) requires a user profile document.
@@ -68,7 +81,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
                 ? claimedRole
                 : 'agent';
               await createUserDocument(currentUser, { role });
-              data = await getUserDocument(currentUser.uid);
+              data = await fetchUserDataWithRetries();
             } catch (createError) {
               console.error("Failed to create missing user profile:", createError);
             }
