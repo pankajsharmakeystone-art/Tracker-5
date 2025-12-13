@@ -69,6 +69,14 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
       safeClearRetry();
     });
 
+    const unsubscribeAuthRequired = window.desktopAPI?.onAuthRequired?.(({ reason }: { reason?: string } = {}) => {
+      console.warn('[DesktopBridge] desktop auth required', { reason });
+      isRegistered = false;
+      retryDelayMs = 3000;
+      safeClearRetry();
+      void bootstrap();
+    });
+
     // Heartbeat: if ping fails, try re-registering to recover the desktop bridge
     heartbeat = setInterval(async () => {
       if (canceled) return;
@@ -120,6 +128,11 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
       safeClearHeartbeat();
       safeClearRetry();
       unsubscribeSettings?.();
+      try {
+        if (typeof unsubscribeAuthRequired === 'function') unsubscribeAuthRequired();
+      } catch {
+        // ignore
+      }
       window.desktopAPI?.unregisterUid?.();
     };
   }, [uid]);

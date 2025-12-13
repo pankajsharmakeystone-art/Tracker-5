@@ -232,10 +232,17 @@ const WATCHDOG_PING_INTERVAL_MS = 30000;
 const WATCHDOG_PING_TIMEOUT_MS = 5000;
 const WATCHDOG_STALL_THRESHOLD_MS = 2 * 60 * 1000;
 const WATCHDOG_RECOVERY_COOLDOWN_MS = 60 * 1000;
+const MAIN_LAG_CHECK_INTERVAL_MS = 1000;
+const MAIN_LAG_THRESHOLD_MS = 10 * 1000;
+const MAIN_LAG_SEVERE_THRESHOLD_MS = 30 * 1000;
+const METRICS_SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
 let lastRendererPongMs = Date.now();
 let watchdogInterval = null;
 let watchdogPingTimeout = null;
 let lastRecoveryAttemptMs = 0;
+let mainLagInterval = null;
+let lastMainLagTickMs = Date.now();
+let metricsInterval = null;
 
 const safeStringify = (value) => {
   try { return JSON.stringify(value); } catch { return String(value); }
@@ -253,6 +260,32 @@ const appendHealthLogLine = (entry) => {
     fs.appendFileSync(HEALTH_LOG_PATH, line, { encoding: "utf8" });
   } catch (_) {
     // ignore
+  }
+};
+
+const snapshotLocal = (type, details = {}) => {
+  try {
+    appendHealthLogLine({
+      at: new Date().toISOString(),
+      type: String(type || "snapshot"),
+      message: safeStringify(details),
+      stack: null,
+      uid: currentUid || null
+    });
+  } catch (_) {}
+};
+
+const getProcessMetrics = () => {
+  try {
+    const mem = process.memoryUsage();
+    return {
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      external: mem.external
+    };
+  } catch (_) {
+    return null;
   }
 };
 
@@ -308,8 +341,22 @@ async function attemptDesktopRecovery(reason = "watchdog") {
   log("[watchdog] attempting recovery:", reason);
   await recordHealthEvent("watchdog_recovery", { reason });
 
+  // Best-effort: bounce Firestore network to recover from stuck sockets/offline caching states.
   try {
-    await ensureDesktopAuth();
+    if (typeof db.disableNetwork === "function") await db.disableNetwork();
+    await new Promise((r) => setTimeout(r, 500));
+    if (typeof db.enableNetwork === "function") await db.enableNetwork();
+  } catch (e) {
+    log("[watchdog] firestore network bounce failed", e?.message || e);
+  }
+
+  try {
+    const authed = await ensureDesktopAuth();
+    if (!authed) {
+      // If auth is blocked (e.g., SecureToken requests blocked), recovery won't help.
+      // Avoid hot-looping and leave it to renderer re-register flow.
+      return false;
+    }
   } catch (_) {}
 
   try {
@@ -328,6 +375,14 @@ async function attemptDesktopRecovery(reason = "watchdog") {
 
   try {
     await reassertDesktopStatus(currentUid);
+  } catch (_) {}
+
+  // Last resort: if we still have queued writes, reload the renderer to reset the app state.
+  try {
+    if (pendingAgentStatuses.length > 0) {
+      await recordHealthEvent("watchdog_recovery_incomplete", { reason, pending: pendingAgentStatuses.length });
+      try { mainWindow?.webContents?.reload?.(); } catch (_) {}
+    }
   } catch (_) {}
 
   return true;
@@ -366,7 +421,10 @@ function startWatchdog() {
       // 2) If we haven't had a successful agentStatus write in a while while active, try recovery.
       const active = Boolean(currentUid && (agentClockedIn || isRecordingActive));
       const sinceWrite = Date.now() - (lastStatusWriteMs || 0);
-      if (active && sinceWrite > WATCHDOG_STALL_THRESHOLD_MS) {
+      // In transitions-only mode, going a long time with no writes can be normal.
+      // Only treat it as "stalled" when we actually have pending status writes queued.
+      const hasPendingStatusWrites = pendingAgentStatuses.length > 0;
+      if (active && hasPendingStatusWrites && sinceWrite > WATCHDOG_STALL_THRESHOLD_MS) {
         await attemptDesktopRecovery("status_write_stalled");
       }
     } catch (e) {
@@ -374,6 +432,46 @@ function startWatchdog() {
       log("[watchdog] error", e?.message || e);
     }
   }, WATCHDOG_PING_INTERVAL_MS);
+}
+
+function stopMainLagMonitor() {
+  if (mainLagInterval) {
+    clearInterval(mainLagInterval);
+    mainLagInterval = null;
+  }
+  if (metricsInterval) {
+    clearInterval(metricsInterval);
+    metricsInterval = null;
+  }
+}
+
+function startMainLagMonitor() {
+  stopMainLagMonitor();
+
+  lastMainLagTickMs = Date.now();
+  mainLagInterval = setInterval(async () => {
+    const now = Date.now();
+    const driftMs = now - lastMainLagTickMs - MAIN_LAG_CHECK_INTERVAL_MS;
+    lastMainLagTickMs = now;
+
+    if (driftMs > MAIN_LAG_THRESHOLD_MS) {
+      const metrics = getProcessMetrics();
+      await recordHealthEvent("main_event_loop_lag", {
+        driftMs,
+        thresholdMs: MAIN_LAG_THRESHOLD_MS,
+        metrics
+      });
+
+      if (driftMs > MAIN_LAG_SEVERE_THRESHOLD_MS) {
+        await attemptDesktopRecovery("main_event_loop_lag_severe");
+        try { mainWindow?.webContents?.reload?.(); } catch (_) {}
+      }
+    }
+  }, MAIN_LAG_CHECK_INTERVAL_MS);
+
+  metricsInterval = setInterval(() => {
+    snapshotLocal("metrics_snapshot", { metrics: getProcessMetrics() });
+  }, METRICS_SNAPSHOT_INTERVAL_MS);
 }
 
 process.on("uncaughtException", (err) => {
@@ -484,6 +582,8 @@ let autoClockConfigUnsub = null;
 let autoClockSlots = {};
 let currentShiftDate = null;
 let manualBreakActive = false;
+let manualBreakStartedAtMs = null;
+let manualBreakReminderTimer = null;
 let autoResumeInFlight = false;
 const AUTO_RESUME_BASE_DELAY_MS = 5000;
 const AUTO_RESUME_MAX_DELAY_MS = 60000;
@@ -492,6 +592,36 @@ let autoResumeRetryTimer = null;
 let lastStatusWriteMs = Date.now();
 let statusHealthInterval = null;
 let lastDesktopToken = null;
+let lastAuthRequiredEmitMs = 0;
+const AUTH_REQUIRED_EMIT_COOLDOWN_MS = 30 * 1000;
+
+function isUnauthenticatedError(err) {
+  const msg = String(err?.message || err || "");
+  return (
+    err?.code === 16 ||
+    /unauthenticated/i.test(msg) ||
+    /missing or invalid authentication/i.test(msg) ||
+    /auth-missing/i.test(msg)
+  );
+}
+
+function isSecureTokenBlockedError(err) {
+  const msg = String(err?.message || err || "");
+  return (
+    /securetoken\.googleapis\.com/i.test(msg) &&
+    /are-blocked|blocked/i.test(msg)
+  );
+}
+
+function requestRendererReauth(reason = "unknown") {
+  const now = Date.now();
+  if (now - lastAuthRequiredEmitMs < AUTH_REQUIRED_EMIT_COOLDOWN_MS) return;
+  lastAuthRequiredEmitMs = now;
+  try {
+    log("[auth] requesting renderer re-register:", reason);
+    mainWindow?.webContents?.send?.("desktop-auth-required", { reason });
+  } catch (_) {}
+}
 
 function clearAutoResumeRetryTimer() {
   if (autoResumeRetryTimer) {
@@ -503,6 +633,35 @@ function clearAutoResumeRetryTimer() {
 function resetAutoResumeRetry() {
   clearAutoResumeRetryTimer();
   autoResumeRetryDelayMs = AUTO_RESUME_BASE_DELAY_MS;
+}
+
+function clearManualBreakReminderTimer() {
+  if (manualBreakReminderTimer) {
+    clearTimeout(manualBreakReminderTimer);
+    manualBreakReminderTimer = null;
+  }
+}
+
+function scheduleManualBreakReminderIfNeeded() {
+  try {
+    clearManualBreakReminderTimer();
+    const timeoutMins = Number(cachedAdminSettings?.manualBreakTimeoutMinutes) || 0;
+    if (!manualBreakActive || timeoutMins <= 0 || !manualBreakStartedAtMs) return;
+
+    const elapsedMs = Date.now() - manualBreakStartedAtMs;
+    const remainingMs = (timeoutMins * 60 * 1000) - elapsedMs;
+    if (remainingMs <= 0) {
+      showManualBreakReminderPopup({ timeoutMins });
+      return;
+    }
+
+    manualBreakReminderTimer = setTimeout(() => {
+      manualBreakReminderTimer = null;
+      if (manualBreakActive) showManualBreakReminderPopup({ timeoutMins });
+    }, remainingMs);
+  } catch (_) {
+    // ignore
+  }
 }
 
 function recordStatusWriteSuccess() {
@@ -528,6 +687,8 @@ async function ensureDesktopAuth() {
     }
     const user = clientAuth.currentUser;
     if (user && user.uid === currentUid) return true;
+
+    // If we have a cached custom token, try it first (best-effort).
     if (lastDesktopToken) {
       try {
         await clientAuth.signInWithCustomToken(lastDesktopToken);
@@ -535,10 +696,16 @@ async function ensureDesktopAuth() {
         return true;
       } catch (err) {
         console.warn('[ensureDesktopAuth] reauth failed', err?.message || err);
+        if (isSecureTokenBlockedError(err)) {
+          // Environment/network is blocking SecureToken; avoid hammering reauth.
+          await recordHealthEvent("auth_securetoken_blocked", { message: err?.message || String(err) });
+          return false;
+        }
       }
-    } else {
-      log('[ensureDesktopAuth] missing desktop token for reauth');
     }
+
+    // Ask the renderer to fetch a fresh desktop token and re-register.
+    requestRendererReauth(!user ? "missing_currentUser" : "uid_mismatch");
   } catch (err) {
     console.warn('[ensureDesktopAuth] error', err?.message || err);
   }
@@ -1026,7 +1193,7 @@ function createMainWindow() {
   // Dev mode should load the local Vite dev server so changes take effect immediately.
   // Production prefers the hosted app (OAuth-friendly) and falls back to the packaged build.
   const hostedUrl = `${APP_BASE_URL}/${DEFAULT_LOGIN_ROUTE_HASH}`;
-  const devUrl = process.env.ELECTRON_START_URL || `http://localhost:5173/${DEFAULT_LOGIN_ROUTE_HASH}`;
+  const devUrl = process.env.ELECTRON_START_URL || `http://localhost:3000/${DEFAULT_LOGIN_ROUTE_HASH}`;
   const primaryUrl = isDev ? devUrl : hostedUrl;
   const fallbackUrl = isDev ? hostedUrl : null;
 
@@ -1053,6 +1220,7 @@ function createMainWindow() {
     try { mainWindow.webContents.send("desktop-ready", { ok: true }); } catch(e) {}
     // Start watchdog once renderer is loaded.
     startWatchdog();
+    startMainLagMonitor();
   });
 
   // Detect "frozen" renderer and attempt recovery.
@@ -1085,6 +1253,7 @@ function createMainWindow() {
 
   mainWindow.on("closed", () => {
     stopWatchdog();
+    stopMainLagMonitor();
   });
 
   mainWindow.once("ready-to-show", () => {
@@ -1770,6 +1939,12 @@ function startCommandsWatch(uid) {
       app.setLoginItemSettings({ openAtLogin: !!cmd.setAutoLaunch });
       await db.collection("desktopCommands").doc(uid).update({ setAutoLaunch: FieldValue.delete() }).catch(()=>{});
     }
+  }, (error) => {
+    console.error('[commandsWatch] listener error', error?.message || error);
+    recordHealthEvent("firestore_listen_error", { where: "desktopCommands", message: error?.message || String(error) });
+    if (isUnauthenticatedError(error)) {
+      requestRendererReauth("firestore_unauthenticated_listen_desktopCommands");
+    }
   });
 }
 
@@ -1795,6 +1970,9 @@ function startAgentStatusLoop(uid) {
       if (isNaN(idleLimit) || idleLimit < 0) {
         idleLimit = 10;
       }
+
+      // If idle timeout is disabled, do nothing (prevents log spam + Firestore reads).
+      if (idleLimit <= 0) return;
 
       const idleSecs = powerMonitor.getSystemIdleTime();
       const timedOutIdle = idleLimit > 0 ? idleSecs >= idleLimit : false;
@@ -1901,6 +2079,24 @@ function startAgentStatusWatch(uid) {
       if (!snap.exists) return;
       if (snap.metadata?.hasPendingWrites) return; // skip local echoes
       const data = snap.data() || {};
+
+      // Keep local manual-break state in sync without polling Firestore.
+      try {
+        const nextManualBreak = Boolean(data.manualBreak);
+        const startedAtMs = data.breakStartedAt?.toMillis?.()
+          ?? data.breakStartedAt?.toDate?.()?.getTime?.()
+          ?? null;
+
+        manualBreakActive = nextManualBreak;
+        manualBreakStartedAtMs = nextManualBreak && startedAtMs ? startedAtMs : null;
+        if (manualBreakActive) {
+          scheduleManualBreakReminderIfNeeded();
+        } else {
+          clearManualBreakReminderTimer();
+          closeManualBreakReminderWindow();
+        }
+      } catch (_) {}
+
       const remoteForceLogoutRequestId = data.forceLogoutRequestId || null;
       if (remoteForceLogoutRequestId) {
         // Online-only policy: ignore stale force-logout requests.
@@ -1947,23 +2143,15 @@ function startAgentStatusWatch(uid) {
         return;
       }
       lastForceLogoutRequestId = null;
-      const remoteStatus = data.status;
-      if (!remoteStatus) return;
 
-      const normalizedStatus = remoteStatus === 'break' ? 'on_break' : remoteStatus;
-      const remoteClockedIn = normalizedStatus === 'online' || normalizedStatus === 'working' || normalizedStatus === 'on_break';
-      if (agentClockedIn !== remoteClockedIn) {
-        agentClockedIn = remoteClockedIn;
-      }
-
-      if ((remoteStatus === 'offline' || remoteStatus === 'clocked_out') && (agentClockedIn || isRecordingActive)) {
-        log('[agentStatusWatch] remote status is', remoteStatus, '- forcing local stop');
-        applyAgentStatus(remoteStatus === 'clocked_out' ? 'clocked_out' : 'offline').catch((err) => {
-          console.error('[agentStatusWatch] failed to apply remote status', err?.message || err);
-        });
-      }
+      // IMPORTANT: agentStatus.status is best-effort presence and can be stale/wrong.
+      // Do NOT force-stop/clock-out based on it; worklogs + renderer events are the source of truth.
     }, (error) => {
       console.error('[agentStatusWatch] listener error', error?.message || error);
+      recordHealthEvent("firestore_listen_error", { where: "agentStatus", message: error?.message || String(error) });
+      if (isUnauthenticatedError(error)) {
+        requestRendererReauth("firestore_unauthenticated_listen_agentStatus");
+      }
       setTimeout(() => startAgentStatusWatch(uid), 5000);
     });
   } catch (e) {
@@ -1988,6 +2176,10 @@ function startAutoClockConfigWatch(uid) {
       lastAutoClockOutTargetKey = null;
     }, (error) => {
       console.error('[autoClockConfigWatch] listener error', error?.message || error);
+      recordHealthEvent("firestore_listen_error", { where: "autoClockConfigs", message: error?.message || String(error) });
+      if (isUnauthenticatedError(error)) {
+        requestRendererReauth("firestore_unauthenticated_listen_autoClockConfigs");
+      }
     });
   } catch (e) {
     console.error('[startAutoClockConfigWatch] failed', e?.message || e);
@@ -2286,8 +2478,8 @@ async function applyAgentStatus(status) {
 
   const authed = await ensureDesktopAuth();
   if (!authed) {
-    log('[applyAgentStatus] auth missing, skipping');
-    return { success: false, error: 'auth-missing' };
+    log('[applyAgentStatus] auth missing');
+    throw new Error('auth-missing');
   }
 
   log('[applyAgentStatus] received', status, {
@@ -2297,22 +2489,40 @@ async function applyAgentStatus(status) {
     agentClockedIn
   });
 
+  const writeAgentStatusOrThrow = async (payload, label = "agentStatus_write") => {
+    try {
+      await db.collection('agentStatus').doc(currentUid).set(payload, { merge: true });
+      recordStatusWriteSuccess();
+      return true;
+    } catch (e) {
+      if (isUnauthenticatedError(e)) {
+        requestRendererReauth("firestore_unauthenticated_write");
+      }
+      await recordHealthEvent("agentStatus_write_failed", { label, message: e?.message || String(e) });
+      throw e;
+    }
+  };
+
   // Accept 'manual_break' from web/renderer when user starts a manual break
   if (status === 'manual_break') {
     agentClockedIn = true;
-    await db.collection('agentStatus').doc(currentUid).set({
+    manualBreakActive = true;
+    manualBreakStartedAtMs = Date.now();
+    scheduleManualBreakReminderIfNeeded();
+
+    const wasRecording = isRecordingActive;
+    isRecordingActive = false;
+    resetAutoResumeRetry();
+
+    await writeAgentStatusOrThrow({
       status: 'break',
       manualBreak: true,
       breakStartedAt: FieldValue.serverTimestamp(),
       isIdle: false,
       isDesktopConnected: true,
-      lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
-
-    const wasRecording = isRecordingActive;
-    isRecordingActive = false;
-    resetAutoResumeRetry();
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
+      lastUpdate: FieldValue.serverTimestamp(),
+      isRecording: false
+    }, "manual_break");
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
     stopBackgroundRecording();
@@ -2323,6 +2533,9 @@ async function applyAgentStatus(status) {
 
   if (status === 'clocked_out' || status === 'offline') {
     agentClockedIn = false;
+    manualBreakActive = false;
+    manualBreakStartedAtMs = null;
+    clearManualBreakReminderTimer();
     stopAgentStatusLoop();
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
@@ -2330,22 +2543,25 @@ async function applyAgentStatus(status) {
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
     resetAutoResumeRetry();
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording stopped');
     stopBackgroundRecording();
 
-    await db.collection('agentStatus').doc(currentUid).set({
+    await writeAgentStatusOrThrow({
       status: 'offline',
       isIdle: false,
       isDesktopConnected: false,
-      lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
+      lastUpdate: FieldValue.serverTimestamp(),
+      isRecording: false
+    }, "clocked_out");
     return { success: true };
   }
 
   if (status === 'working' || status === 'online') {
     agentClockedIn = true;
+    manualBreakActive = false;
+    manualBreakStartedAtMs = null;
+    clearManualBreakReminderTimer();
     const dateKey = toScheduleDateKey();
     if (currentShiftDate !== dateKey) {
       currentShiftDate = dateKey;
@@ -2358,25 +2574,28 @@ async function applyAgentStatus(status) {
     const recordingMode = safeSettings.recordingMode || 'auto';
     log('[applyAgentStatus] working/online branch', { allowRecording, recordingMode, isRecordingActive });
 
+    let willRecord = false;
     if (recordingMode === 'auto' && allowRecording) {
       if (!isRecordingActive) {
         isRecordingActive = true;
-        await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, isDesktopConnected: true }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
         showRecordingPopup('Recording started');
         startBackgroundRecording();
+        willRecord = true;
       } else {
         log('Online signal received, but recording is already active (ignoring)');
+        willRecord = true;
       }
     }
 
-    await db.collection('agentStatus').doc(currentUid).set({
+    await writeAgentStatusOrThrow({
       status: 'online',
       isIdle: false,
       isDesktopConnected: true,
       lastUpdate: FieldValue.serverTimestamp(),
       manualBreak: false,
-      breakStartedAt: FieldValue.delete()
-    }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
+      breakStartedAt: FieldValue.delete(),
+      isRecording: Boolean(willRecord || isRecordingActive)
+    }, "working_online");
 
     closeManualBreakReminderWindow();
     return { success: true };
@@ -2384,20 +2603,23 @@ async function applyAgentStatus(status) {
 
   if (status === 'on_break' || status === 'break') {
     agentClockedIn = true;
+    manualBreakActive = false;
+    manualBreakStartedAtMs = null;
+    clearManualBreakReminderTimer();
 
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
     resetAutoResumeRetry();
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
     stopBackgroundRecording();
 
-    await db.collection('agentStatus').doc(currentUid).set({
+    await writeAgentStatusOrThrow({
       status: 'break',
       isIdle: true,
-      lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).then(recordStatusWriteSuccess).catch(()=>{});
+      lastUpdate: FieldValue.serverTimestamp(),
+      isRecording: false
+    }, "break");
     return { success: true };
   }
 
@@ -2439,7 +2661,13 @@ ipcMain.handle("set-agent-status", async (_, status) => {
       return { success: true, queued: true };
     }
 
-    return await applyAgentStatus(status);
+    const result = await applyAgentStatus(status);
+    if (result?.success === false) {
+      pendingAgentStatuses.push(status);
+      schedulePendingStatusFlush();
+      return { success: false, queued: true, error: result?.error || "failed" };
+    }
+    return result;
   } catch (e) {
     log('[set-agent-status] failed, queuing for retry', e?.message || e);
     pendingAgentStatuses.push(status);
@@ -2552,7 +2780,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
 
     const buffer = Buffer.from(arrayBuffer);
     const filePath = path.join(RECORDINGS_DIR, fileName);
-    fs.writeFileSync(filePath, buffer);
+    await fs.promises.writeFile(filePath, buffer);
     log("Saved recording to:", filePath);
 
     const safeName = (cachedDisplayName ? String(cachedDisplayName) : (currentUid || 'unknown')).replace(/[\/:*?"<>|]/g, '-');
@@ -2586,6 +2814,8 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     if (currentUid && uploadResults.length) {
       const summary = uploadResults.map((entry) => ({
         target: entry.target,
+        path: entry.path || null,
+        id: entry.meta?.id || entry.meta?.fileId || null,
         success: Boolean(entry.success),
         error: entry.success ? null : (entry.error || entry.reason || null)
       }));
@@ -2603,7 +2833,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     if (uploadResults.some((entry) => entry.success)) {
       markRecordingUploaded(fileName);
       try {
-        fs.unlinkSync(filePath);
+        await fs.promises.unlink(filePath);
       } catch (unlinkErr) {
         log("[uploads] failed to delete uploaded file", unlinkErr?.message || unlinkErr);
       }
@@ -2689,8 +2919,9 @@ ipcMain.handle("auto-install-update", async () => {
 ipcMain.handle("auto-check-updates", async () => {
   try {
     if (isDev) {
-      emitAutoUpdateStatus("error", { message: "Auto updates disabled in dev mode" });
-      return { success: false, error: "dev-mode" };
+      // Dev builds don't support auto updates; avoid showing an "error" toast in the UI.
+      emitAutoUpdateStatus("up-to-date", { message: "Auto updates disabled in dev mode" });
+      return { success: true, skipped: true };
     }
     await autoUpdater.checkForUpdates();
     return { success: true };
@@ -2787,20 +3018,37 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
       return { success: false, error: "no-valid-token" };
     }
 
-    const content = fs.readFileSync(filePath);
+    if (!filePath || !fs.existsSync(filePath)) {
+      return { success: false, error: "missing-file" };
+    }
+
+    const stat = fs.statSync(filePath);
     const arg = { path: dropboxPath, mode: "add", autorename: true };
 
     const callDropboxUpload = async (token) => {
-      const response = await fetch("https://content.dropboxapi.com/2/files/upload", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Dropbox-API-Arg": JSON.stringify(arg),
-          "Content-Type": "application/octet-stream"
-        },
-        body: content
-      });
+      const controller = new AbortController();
+      const timeoutMs = 10 * 60 * 1000;
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const contentStream = fs.createReadStream(filePath);
+        const response = await fetch("https://content.dropboxapi.com/2/files/upload", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Dropbox-API-Arg": JSON.stringify(arg),
+            "Content-Type": "application/octet-stream",
+            "Content-Length": String(stat.size)
+          },
+          body: contentStream,
+          signal: controller.signal
+        });
+        return response;
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
 
+    const parseDropboxResponse = async (response) => {
       const raw = await response.text();
       let parsed = null;
       try {
@@ -2812,13 +3060,15 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
       return { response, body: parsed };
     };
 
-    let { response, body } = await callDropboxUpload(validToken);
+    let response = await callDropboxUpload(validToken);
+    let { body } = await parseDropboxResponse(response);
 
     if (response.status === 401) {
       log("[dropbox] got 401, attempting token refresh");
       const newToken = await refreshDropboxToken();
       if (newToken) {
-        ({ response, body } = await callDropboxUpload(newToken));
+        response = await callDropboxUpload(newToken);
+        ({ body } = await parseDropboxResponse(response));
       }
     }
 
@@ -2827,6 +3077,9 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
       return { success: false, error: body || { status: response.status } };
     }
 
+    try {
+      log("[dropbox] upload ok", { path: body?.path_display || dropboxPath, id: body?.id || null });
+    } catch (_) {}
     return { success: true, meta: body };
   } catch (e) {
     return { success: false, error: e.message };

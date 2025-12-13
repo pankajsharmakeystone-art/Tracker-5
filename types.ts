@@ -130,6 +130,7 @@ declare global {
         desktopAPI?: {
             onReady: (callback: (data: any) => void) => void;
             onRegistered: (callback: (data: any) => void) => void;
+            onAuthRequired?: (callback: (data?: { reason?: string }) => void) => (() => void) | void;
             registerUid: (payload: string | { uid: string; desktopToken?: string }) => Promise<any>;
             unregisterUid: () => Promise<any>;
             setAgentStatus: (status: string) => Promise<any>;

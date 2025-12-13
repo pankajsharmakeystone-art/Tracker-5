@@ -20,6 +20,12 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   // handshake
   onReady: (cb) => ipcRenderer.on("desktop-ready", (e, data) => cb(data)),
   onRegistered: (cb) => ipcRenderer.on("desktop-registered", (e, data) => cb(data)),
+  onAuthRequired: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("desktop-auth-required", handler);
+    return () => ipcRenderer.removeListener("desktop-auth-required", handler);
+  },
 
   // register/unregister uid (webapp should call registerUid after login)
   registerUid: (payload) => ipcRenderer.invoke("register-uid", payload),

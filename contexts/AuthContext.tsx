@@ -29,6 +29,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      try {
+        if (import.meta.env.DEV) {
+          console.log('[AuthContext] onAuthStateChanged', currentUser ? { uid: currentUser.uid } : { uid: null });
+        }
+      } catch {
+        // ignore
+      }
       // Ensure we are in a loading state while processing the user
       // (Though usually strictly unnecessary inside the callback if init is true, 
       // it helps if auth state changes during a session).
