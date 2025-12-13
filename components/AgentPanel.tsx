@@ -114,6 +114,15 @@ const AgentPanel: React.FC = () => {
     const manualBreakRef = useRef(false);
     const idleBreakActiveRef = useRef(false);
     const lastDesktopSyncRef = useRef<'working' | 'clocked_out' | 'manual_break' | null>(null);
+
+    const reportDesktopError = useCallback((payload: any) => {
+        try {
+            window.desktopAPI?.reportError?.(payload);
+        } catch {
+            // ignore
+        }
+    }, []);
+
     const notifyDesktopStatus = useCallback(async (status: 'working' | 'clocked_out' | 'manual_break') => {
         try {
             const desktopApi = (window as any).desktopAPI;
@@ -121,8 +130,13 @@ const AgentPanel: React.FC = () => {
             await desktopApi.setAgentStatus(status);
         } catch (err) {
             console.error('[AgentPanel] Failed to notify desktop about status change', status, err);
+            reportDesktopError({
+                message: 'notify_desktop_status_failed',
+                status,
+                error: (err as any)?.message || String(err)
+            });
         }
-    }, []);
+    }, [reportDesktopError]);
     useEffect(() => { workLogRef.current = workLog; }, [workLog]);
 
     useEffect(() => {
@@ -261,6 +275,9 @@ const AgentPanel: React.FC = () => {
                             lastEventTimestamp: serverTimestamp(),
                             breaks: newBreaks,
                             activities
+                        }).catch((err: any) => {
+                            console.error('[AgentPanel] failed to persist idle break', err);
+                            reportDesktopError({ message: 'worklog_update_failed_idle_break', error: err?.message || String(err) });
                         });
                     }
                     // Auto-Resume
@@ -284,6 +301,9 @@ const AgentPanel: React.FC = () => {
                             lastEventTimestamp: serverTimestamp(),
                             breaks: newBreaks,
                             activities
+                        }).catch((err: any) => {
+                            console.error('[AgentPanel] failed to persist idle resume', err);
+                            reportDesktopError({ message: 'worklog_update_failed_idle_resume', error: err?.message || String(err) });
                         });
                         updateAgentStatus(uid, 'online', {
                             manualBreak: false,
@@ -305,7 +325,11 @@ const AgentPanel: React.FC = () => {
         try {
             await performClockIn(userData.uid, activeTeamId, userData.displayName || 'Agent');
             await notifyDesktopStatus('working');
-        } catch (e) { setError('Clock in failed'); console.error(e); }
+        } catch (e: any) {
+            setError('Clock in failed');
+            console.error(e);
+            reportDesktopError({ message: 'clock_in_failed', error: e?.message || String(e) });
+        }
         finally { setLoading(false); }
     };
 
@@ -316,7 +340,10 @@ const AgentPanel: React.FC = () => {
             await performClockOut(userData.uid);
             setWorkLog(null);
             await notifyDesktopStatus('clocked_out');
-        } catch (e) { setError('Clock out failed'); }
+        } catch (e: any) {
+            setError('Clock out failed');
+            reportDesktopError({ message: 'clock_out_failed', error: e?.message || String(e) });
+        }
         finally { setLoading(false); }
     };
 
@@ -348,6 +375,7 @@ const AgentPanel: React.FC = () => {
         } catch (e) {
             setError('Failed to start break');
             console.error(e);
+            reportDesktopError({ message: 'start_break_failed', error: (e as any)?.message || String(e) });
         } finally {
             setLoading(false);
         }
@@ -380,6 +408,7 @@ const AgentPanel: React.FC = () => {
         } catch (e) {
             setError('Failed to end break');
             console.error(e);
+            reportDesktopError({ message: 'end_break_failed', error: (e as any)?.message || String(e) });
         } finally {
             setLoading(false);
         }

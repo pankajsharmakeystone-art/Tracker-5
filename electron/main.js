@@ -227,6 +227,15 @@ const APP_BASE_URL = process.env.APP_BASE_URL || 'https://tracker-5.vercel.app';
 // ---------- HEALTH / CRASH TELEMETRY (best-effort) ----------
 const HEALTH_EVENT_STACK_LIMIT = 2000;
 const HEALTH_LOG_PATH = path.join(app.getPath("userData"), "health-events.jsonl");
+log("[health] local telemetry:", HEALTH_LOG_PATH);
+const WATCHDOG_PING_INTERVAL_MS = 30000;
+const WATCHDOG_PING_TIMEOUT_MS = 5000;
+const WATCHDOG_STALL_THRESHOLD_MS = 2 * 60 * 1000;
+const WATCHDOG_RECOVERY_COOLDOWN_MS = 60 * 1000;
+let lastRendererPongMs = Date.now();
+let watchdogInterval = null;
+let watchdogPingTimeout = null;
+let lastRecoveryAttemptMs = 0;
 
 const safeStringify = (value) => {
   try { return JSON.stringify(value); } catch { return String(value); }
@@ -288,6 +297,85 @@ async function recordHealthEvent(type, details) {
   });
 }
 
+function canAttemptRecovery() {
+  return Date.now() - lastRecoveryAttemptMs > WATCHDOG_RECOVERY_COOLDOWN_MS;
+}
+
+async function attemptDesktopRecovery(reason = "watchdog") {
+  if (!currentUid) return false;
+  if (!canAttemptRecovery()) return false;
+  lastRecoveryAttemptMs = Date.now();
+  log("[watchdog] attempting recovery:", reason);
+  await recordHealthEvent("watchdog_recovery", { reason });
+
+  try {
+    await ensureDesktopAuth();
+  } catch (_) {}
+
+  try {
+    // Restart watches/loops
+    stopAgentStatusLoop();
+    startAgentStatusLoop(currentUid);
+    stopAgentStatusWatch();
+    startAgentStatusWatch(currentUid);
+    stopAutoClockConfigWatch();
+    startAutoClockConfigWatch(currentUid);
+  } catch (_) {}
+
+  try {
+    await flushPendingAgentStatuses();
+  } catch (_) {}
+
+  try {
+    await reassertDesktopStatus(currentUid);
+  } catch (_) {}
+
+  return true;
+}
+
+function stopWatchdog() {
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
+  if (watchdogPingTimeout) {
+    clearTimeout(watchdogPingTimeout);
+    watchdogPingTimeout = null;
+  }
+}
+
+function startWatchdog() {
+  stopWatchdog();
+  watchdogInterval = setInterval(async () => {
+    try {
+      // 1) Ping renderer and reload if it stops responding
+      if (mainWindow?.webContents) {
+        const pingId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        try { mainWindow.webContents.send("health-ping", { id: pingId }); } catch (_) {}
+        if (watchdogPingTimeout) clearTimeout(watchdogPingTimeout);
+        watchdogPingTimeout = setTimeout(async () => {
+          watchdogPingTimeout = null;
+          const age = Date.now() - lastRendererPongMs;
+          if (age <= WATCHDOG_PING_INTERVAL_MS + WATCHDOG_PING_TIMEOUT_MS) return;
+          log("[watchdog] renderer pong stale:", age);
+          await recordHealthEvent("watchdog_renderer_stale", { ageMs: age });
+          try { mainWindow?.webContents?.reload?.(); } catch (_) {}
+        }, WATCHDOG_PING_TIMEOUT_MS);
+      }
+
+      // 2) If we haven't had a successful agentStatus write in a while while active, try recovery.
+      const active = Boolean(currentUid && (agentClockedIn || isRecordingActive));
+      const sinceWrite = Date.now() - (lastStatusWriteMs || 0);
+      if (active && sinceWrite > WATCHDOG_STALL_THRESHOLD_MS) {
+        await attemptDesktopRecovery("status_write_stalled");
+      }
+    } catch (e) {
+      // Avoid cascading failures
+      log("[watchdog] error", e?.message || e);
+    }
+  }, WATCHDOG_PING_INTERVAL_MS);
+}
+
 process.on("uncaughtException", (err) => {
   console.error("[main] uncaughtException", err);
   recordHealthEvent("main_uncaughtException", { message: err?.message, stack: err?.stack });
@@ -306,6 +394,14 @@ app.on("render-process-gone", (_event, _webContents, details) => {
 app.on("child-process-gone", (_event, details) => {
   console.error("[app] child-process-gone", details);
   recordHealthEvent("child_process_gone", details || {});
+});
+
+ipcMain.on("health-pong", (_event, payload) => {
+  lastRendererPongMs = Date.now();
+  // If we were in a recovery loop, this acts as a good sign.
+  if (payload?.id) {
+    // no-op, kept for correlation when debugging
+  }
 });
 // Use .ico on Windows for proper taskbar/shortcut branding; png elsewhere.
 // Resolve icon for dev (repo path) and packaged builds (resourcesPath).
@@ -955,6 +1051,40 @@ function createMainWindow() {
   // Send handshake to renderer
   mainWindow.webContents.on("did-finish-load", () => {
     try { mainWindow.webContents.send("desktop-ready", { ok: true }); } catch(e) {}
+    // Start watchdog once renderer is loaded.
+    startWatchdog();
+  });
+
+  // Detect "frozen" renderer and attempt recovery.
+  let unresponsiveReloadTimer = null;
+  mainWindow.on("unresponsive", () => {
+    log("[window] renderer unresponsive");
+    recordHealthEvent("window_unresponsive", { note: "mainWindow unresponsive" });
+    if (unresponsiveReloadTimer) return;
+    unresponsiveReloadTimer = setTimeout(() => {
+      unresponsiveReloadTimer = null;
+      try {
+        // Best-effort recovery: reload the renderer. This keeps the main process alive
+        // and often recovers from transient hangs (GPU/JS deadlocks).
+        log("[window] attempting reload after unresponsive");
+        mainWindow?.webContents?.reload?.();
+      } catch (e) {
+        log("[window] reload failed", e?.message || e);
+      }
+    }, 15000);
+  });
+
+  mainWindow.on("responsive", () => {
+    log("[window] renderer responsive");
+    if (unresponsiveReloadTimer) {
+      clearTimeout(unresponsiveReloadTimer);
+      unresponsiveReloadTimer = null;
+    }
+    recordHealthEvent("window_responsive", { note: "mainWindow responsive" });
+  });
+
+  mainWindow.on("closed", () => {
+    stopWatchdog();
   });
 
   mainWindow.once("ready-to-show", () => {

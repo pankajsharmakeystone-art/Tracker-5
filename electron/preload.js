@@ -7,6 +7,15 @@ try {
   });
 } catch(e) {}
 
+// Watchdog: respond to main-process health pings even if the renderer JS is stuck.
+try {
+  ipcRenderer.on("health-ping", (_event, payload) => {
+    try {
+      ipcRenderer.send("health-pong", { ts: Date.now(), id: payload?.id || null });
+    } catch (_) {}
+  });
+} catch (e) {}
+
 contextBridge.exposeInMainWorld("desktopAPI", {
   // handshake
   onReady: (cb) => ipcRenderer.on("desktop-ready", (e, data) => cb(data)),
