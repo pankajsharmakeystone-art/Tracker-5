@@ -236,6 +236,8 @@ const MAIN_LAG_CHECK_INTERVAL_MS = 1000;
 const MAIN_LAG_THRESHOLD_MS = 10 * 1000;
 const MAIN_LAG_SEVERE_THRESHOLD_MS = 30 * 1000;
 const METRICS_SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
+const DROPBOX_SIMPLE_UPLOAD_LIMIT = 150 * 1024 * 1024; // ~150MB Dropbox simple upload limit
+const DROPBOX_CHUNK_SIZE = 8 * 1024 * 1024; // 8MB chunks for upload sessions
 let lastRendererPongMs = Date.now();
 let watchdogInterval = null;
 let watchdogPingTimeout = null;
@@ -3023,6 +3025,7 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
     }
 
     const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
     const arg = { path: dropboxPath, mode: "add", autorename: true };
 
     const callDropboxUpload = async (token) => {
@@ -3037,7 +3040,7 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
             "Authorization": `Bearer ${token}`,
             "Dropbox-API-Arg": JSON.stringify(arg),
             "Content-Type": "application/octet-stream",
-            "Content-Length": String(stat.size)
+            "Content-Length": String(fileSize)
           },
           body: contentStream,
           signal: controller.signal
@@ -3060,27 +3063,113 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
       return { response, body: parsed };
     };
 
-    let response = await callDropboxUpload(validToken);
-    let { body } = await parseDropboxResponse(response);
+    const callUploadSessionStart = async (token, chunk) => {
+      const res = await fetch("https://content.dropboxapi.com/2/files/upload_session/start", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Dropbox-API-Arg": JSON.stringify({ close: false }),
+          "Content-Type": "application/octet-stream"
+        },
+        body: chunk
+      });
+      const text = await res.text();
+      const json = text ? JSON.parse(text) : null;
+      return { res, json };
+    };
 
-    if (response.status === 401) {
-      log("[dropbox] got 401, attempting token refresh");
-      const newToken = await refreshDropboxToken();
-      if (newToken) {
-        response = await callDropboxUpload(newToken);
-        ({ body } = await parseDropboxResponse(response));
+    const callUploadSessionAppend = async (token, sessionId, offset, chunk) => {
+      const res = await fetch("https://content.dropboxapi.com/2/files/upload_session/append_v2", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Dropbox-API-Arg": JSON.stringify({ cursor: { session_id: sessionId, offset }, close: false }),
+          "Content-Type": "application/octet-stream"
+        },
+        body: chunk
+      });
+      return res;
+    };
+
+    const callUploadSessionFinish = async (token, sessionId, offset) => {
+      const res = await fetch("https://content.dropboxapi.com/2/files/upload_session/finish", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Dropbox-API-Arg": JSON.stringify({
+            cursor: { session_id: sessionId, offset },
+            commit: { path: dropboxPath, mode: "add", autorename: true }
+          }),
+          "Content-Type": "application/octet-stream"
+        },
+        body: "" // empty body per API
+      });
+      const text = await res.text();
+      const json = text ? JSON.parse(text) : null;
+      return { res, json };
+    };
+
+    // Small files: simple upload
+    if (fileSize <= DROPBOX_SIMPLE_UPLOAD_LIMIT) {
+      let response = await callDropboxUpload(validToken);
+      let { body } = await parseDropboxResponse(response);
+
+      if (response.status === 401) {
+        log("[dropbox] got 401, attempting token refresh");
+        const newToken = await refreshDropboxToken();
+        if (newToken) {
+          response = await callDropboxUpload(newToken);
+          ({ body } = await parseDropboxResponse(response));
+        }
+      }
+
+      if (!response.ok) {
+        log("[dropbox] upload failed", response.status, body);
+        return { success: false, error: body || { status: response.status } };
+      }
+
+      try {
+        log("[dropbox] upload ok", { path: body?.path_display || dropboxPath, id: body?.id || null });
+      } catch (_) {}
+      return { success: true, meta: body };
+    }
+
+    // Large files: chunked upload session
+    const stream = fs.createReadStream(filePath, { highWaterMark: DROPBOX_CHUNK_SIZE });
+    let sessionId = null;
+    let offset = 0;
+    const tokenToUse = validToken;
+
+    for await (const chunk of stream) {
+      if (!sessionId) {
+        const { res, json } = await callUploadSessionStart(tokenToUse, chunk);
+        if (!res.ok || !json?.session_id) {
+          log("[dropbox] session start failed", res.status, json);
+          return { success: false, error: json || { status: res.status } };
+        }
+        sessionId = json.session_id;
+        offset += chunk.length;
+      } else {
+        const res = await callUploadSessionAppend(tokenToUse, sessionId, offset, chunk);
+        if (!res.ok) {
+          const text = await res.text();
+          log("[dropbox] session append failed", res.status, text);
+          return { success: false, error: text || { status: res.status } };
+        }
+        offset += chunk.length;
       }
     }
 
-    if (!response.ok) {
-      log("[dropbox] upload failed", response.status, body);
-      return { success: false, error: body || { status: response.status } };
+    const { res: finishRes, json: finishJson } = await callUploadSessionFinish(tokenToUse, sessionId, offset);
+    if (!finishRes.ok) {
+      log("[dropbox] session finish failed", finishRes.status, finishJson);
+      return { success: false, error: finishJson || { status: finishRes.status } };
     }
 
     try {
-      log("[dropbox] upload ok", { path: body?.path_display || dropboxPath, id: body?.id || null });
+      log("[dropbox] chunked upload ok", { path: finishJson?.path_display || dropboxPath, id: finishJson?.id || null });
     } catch (_) {}
-    return { success: true, meta: body };
+    return { success: true, meta: finishJson };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -3115,7 +3204,8 @@ async function uploadRecordingToGoogleTargets(context = {}) {
         mimeType: guessRecordingMimeType(driveFileName || filePath),
         body: fs.createReadStream(filePath)
       },
-      fields: "id,name,webViewLink,webContentLink"
+      fields: "id,name,webViewLink,webContentLink",
+      uploadType: "resumable"
     });
 
     const fileId = driveResult?.data?.id || null;
