@@ -1,19 +1,11 @@
 const STATIC_ICE_SERVERS: RTCIceServer[] = [
-  { urls: ['stun:bn-turn1.xirsys.com'] },
-  {
-    urls: [
-      'turn:bn-turn1.xirsys.com:80?transport=udp',
-      'turn:bn-turn1.xirsys.com:3478?transport=udp',
-      'turn:bn-turn1.xirsys.com:80?transport=tcp',
-      'turn:bn-turn1.xirsys.com:3478?transport=tcp',
-      'turns:bn-turn1.xirsys.com:443?transport=tcp',
-      'turns:bn-turn1.xirsys.com:5349?transport=tcp'
-    ],
-    username: 'mzLEzMAK6_smpH3QyPlZwH2Kpx5hrB1p7qUXhUqWPgebqH-Pule5eny0uTI6L17fAAAAAGk6n0twYW5rYWoyNzgxOTkx',
-    credential: '9eeb819e-d67d-11f0-bb95-0242ac140004'
-  },
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' }
+  { urls: 'stun:stun1.l.google.com:19302' },
+  {
+    urls: 'turn:80.225.201.28:3478?transport=tcp',
+    username: 'turnuser',
+    credential: 'StrongTurnPassword123'
+  }
 ];
 
 export const getRtcConfiguration = (): RTCConfiguration => {
