@@ -937,9 +937,13 @@ export const streamAllAgentStatuses = (callback: (statuses: Record<string, any>)
 const createForceLogoutRequestId = () => `flr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 const createReconnectRequestId = () => `rcr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
-export const sendCommandToDesktop = async (uid: string, command: 'startRecording' | 'stopRecording' | 'forceLogout') => {
+export const sendCommandToDesktop = async (
+    uid: string,
+    command: 'startRecording' | 'stopRecording' | 'forceLogout',
+    extraData: Record<string, any> = {}
+) => {
     const docRef = doc(db, 'desktopCommands', uid);
-    await setDoc(docRef, { [command]: true, timestamp: serverTimestamp() }, { merge: true });
+    await setDoc(docRef, { [command]: true, timestamp: serverTimestamp(), ...extraData }, { merge: true });
 };
 
 export const requestDesktopReconnect = async (uid: string) => {
@@ -972,7 +976,16 @@ export const forceLogoutAgent = async (uid: string) => {
     }
 
     try {
-        await sendCommandToDesktop(uid, 'forceLogout');
+        // Prefer session-targeted forceLogout (prevents clobbering a newly logged-in desktop).
+        let targetDesktopSessionId: string | null = null;
+        try {
+            const userSnap = await getDoc(doc(db, 'users', uid));
+            const data = userSnap.exists() ? (userSnap.data() as any) : null;
+            targetDesktopSessionId = data?.activeDesktopSessionId ? String(data.activeDesktopSessionId) : null;
+        } catch (_) {
+            // ignore
+        }
+        await sendCommandToDesktop(uid, 'forceLogout', targetDesktopSessionId ? { targetDesktopSessionId } : {});
     } catch (error) {
         console.error('[forceLogoutAgent] Failed to dispatch force logout command to desktop', error);
         throw error;

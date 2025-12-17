@@ -1,9 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.autoClockOutAtShiftEnd = exports.dailyMidnightCleanup = exports.dropboxOauthCallback = exports.dropboxOauthStart = exports.createDropboxOauthSession = exports.issueDesktopToken = void 0;
+exports.enforceSingleActiveDesktopSession = exports.autoClockOutAtShiftEnd = exports.dailyMidnightCleanup = exports.dropboxOauthCallback = exports.dropboxOauthStart = exports.createDropboxOauthSession = exports.issueDesktopToken = void 0;
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const scheduler_1 = require("firebase-functions/v2/scheduler");
+const firestore_1 = require("firebase-functions/v2/firestore");
 const node_fetch_1 = require("node-fetch");
 const crypto = require("crypto");
 const luxon_1 = require("luxon");
@@ -517,5 +518,115 @@ exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", 
         await batch.commit();
         console.log(`Auto clocked out ${count} session(s) at scheduled shift end.`);
     }
+});
+/**
+ * Enforce single active desktop session.
+ *
+ * When the desktop writes users/{uid}.activeDesktopSessionId on login, this trigger:
+ * - Force-closes any currently active worklog at "now" (best-effort, with deltas)
+ * - Creates a new worklog starting at the new desktop login time
+ * - Sends a targeted desktopCommands.forceLogout to the previous desktop session id
+ */
+exports.enforceSingleActiveDesktopSession = (0, firestore_1.onDocumentWritten)({ document: "users/{uid}", region: FUNCTIONS_REGION }, async (event) => {
+    var _a, _b, _c, _d;
+    const uid = event.params.uid;
+    const before = (_b = (_a = event.data) === null || _a === void 0 ? void 0 : _a.before) === null || _b === void 0 ? void 0 : _b.data();
+    const after = (_d = (_c = event.data) === null || _c === void 0 ? void 0 : _c.after) === null || _d === void 0 ? void 0 : _d.data();
+    if (!after)
+        return;
+    const newSessionId = after.activeDesktopSessionId ? String(after.activeDesktopSessionId) : null;
+    if (!newSessionId)
+        return;
+    const oldSessionId = (before === null || before === void 0 ? void 0 : before.activeDesktopSessionId) ? String(before.activeDesktopSessionId) : null;
+    if (oldSessionId && oldSessionId === newSessionId)
+        return;
+    const nowTs = admin.firestore.Timestamp.now();
+    // Find and close any active worklog for this user.
+    const activeSnap = await db
+        .collection("worklogs")
+        .where("userId", "==", uid)
+        .where("status", "in", ["working", "on_break", "break"])
+        .orderBy("clockInTime", "desc")
+        .limit(1)
+        .get();
+    const batch = db.batch();
+    if (!activeSnap.empty) {
+        const docSnap = activeSnap.docs[0];
+        const data = docSnap.data() || {};
+        const lastEventMillis = getTimestampMillis(data.lastEventTimestamp);
+        const nowMillis = nowTs.toMillis();
+        let workDelta = 0;
+        let breakDelta = 0;
+        if (lastEventMillis != null && nowMillis > lastEventMillis) {
+            const elapsedSeconds = (nowMillis - lastEventMillis) / 1000;
+            const normalizedStatus = (data.status || "working").toString().toLowerCase();
+            if (["on_break", "break"].includes(normalizedStatus)) {
+                breakDelta = elapsedSeconds;
+            }
+            else {
+                workDelta = elapsedSeconds;
+            }
+        }
+        const updates = {
+            status: "clocked_out",
+            clockOutTime: nowTs,
+            lastEventTimestamp: nowTs,
+        };
+        if (workDelta > 0)
+            updates.totalWorkSeconds = admin.firestore.FieldValue.increment(workDelta);
+        if (breakDelta > 0)
+            updates.totalBreakSeconds = admin.firestore.FieldValue.increment(breakDelta);
+        const updatedActivities = closeLatestActivityEntry(data.activities, nowTs);
+        if (updatedActivities)
+            updates.activities = updatedActivities;
+        const updatedBreaks = closeOpenBreakEntry(data.breaks, nowTs);
+        if (updatedBreaks)
+            updates.breaks = updatedBreaks;
+        batch.update(db.collection("worklogs").doc(docSnap.id), updates);
+    }
+    // Create a new worklog starting at the new desktop login time.
+    const userDisplayName = (after.displayName || after.userDisplayName || after.name || "").toString();
+    const teamId = (after.teamId || (Array.isArray(after.teamIds) ? after.teamIds[0] : null)) || null;
+    const newLogRef = db.collection("worklogs").doc();
+    batch.set(newLogRef, {
+        userId: uid,
+        userDisplayName,
+        teamId,
+        date: nowTs,
+        clockInTime: nowTs,
+        clockOutTime: null,
+        status: "working",
+        activities: [
+            {
+                type: "working",
+                startTime: nowTs,
+                endTime: null,
+            },
+        ],
+        breaks: [],
+        totalWorkSeconds: 0,
+        totalBreakSeconds: 0,
+        lastEventTimestamp: nowTs,
+        startedBy: "desktop_session_switch",
+        desktopSessionId: newSessionId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    // Ensure agentStatus shows working after the switch.
+    batch.set(db.collection("agentStatus").doc(uid), {
+        status: "working",
+        manualBreak: false,
+        breakStartedAt: admin.firestore.FieldValue.delete(),
+        lastUpdate: nowTs,
+    }, { merge: true });
+    // Force-logout the previous desktop session only.
+    if (oldSessionId) {
+        batch.set(db.collection("desktopCommands").doc(uid), {
+            forceLogout: true,
+            timestamp: nowTs,
+            targetDesktopSessionId: oldSessionId,
+            reason: "desktop_session_switch",
+        }, { merge: true });
+    }
+    await batch.commit();
 });
 //# sourceMappingURL=index.js.map

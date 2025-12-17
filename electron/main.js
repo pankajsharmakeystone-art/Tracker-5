@@ -294,11 +294,18 @@ let agentClockedIn = false; // only monitor idle when true
 const DESKTOP_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
 // RTDB presence (preferred for realtime "connected" state; supports onDisconnect)
-let presenceSessionId = null;
+let desktopSessionId = null;
 let rtdbConnectedCallback = null;
 let rtdbConnectedRef = null;
 let rtdbPresenceRef = null;
 let rtdbPresenceHeartbeatInterval = null;
+
+const ensureDesktopSessionId = () => {
+  if (!desktopSessionId) {
+    desktopSessionId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+  return desktopSessionId;
+};
 
 const isRtdbEnabled = () => Boolean(firebaseConfig?.databaseURL);
 
@@ -319,7 +326,6 @@ function stopRtdbPresence() {
   } catch (_) {}
 
   rtdbPresenceRef = null;
-  presenceSessionId = null;
 }
 
 async function setRtdbPresence(uid, payload) {
@@ -337,20 +343,22 @@ function startRtdbPresence(uid) {
   if (!uid || !isRtdbEnabled()) return;
   stopRtdbPresence();
 
-  presenceSessionId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  // Session id is generated per desktop login/register (not per RTDB reconnect)
+  // so we can target force-logout commands to a specific desktop instance.
+  ensureDesktopSessionId();
   rtdbPresenceRef = rtdb.ref(`presence/${uid}`);
 
   const buildOnlinePayload = () => ({
     state: 'online',
     lastSeen: RTDB_SERVER_TIMESTAMP,
-    sessionId: presenceSessionId,
+    sessionId: desktopSessionId,
     source: 'desktop'
   });
 
   const buildOfflinePayload = () => ({
     state: 'offline',
     lastSeen: RTDB_SERVER_TIMESTAMP,
-    sessionId: presenceSessionId,
+    sessionId: desktopSessionId,
     source: 'desktop'
   });
 
@@ -404,7 +412,7 @@ function getIsoDateFromMs(ms) {
   }
 }
 
-async function retryPendingRecordingUploadsOnLogin() {
+async function retryPendingRecordingUploadsOnLogin(options = {}) {
   // Only retry when we're registered and authenticated.
   if (!currentUid) return;
   try {
@@ -413,7 +421,11 @@ async function retryPendingRecordingUploadsOnLogin() {
     if (!entries.length) return;
 
     // Stability window: skip files modified very recently.
-    const STABLE_FOR_MS = 2 * 60 * 1000;
+    // On forced logout, we may bypass this to flush recordings before sign-out.
+    const ignoreStability = !!options?.ignoreStability;
+    const STABLE_FOR_MS = Number.isFinite(options?.stableForMs)
+      ? Math.max(0, options.stableForMs)
+      : (2 * 60 * 1000);
     const nowMs = Date.now();
 
     for (const fileName of entries) {
@@ -423,7 +435,7 @@ async function retryPendingRecordingUploadsOnLogin() {
       try {
         stat = fs.statSync(filePath);
         if (!stat.isFile() || stat.size <= 0) continue;
-        if (nowMs - stat.mtimeMs < STABLE_FOR_MS) continue;
+        if (!ignoreStability && nowMs - stat.mtimeMs < STABLE_FOR_MS) continue;
       } catch (_) {
         continue;
       }
@@ -1177,6 +1189,14 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   if (wasRecording) showRecordingPopup("Recording stopped");
   stopBackgroundRecording();
 
+  // Best-effort: flush any pending uploads before losing auth / returning to login.
+  // This is especially important for mid-shift handoffs where the old machine must upload.
+  try {
+    await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
+  } catch (_) {
+    // ignore
+  }
+
   await db.collection('agentStatus').doc(uid).set({
     status: 'offline',
     isIdle: false,
@@ -1186,16 +1206,37 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   }, { merge: true }).catch(()=>{});
 
   // Keep the user profile in sync when desktop drives the clock-out/sign-out flow.
-  // (The web flow uses services/db.ts performClockOut(), but desktop can sign out independently.)
+  // In multi-desktop handoff scenarios, avoid clobbering the new desktop's session.
   try {
-    await db.collection("users").doc(uid).set({
-      isLoggedIn: false,
-      activeSession: FieldValue.delete(),
-      lastClockOut: FieldValue.serverTimestamp(),
-      sessionClearedAt: FieldValue.serverTimestamp()
-    }, { merge: true });
+    const userRef = db.collection("users").doc(uid);
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(userRef);
+      const data = snap.exists ? (snap.data() || {}) : {};
+      const activeSid = data?.activeDesktopSessionId ? String(data.activeDesktopSessionId) : null;
+      const thisSid = desktopSessionId ? String(desktopSessionId) : null;
+
+      if (activeSid && thisSid && activeSid !== thisSid) {
+        // Another desktop has taken ownership; do not flip global login state.
+        tx.set(userRef, {
+          lastClockOut: FieldValue.serverTimestamp(),
+          sessionClearedAt: FieldValue.serverTimestamp()
+        }, { merge: true });
+        return;
+      }
+
+      tx.set(userRef, {
+        isLoggedIn: false,
+        activeSession: FieldValue.delete(),
+        lastClockOut: FieldValue.serverTimestamp(),
+        sessionClearedAt: FieldValue.serverTimestamp(),
+        activeDesktopSessionId: FieldValue.delete(),
+        activeDesktopSessionStartedAt: FieldValue.delete(),
+        activeDesktopMachineName: FieldValue.delete(),
+        activeDesktopPlatform: FieldValue.delete()
+      }, { merge: true });
+    });
   } catch (e) {
-    log("[clockOutAndSignOutDesktop] failed to update users.lastClockOut", e?.message || e);
+    log("[clockOutAndSignOutDesktop] failed to update users session fields", e?.message || e);
   }
 
   // If we were forced logged out (via desktopCommands or remote requestId), clear the flag(s)
@@ -1232,6 +1273,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   currentUid = null;
   currentShiftDate = null;
   lastAutoClockOutTargetKey = null;
+  desktopSessionId = null;
 
   try { await clientAuth.signOut(); } catch (err) { console.warn('[clockOutAndSignOutDesktop] signOut failed', err?.message || err); }
 
@@ -2164,6 +2206,19 @@ function startCommandsWatch(uid) {
 
     if (cmd.forceLogout) {
       log("command forceLogout received");
+
+      // Session targeting: if this command is meant for a different desktop instance, ignore it.
+      try {
+        const targetSid = cmd.targetDesktopSessionId ? String(cmd.targetDesktopSessionId) : null;
+        const thisSid = desktopSessionId ? String(desktopSessionId) : null;
+        if (targetSid && thisSid && targetSid !== thisSid) {
+          log('[forceLogout] ignoring command targeted to different session', { targetSid, thisSid });
+          return;
+        }
+      } catch (_) {
+        // ignore
+      }
+
       // Online-only policy: ignore stale force-logout commands so users don't have to "log in twice".
       try {
         const tsMs = cmd.timestamp?.toMillis?.()
@@ -2638,9 +2693,14 @@ ipcMain.handle("register-uid", async (_, payload) => {
       return { success: false, error: "missing-token" };
     }
 
+    const isNewUid = currentUid !== uid;
     currentUid = uid;
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
+
+    if (isNewUid || !desktopSessionId) {
+      desktopSessionId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    }
 
     // fetch and cache displayName for nicer Dropbox folders
     try {
@@ -2663,6 +2723,21 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     // Presence: prefer RTDB (onDisconnect) if enabled, else Firestore heartbeat.
     startRtdbPresence(uid);
+
+    // Publish the active desktop session id so server-side can enforce "single active desktop"
+    // and target force-logout to only the previous machine.
+    try {
+      await db.collection("users").doc(uid).set({
+        isLoggedIn: true,
+        activeDesktopSessionId: desktopSessionId,
+        activeDesktopSessionStartedAt: FieldValue.serverTimestamp(),
+        activeDesktopMachineName: (() => { try { return require('os').hostname(); } catch { return null; } })(),
+        activeDesktopPlatform: process.platform
+      }, { merge: true });
+    } catch (_) {
+      // ignore
+    }
+
     setTimeout(() => {
       // best-effort: only retry after the app is fully up and admin settings likely synced.
       retryPendingRecordingUploadsOnLogin().catch(() => {});
@@ -2734,6 +2809,7 @@ ipcMain.handle("unregister-uid", async () => {
     resetAutoResumeRetry();
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
+    desktopSessionId = null;
     closeManualBreakReminderWindow();
     try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
     return { success: true };
