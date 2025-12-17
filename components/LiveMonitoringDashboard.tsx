@@ -746,7 +746,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             Close
                                         </button>
                                     )}
-                                    {canForceLogoutAgent(agent) && (
+                                    {canForceLogoutAgent(agent) && agent.__desktop?.isConnected && (
                                         <button
                                             onClick={() => handleReconnectDesktop(agent)}
                                             disabled={reconnectPending === agent.userId}
@@ -756,7 +756,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             Reconnect
                                         </button>
                                     )}
-                                    {canForceLogoutAgent(agent) && (
+                                    {canForceLogoutAgent(agent) && agent.__desktop?.isConnected && (
                                         <button
                                             onClick={() => handleForceLogoutAgent(agent)}
                                             disabled={forceLogoutPending === agent.userId}
