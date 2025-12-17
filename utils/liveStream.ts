@@ -1,11 +1,27 @@
 const STATIC_ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
   {
-    urls: 'turn:80.225.201.28:3478?transport=tcp',
-    username: 'turnuser',
-    credential: 'StrongTurnPassword123'
-  }
+    urls: "stun:stun.relay.metered.ca:80",
+  },
+  {
+    urls: "turn:standard.relay.metered.ca:80",
+    username: "581dffe8413f03e70f13a158",
+    credential: "cpB9F27KdBAai4Ol",
+  },
+  {
+    urls: "turn:standard.relay.metered.ca:80?transport=tcp",
+    username: "581dffe8413f03e70f13a158",
+    credential: "cpB9F27KdBAai4Ol",
+  },
+  {
+    urls: "turn:standard.relay.metered.ca:443",
+    username: "581dffe8413f03e70f13a158",
+    credential: "cpB9F27KdBAai4Ol",
+  },
+  {
+    urls: "turns:standard.relay.metered.ca:443?transport=tcp",
+    username: "581dffe8413f03e70f13a158",
+    credential: "cpB9F27KdBAai4Ol",
+  },
 ];
 
 export const getRtcConfiguration = (): RTCConfiguration => {
