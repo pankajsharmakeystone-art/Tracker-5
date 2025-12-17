@@ -226,7 +226,15 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                         {log.userId === currentUserId && <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">(You)</span>}
                                                     </span>
                                                     <div className="mt-1">
-                                                        <span className="text-xs text-gray-500 dark:text-gray-400">{isConnected ? 'Desktop' : 'Web'}</span>
+                                                        <span
+                                                            className={
+                                                                isConnected
+                                                                    ? 'text-xs text-green-600 dark:text-green-400'
+                                                                    : 'text-xs text-red-600 dark:text-red-400'
+                                                            }
+                                                        >
+                                                            {isConnected ? 'Desktop' : 'Web'}
+                                                        </span>
                                                     </div>
                                                 </div>
                                                 
