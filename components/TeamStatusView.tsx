@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { streamTodayWorkLogs, streamAllAgentStatuses, streamGlobalAdminSettings, sendCommandToDesktop } from '../services/db';
+import { streamAllPresence, isPresenceFresh } from '../services/presence';
 import type { WorkLog, AdminSettingsType } from '../types';
 import Spinner from './Spinner';
 import { Timestamp } from 'firebase/firestore';
@@ -46,6 +47,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
     const [isMinimized, setIsMinimized] = useState(false);
     const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
     const [agentStatuses, setAgentStatuses] = useState<Record<string, any>>({});
+    const [presence, setPresence] = useState<Record<string, any>>({});
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
     const [loading, setLoading] = useState(true);
     const [now, setNow] = useState(() => Date.now());
@@ -64,6 +66,11 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
             setAgentStatuses(statuses);
         });
 
+        // Stream RTDB presence (preferred for realtime "desktop connected")
+        const unsubscribePresence = streamAllPresence((p) => {
+            setPresence(p || {});
+        });
+
         // Stream settings to check recording mode
         const unsubscribeSettings = streamGlobalAdminSettings((settings) => {
             setAdminSettings(settings);
@@ -72,6 +79,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
         return () => {
             unsubscribeWorkLogs();
             unsubscribeAgentStatuses();
+            unsubscribePresence();
             unsubscribeSettings();
         };
     }, [teamId]);
@@ -192,7 +200,9 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                             : null;
                                     
                                         const agentStatus = agentStatuses[log.userId];
-                                        const isConnected = agentStatus?.isDesktopConnected === true;
+                                        const presenceEntry = presence?.[log.userId];
+                                        const isConnected = presenceEntry?.state === 'online'
+                                            && isPresenceFresh(presenceEntry?.lastSeen, now, 12 * 60 * 1000);
 
                                         // Status must come from worklogs only (single source of truth).
                                         const displayStatus = normalizeStatus(log.status);

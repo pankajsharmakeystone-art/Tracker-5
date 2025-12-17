@@ -3,6 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
 import { DateTime } from 'luxon';
 import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses } from '../services/db';
+import { streamAllPresence, isPresenceFresh } from '../services/presence';
 import { useAuth } from '../hooks/useAuth';
 import type { WorkLog } from '../types';
 import Spinner from './Spinner';
@@ -335,6 +336,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [rawLogs, setRawLogs] = useState<WorkLog[]>([]);
     const [loading, setLoading] = useState(true);
     const [agentStatuses, setAgentStatuses] = useState<Record<string, any>>({});
+    const [presence, setPresence] = useState<Record<string, any>>({});
     const [editingLog, setEditingLog] = useState<WorkLog | null>(null);
     const [viewingLog, setViewingLog] = useState<WorkLog | null>(null);
     const [liveStreamAgent, setLiveStreamAgent] = useState<{ uid: string; displayName: string; teamId?: string } | null>(null);
@@ -381,6 +383,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         setLoading(true);
         let unsubscribe;
         const unsubscribeStatuses = streamAllAgentStatuses((statuses) => setAgentStatuses(statuses || {}));
+        const unsubscribePresence = streamAllPresence((p) => setPresence(p || {}));
 
         if (isToday) {
             // Queries for: Today's logs + ANY active logs (including yesterday's)
@@ -399,6 +402,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         return () => {
             if (unsubscribe) unsubscribe();
             if (unsubscribeStatuses) unsubscribeStatuses();
+            if (unsubscribePresence) unsubscribePresence();
         };
     }, [teamId, selectedDate, isToday]);
 
@@ -413,6 +417,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const agents = useMemo(() => {
         return rawLogs.map(log => {
             const desktopStatus = agentStatuses?.[log.userId];
+            const presenceEntry = presence?.[log.userId];
             const lastUpdateRaw = desktopStatus?.lastUpdate;
             const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
             const isStale = false; // show the Firestore status as-is; no stale override
@@ -466,12 +471,13 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 lateMinutes,
                 __desktop: {
                     isStale,
-                    isConnected: desktopStatus?.isDesktopConnected === true,
+                            isConnected: presenceEntry?.state === 'online'
+                                && isPresenceFresh(presenceEntry?.lastSeen, now, 12 * 60 * 1000),
                     isRecording: desktopStatus?.isRecording === true
                 }
             };
         });
-    }, [rawLogs, now, selectedDate, organizationTimezone, agentStatuses]);
+    }, [rawLogs, now, selectedDate, organizationTimezone, agentStatuses, presence]);
 
     const handleForceClose = async (log: WorkLog) => {
         if (window.confirm("Force close this session? This marks it as clocked out at the last active time.")) {

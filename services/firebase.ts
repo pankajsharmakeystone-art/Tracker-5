@@ -1,18 +1,20 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
+import { getDatabase } from 'firebase/database';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY ?? '',
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? '',
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID ?? '',
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL ?? '',
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ?? '',
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ?? '',
   appId: import.meta.env.VITE_FIREBASE_APP_ID ?? ''
 };
 
 const missingFields = Object.entries(firebaseConfig)
-  .filter(([, value]) => !value)
+  .filter(([key, value]) => key !== 'databaseURL' && !value)
   .map(([key]) => key);
 
 if (missingFields.length) {
@@ -27,5 +29,24 @@ const app = initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+const deriveDatabaseUrl = () => {
+  const explicit = (import.meta.env.VITE_FIREBASE_DATABASE_URL ?? '').trim();
+  if (explicit) return explicit;
+  const projectId = (import.meta.env.VITE_FIREBASE_PROJECT_ID ?? '').trim();
+  if (!projectId) return '';
+  // Default RTDB URL pattern for most projects. If your project uses a region-specific URL,
+  // set VITE_FIREBASE_DATABASE_URL explicitly.
+  return `https://${projectId}-default-rtdb.firebaseio.com`;
+};
+
+export const rtdb = (() => {
+  const url = deriveDatabaseUrl();
+  try {
+    return url ? getDatabase(app, url) : getDatabase(app);
+  } catch {
+    return getDatabase(app);
+  }
+})();
 
 export default app;

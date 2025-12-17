@@ -50,6 +50,7 @@ function emitAutoUpdateStatus(event, payload = {}) {
 const firebase = require("firebase/compat/app");
 require("firebase/compat/auth");
 require("firebase/compat/firestore");
+require("firebase/compat/database");
 
 const potentialEnvFiles = [];
 
@@ -100,13 +101,14 @@ const firebaseConfig = {
   apiKey: envOr("FIREBASE_API_KEY", "VITE_FIREBASE_API_KEY"),
   authDomain: envOr("FIREBASE_AUTH_DOMAIN", "VITE_FIREBASE_AUTH_DOMAIN"),
   projectId: envOr("FIREBASE_PROJECT_ID", "VITE_FIREBASE_PROJECT_ID"),
+  databaseURL: envOr("FIREBASE_DATABASE_URL", "VITE_FIREBASE_DATABASE_URL"),
   storageBucket: envOr("FIREBASE_STORAGE_BUCKET", "VITE_FIREBASE_STORAGE_BUCKET"),
   messagingSenderId: envOr("FIREBASE_MESSAGING_SENDER_ID", "VITE_FIREBASE_MESSAGING_SENDER_ID"),
   appId: envOr("FIREBASE_APP_ID", "VITE_FIREBASE_APP_ID")
 };
 
 const missingFirebaseKeys = Object.entries(firebaseConfig)
-  .filter(([, value]) => !value)
+  .filter(([key, value]) => key !== 'databaseURL' && !value)
   .map(([key]) => key);
 
 if (missingFirebaseKeys.length) {
@@ -128,6 +130,8 @@ try {
 
 const clientAuth = firebase.auth();
 const db = firebase.firestore();
+const rtdb = firebase.database();
+const RTDB_SERVER_TIMESTAMP = firebase.database.ServerValue.TIMESTAMP;
 const FieldValue = firebase.firestore.FieldValue;
 const Timestamp = firebase.firestore.Timestamp;
 const DEFAULT_ORGANIZATION_TIMEZONE = "Asia/Kolkata";
@@ -162,41 +166,108 @@ function purgeOldRecordings(maxAgeHours = 24) {
 }
 
 const UPLOAD_MANIFEST_PATH = path.join(app.getPath("userData"), "uploaded-recordings.json");
-let uploadedRecordingNames = new Set();
+
+// Upload manifest v2: tracks per-target success to prevent duplicate uploads and allow retry on next login.
+// Backward compatible with the older array-of-filenames format.
+let uploadManifest = { version: 2, files: {} };
 
 function loadUploadedManifest() {
   try {
-    if (fs.existsSync(UPLOAD_MANIFEST_PATH)) {
-      const raw = fs.readFileSync(UPLOAD_MANIFEST_PATH, "utf8");
-      const parsed = JSON.parse(raw || "[]");
-      if (Array.isArray(parsed)) {
-        uploadedRecordingNames = new Set(parsed.filter((x) => typeof x === "string"));
-      }
+    if (!fs.existsSync(UPLOAD_MANIFEST_PATH)) return;
+    const raw = fs.readFileSync(UPLOAD_MANIFEST_PATH, "utf8");
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+
+    // Legacy format: ["file1.webm", ...]
+    if (Array.isArray(parsed)) {
+      uploadManifest = {
+        version: 2,
+        files: Object.fromEntries(
+          parsed
+            .filter((x) => typeof x === "string" && x)
+            .map((name) => [name, { completed: true, uploadedTargets: { dropbox: true, googleSheets: true }, migratedFromLegacy: true }])
+        )
+      };
+      return;
+    }
+
+    // v2 format
+    if (parsed && typeof parsed === "object") {
+      const files = parsed.files && typeof parsed.files === "object" ? parsed.files : {};
+      uploadManifest = {
+        version: 2,
+        files
+      };
     }
   } catch (err) {
     log("[uploads] failed to load manifest", err?.message || err);
-    uploadedRecordingNames = new Set();
+    uploadManifest = { version: 2, files: {} };
   }
 }
 
 function persistUploadedManifest() {
   try {
-    const arr = Array.from(uploadedRecordingNames);
-    fs.writeFileSync(UPLOAD_MANIFEST_PATH, JSON.stringify(arr), "utf8");
+    fs.writeFileSync(UPLOAD_MANIFEST_PATH, JSON.stringify(uploadManifest), "utf8");
   } catch (err) {
     log("[uploads] failed to persist manifest", err?.message || err);
   }
 }
 
-function markRecordingUploaded(fileName) {
+function getManifestEntry(fileName) {
+  if (!fileName) return null;
+  return uploadManifest?.files?.[fileName] || null;
+}
+
+function upsertManifestEntry(fileName, patch = {}) {
   if (!fileName) return;
-  uploadedRecordingNames.add(fileName);
+  if (!uploadManifest || typeof uploadManifest !== "object") uploadManifest = { version: 2, files: {} };
+  if (!uploadManifest.files || typeof uploadManifest.files !== "object") uploadManifest.files = {};
+  const existing = uploadManifest.files[fileName] && typeof uploadManifest.files[fileName] === "object"
+    ? uploadManifest.files[fileName]
+    : {};
+  uploadManifest.files[fileName] = { ...existing, ...patch };
   persistUploadedManifest();
 }
 
-function isRecordingAlreadyUploaded(fileName) {
-  if (!fileName) return false;
-  return uploadedRecordingNames.has(fileName);
+function setTargetUploadResult(fileName, target, result = {}) {
+  if (!fileName || !target) return;
+  const existing = getManifestEntry(fileName) || {};
+  const uploadedTargets = existing.uploadedTargets && typeof existing.uploadedTargets === "object" ? existing.uploadedTargets : {};
+  const lastErrors = existing.lastErrors && typeof existing.lastErrors === "object" ? existing.lastErrors : {};
+
+  if (result.success) {
+    uploadedTargets[target] = true;
+    delete lastErrors[target];
+  } else {
+    uploadedTargets[target] = false;
+    lastErrors[target] = String(result.error || result.reason || "upload-failed");
+  }
+
+  upsertManifestEntry(fileName, {
+    uploadedTargets,
+    lastErrors,
+    lastAttemptAt: new Date().toISOString()
+  });
+}
+
+function isTargetUploaded(fileName, target) {
+  const entry = getManifestEntry(fileName);
+  if (!entry) return false;
+  if (entry.completed === true) return true;
+  const uploadedTargets = entry.uploadedTargets || {};
+  return uploadedTargets[target] === true;
+}
+
+function markRecordingCompleted(fileName) {
+  upsertManifestEntry(fileName, {
+    completed: true,
+    completedAt: new Date().toISOString()
+  });
+}
+
+function isRecordingCompleted(fileName) {
+  const entry = getManifestEntry(fileName);
+  return Boolean(entry?.completed);
 }
 
 loadUploadedManifest();
@@ -218,6 +289,198 @@ let commandUnsub = null;
 let statusInterval = null;
 let lastIdleState = false; // track previous idle state
 let agentClockedIn = false; // only monitor idle when true
+
+// Presence heartbeat interval (RTDB lastSeen refresh) — 5 minutes per product requirement.
+const DESKTOP_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+
+// RTDB presence (preferred for realtime "connected" state; supports onDisconnect)
+let presenceSessionId = null;
+let rtdbConnectedCallback = null;
+let rtdbConnectedRef = null;
+let rtdbPresenceRef = null;
+let rtdbPresenceHeartbeatInterval = null;
+
+const isRtdbEnabled = () => Boolean(firebaseConfig?.databaseURL);
+
+function stopRtdbPresence() {
+  try {
+    if (rtdbConnectedRef && rtdbConnectedCallback) {
+      rtdbConnectedRef.off('value', rtdbConnectedCallback);
+    }
+  } catch (_) {}
+  rtdbConnectedRef = null;
+  rtdbConnectedCallback = null;
+
+  try {
+    if (rtdbPresenceHeartbeatInterval) {
+      clearInterval(rtdbPresenceHeartbeatInterval);
+      rtdbPresenceHeartbeatInterval = null;
+    }
+  } catch (_) {}
+
+  rtdbPresenceRef = null;
+  presenceSessionId = null;
+}
+
+async function setRtdbPresence(uid, payload) {
+  if (!uid || !isRtdbEnabled()) return;
+  try {
+    const authed = await ensureDesktopAuth();
+    if (!authed) return;
+    await rtdb.ref(`presence/${uid}`).set(payload);
+  } catch (_) {
+    // best-effort
+  }
+}
+
+function startRtdbPresence(uid) {
+  if (!uid || !isRtdbEnabled()) return;
+  stopRtdbPresence();
+
+  presenceSessionId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  rtdbPresenceRef = rtdb.ref(`presence/${uid}`);
+
+  const buildOnlinePayload = () => ({
+    state: 'online',
+    lastSeen: RTDB_SERVER_TIMESTAMP,
+    sessionId: presenceSessionId,
+    source: 'desktop'
+  });
+
+  const buildOfflinePayload = () => ({
+    state: 'offline',
+    lastSeen: RTDB_SERVER_TIMESTAMP,
+    sessionId: presenceSessionId,
+    source: 'desktop'
+  });
+
+  // Use .info/connected to register onDisconnect once we're actually connected.
+  rtdbConnectedRef = rtdb.ref('.info/connected');
+  rtdbConnectedCallback = async (snap) => {
+    try {
+      if (!snap?.val?.()) return;
+
+      // Ensure disconnect will flip us offline.
+      try {
+        await rtdbPresenceRef.onDisconnect().set(buildOfflinePayload());
+      } catch (_) {
+        // ignore
+      }
+
+      // Mark online now.
+      await setRtdbPresence(uid, buildOnlinePayload());
+    } catch (_) {
+      // ignore
+    }
+  };
+
+  try {
+    rtdbConnectedRef.on('value', rtdbConnectedCallback);
+  } catch (_) {
+    // ignore
+  }
+
+  // Heartbeat refresh (5 minutes) to update lastSeen.
+  rtdbPresenceHeartbeatInterval = setInterval(() => {
+    setRtdbPresence(uid, buildOnlinePayload()).catch(() => {});
+  }, DESKTOP_HEARTBEAT_INTERVAL_MS);
+}
+
+
+
+function getIsoDateFromMs(ms) {
+  try {
+    const d = new Date(ms);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  } catch (_) {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+}
+
+async function retryPendingRecordingUploadsOnLogin() {
+  // Only retry when we're registered and authenticated.
+  if (!currentUid) return;
+  try {
+    if (!fs.existsSync(RECORDINGS_DIR)) return;
+    const entries = fs.readdirSync(RECORDINGS_DIR).filter((n) => typeof n === 'string' && n.toLowerCase().endsWith('.webm'));
+    if (!entries.length) return;
+
+    // Stability window: skip files modified very recently.
+    const STABLE_FOR_MS = 2 * 60 * 1000;
+    const nowMs = Date.now();
+
+    for (const fileName of entries) {
+      if (!currentUid) return;
+      const filePath = path.join(RECORDINGS_DIR, fileName);
+      let stat;
+      try {
+        stat = fs.statSync(filePath);
+        if (!stat.isFile() || stat.size <= 0) continue;
+        if (nowMs - stat.mtimeMs < STABLE_FOR_MS) continue;
+      } catch (_) {
+        continue;
+      }
+
+      if (isRecordingCompleted(fileName)) {
+        // File might remain if delete previously failed — clean it up.
+        try { await fs.promises.unlink(filePath); } catch (_) {}
+        continue;
+      }
+
+      const enabledTargets = [];
+      if (shouldUploadToDropbox()) enabledTargets.push('dropbox');
+      if (shouldUploadToGoogleSheets()) enabledTargets.push('googleSheets');
+      if (!enabledTargets.length) continue;
+
+      // If all currently enabled targets already succeeded (per manifest), mark complete and delete.
+      const allDone = enabledTargets.every((t) => isTargetUploaded(fileName, t));
+      if (allDone) {
+        markRecordingCompleted(fileName);
+        try { await fs.promises.unlink(filePath); } catch (_) {}
+        continue;
+      }
+
+      // Use the file timestamp for stable paths and names across retries.
+      const safeName = (cachedDisplayName ? String(cachedDisplayName) : (currentUid || 'unknown')).replace(/[\/:*?"<>|]/g, '-');
+      const isoDate = getIsoDateFromMs(stat.mtimeMs);
+      const googleDriveFileName = `${safeName}-${isoDate}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
+
+      if (enabledTargets.includes('dropbox') && !isTargetUploaded(fileName, 'dropbox')) {
+        const dropboxPath = `/recordings/${safeName}/${isoDate}/${fileName}`;
+        log("[uploads] retrying Dropbox upload:", dropboxPath);
+        const dropboxResult = await uploadToDropboxWithPath(filePath, dropboxPath);
+        setTargetUploadResult(fileName, 'dropbox', { success: !!dropboxResult?.success, error: dropboxResult?.error || dropboxResult?.reason || null });
+      }
+
+      if (enabledTargets.includes('googleSheets') && !isTargetUploaded(fileName, 'googleSheets')) {
+        log("[uploads] retrying Google upload:", filePath);
+        const googleResult = await uploadRecordingToGoogleTargets({
+          filePath,
+          fileName,
+          safeName,
+          isoDate,
+          googleFileName: googleDriveFileName
+        });
+        setTargetUploadResult(fileName, 'googleSheets', { success: !!googleResult?.success, error: googleResult?.error || googleResult?.reason || null });
+      }
+
+      const allSucceededAfter = enabledTargets.every((t) => isTargetUploaded(fileName, t));
+      if (allSucceededAfter) {
+        markRecordingCompleted(fileName);
+        try { await fs.promises.unlink(filePath); } catch (_) {}
+      }
+    }
+  } catch (err) {
+    log('[uploads] retry scan failed', err?.message || err);
+  }
+}
 let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
@@ -792,7 +1055,6 @@ async function reconcileRecordingAfterRegister(uid) {
     await db.collection('agentStatus').doc(uid).set({
       status: 'working',
       isRecording: true,
-      isDesktopConnected: true,
       lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(() => {});
 
@@ -818,7 +1080,6 @@ async function reassertDesktopStatus(uid) {
         manualBreak: false,
         breakStartedAt: FieldValue.delete(),
         isIdle: false,
-        isDesktopConnected: true,
         lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true }).catch(() => {});
     }
@@ -826,14 +1087,6 @@ async function reassertDesktopStatus(uid) {
     console.warn('[reassertDesktopStatus] failed', err?.message || err);
   }
 }
-
-const buildDesktopStatusMetadata = () => ({
-  lastUpdate: FieldValue.serverTimestamp(),
-  appVersion: app.getVersion(),
-  platform: process.platform,
-  machineName: os.hostname(),
-  isDesktopConnected: true
-});
 
 const isAutoRecordingEnabled = () => {
   const settings = cachedAdminSettings || {};
@@ -910,6 +1163,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   agentClockedIn = false;
   stopAgentStatusLoop();
+  stopRtdbPresence();
 
   const wasRecording = isRecordingActive;
   isRecordingActive = false;
@@ -928,7 +1182,6 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     isIdle: false,
     idleReason: FieldValue.delete(),
     lockedBySystem: false,
-    isDesktopConnected: false,
     lastUpdate: FieldValue.serverTimestamp()
   }, { merge: true }).catch(()=>{});
 
@@ -1014,8 +1267,7 @@ async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
         idleSecs,
         idleReason: reason || null,
         lockedBySystem: reason === 'system_lock',
-        isDesktopConnected: true,
-        ...buildDesktopStatusMetadata()
+        lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true });
     recordStatusWriteSuccess();
   } catch (_) {}
@@ -1036,8 +1288,7 @@ async function pushActiveStatus(uid, { idleSecs } = {}) {
         idleSecs,
         idleReason: FieldValue.delete(),
         lockedBySystem: false,
-        isDesktopConnected: true,
-        ...buildDesktopStatusMetadata()
+        lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true });
     recordStatusWriteSuccess();
   } catch (_) {}
@@ -1862,8 +2113,7 @@ function startCommandsWatch(uid) {
         await db.collection("agentStatus").doc(uid).set({
           reconnectAckId: requestId,
           reconnectAckAt: FieldValue.serverTimestamp(),
-          lastUpdate: FieldValue.serverTimestamp(),
-          isDesktopConnected: true
+          lastUpdate: FieldValue.serverTimestamp()
         }, { merge: true }).catch(()=>{});
       } catch (e) {
         log('[reconnect] failed', e?.message || e);
@@ -2294,7 +2544,6 @@ async function performAutoClockOut() {
     await db.collection('agentStatus').doc(currentUid).set({
       status: 'offline',
       isIdle: false,
-      isDesktopConnected: false,
       lastUpdate: FieldValue.serverTimestamp()
     }, { merge: true }).catch(()=>{});
 
@@ -2399,6 +2648,13 @@ ipcMain.handle("register-uid", async (_, payload) => {
     await reconcileRecordingAfterRegister(uid);
     await reassertDesktopStatus(uid);
 
+    // Presence: prefer RTDB (onDisconnect) if enabled, else Firestore heartbeat.
+    startRtdbPresence(uid);
+    setTimeout(() => {
+      // best-effort: only retry after the app is fully up and admin settings likely synced.
+      retryPendingRecordingUploadsOnLogin().catch(() => {});
+    }, 10 * 1000);
+
     // Upload the latest locally persisted health event (if any) so crashes that couldn't
     // write to Firestore still become visible after the next successful login.
     try {
@@ -2446,9 +2702,10 @@ ipcMain.handle("unregister-uid", async () => {
     stopAgentStatusWatch();
     stopAutoClockConfigWatch();
     stopStatusHealthCheck();
+    stopRtdbPresence();
     pendingAgentStatuses.length = 0;
     if (currentUid) {
-      await db.collection("agentStatus").doc(currentUid).set({ isDesktopConnected: false, status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      await db.collection("agentStatus").doc(currentUid).set({ status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
     }
 
     // ensure renderer clears local desktop uid to prevent auto login
@@ -2521,7 +2778,6 @@ async function applyAgentStatus(status) {
       manualBreak: true,
       breakStartedAt: FieldValue.serverTimestamp(),
       isIdle: false,
-      isDesktopConnected: true,
       lastUpdate: FieldValue.serverTimestamp(),
       isRecording: false
     }, "manual_break");
@@ -2552,7 +2808,6 @@ async function applyAgentStatus(status) {
     await writeAgentStatusOrThrow({
       status: 'offline',
       isIdle: false,
-      isDesktopConnected: false,
       lastUpdate: FieldValue.serverTimestamp(),
       isRecording: false
     }, "clocked_out");
@@ -2592,7 +2847,6 @@ async function applyAgentStatus(status) {
     await writeAgentStatusOrThrow({
       status: 'online',
       isIdle: false,
-      isDesktopConnected: true,
       lastUpdate: FieldValue.serverTimestamp(),
       manualBreak: false,
       breakStartedAt: FieldValue.delete(),
@@ -2775,33 +3029,46 @@ ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
 const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
   const shouldEvaluateAutoResume = Boolean(meta?.isLastSession);
   try {
-    if (isRecordingAlreadyUploaded(fileName)) {
-      log("[uploads] skipping duplicate recording", fileName);
-      return { success: true, skipped: true, reason: "already-uploaded" };
-    }
-
     const buffer = Buffer.from(arrayBuffer);
     const filePath = path.join(RECORDINGS_DIR, fileName);
     await fs.promises.writeFile(filePath, buffer);
     log("Saved recording to:", filePath);
 
+    // File meta for manifest / retry logic.
+    try {
+      const stat = fs.statSync(filePath);
+      upsertManifestEntry(fileName, { size: stat.size, mtimeMs: stat.mtimeMs });
+    } catch (_) {}
+
+    // If this file was already fully handled (e.g., delete failed previously), skip work.
+    if (isRecordingCompleted(fileName)) {
+      try { await fs.promises.unlink(filePath); } catch (_) {}
+      return { success: true, skipped: true, reason: 'already-completed' };
+    }
+
     const safeName = (cachedDisplayName ? String(cachedDisplayName) : (currentUid || 'unknown')).replace(/[\/:*?"<>|]/g, '-');
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    const isoDate = `${yyyy}-${mm}-${dd}`;
+    // Use file mtime for stable paths across retries.
+    let isoDate = getIsoDateFromMs(Date.now());
+    try {
+      const stat = fs.statSync(filePath);
+      isoDate = getIsoDateFromMs(stat.mtimeMs);
+    } catch (_) {}
     const googleDriveFileName = `${safeName}-${isoDate}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
     const uploadResults = [];
 
-    if (shouldUploadToDropbox()) {
+    const enabledTargets = [];
+    if (shouldUploadToDropbox()) enabledTargets.push('dropbox');
+    if (shouldUploadToGoogleSheets()) enabledTargets.push('googleSheets');
+
+    if (enabledTargets.includes('dropbox') && !isTargetUploaded(fileName, 'dropbox')) {
       const dropboxPath = `/recordings/${safeName}/${isoDate}/${fileName}`;
       log("uploading to Dropbox:", dropboxPath);
       const dropboxResult = await uploadToDropboxWithPath(filePath, dropboxPath);
       uploadResults.push({ target: 'dropbox', path: dropboxPath, ...dropboxResult });
+      setTargetUploadResult(fileName, 'dropbox', { success: !!dropboxResult?.success, error: dropboxResult?.error || dropboxResult?.reason || null });
     }
 
-    if (shouldUploadToGoogleSheets()) {
+    if (enabledTargets.includes('googleSheets') && !isTargetUploaded(fileName, 'googleSheets')) {
       log("uploading to Google Drive/Sheets:", filePath);
       const googleResult = await uploadRecordingToGoogleTargets({
         filePath,
@@ -2811,6 +3078,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
         googleFileName: googleDriveFileName
       });
       uploadResults.push({ target: 'googleSheets', ...googleResult });
+      setTargetUploadResult(fileName, 'googleSheets', { success: !!googleResult?.success, error: googleResult?.error || googleResult?.reason || null });
     }
 
     if (currentUid && uploadResults.length) {
@@ -2832,8 +3100,14 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
         }, { merge: true });
     }
 
-    if (uploadResults.some((entry) => entry.success)) {
-      markRecordingUploaded(fileName);
+    // Only delete local file when ALL currently enabled targets have succeeded.
+    // This guarantees we can retry failures on next login without duplicating successful uploads.
+    const allEnabledSucceeded = enabledTargets.length > 0
+      ? enabledTargets.every((t) => isTargetUploaded(fileName, t))
+      : uploadResults.some((entry) => entry.success);
+
+    if (allEnabledSucceeded) {
+      markRecordingCompleted(fileName);
       try {
         await fs.promises.unlink(filePath);
       } catch (unlinkErr) {
@@ -3026,7 +3300,8 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
 
     const stat = fs.statSync(filePath);
     const fileSize = stat.size;
-    const arg = { path: dropboxPath, mode: "add", autorename: true };
+    // Use overwrite so retries (or crash-before-manifest) do not create duplicate files.
+    const arg = { path: dropboxPath, mode: "overwrite", autorename: false };
 
     const callDropboxUpload = async (token) => {
       const controller = new AbortController();
@@ -3098,7 +3373,7 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
           "Authorization": `Bearer ${token}`,
           "Dropbox-API-Arg": JSON.stringify({
             cursor: { session_id: sessionId, offset },
-            commit: { path: dropboxPath, mode: "add", autorename: true }
+            commit: { path: dropboxPath, mode: "overwrite", autorename: false }
           }),
           "Content-Type": "application/octet-stream"
         },

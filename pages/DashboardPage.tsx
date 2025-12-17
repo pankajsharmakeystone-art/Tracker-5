@@ -73,8 +73,8 @@ const DashboardPage: React.FC = () => {
     const performLogout = async () => {
         if (currentUid) {
             try {
-                // Update Firestore agentStatus to offline and isDesktopConnected: false
-                await updateAgentStatus(currentUid, 'offline', { isDesktopConnected: false });
+                // Update Firestore agentStatus to offline (connectivity is tracked in RTDB presence)
+                await updateAgentStatus(currentUid, 'offline');
             } catch (e) {
                 console.error("Failed to update agent status during logout:", e);
             }
