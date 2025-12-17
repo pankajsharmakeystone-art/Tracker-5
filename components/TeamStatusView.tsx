@@ -229,8 +229,8 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                         <span
                                                             className={
                                                                 isConnected
-                                                                    ? 'text-xs text-green-600 dark:text-green-400'
-                                                                    : 'text-xs text-red-600 dark:text-red-400'
+                                                                    ? 'px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                                                                    : 'px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
                                                             }
                                                         >
                                                             {isConnected ? 'Desktop' : 'Web'}
