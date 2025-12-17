@@ -67,16 +67,24 @@ const computeBreakBuckets = (log: WorkLog) => {
     const breaks = Array.isArray((log as any)?.breaks) ? (log as any).breaks : [];
     let manualSeconds = 0;
     let idleSeconds = 0;
+    let accounted = false;
     const fallbackEnd = normalizeDate(log.clockOutTime) || normalizeDate(log.lastEventTimestamp) || new Date();
 
     breaks.forEach((entry: any) => {
         const start = normalizeDate(entry?.startTime);
         const end = normalizeDate(entry?.endTime) || fallbackEnd;
         if (!start || !end || end <= start) return;
+        accounted = true;
         const duration = (end.getTime() - start.getTime()) / 1000;
         if (deriveBreakCause(entry) === 'idle') idleSeconds += duration;
         else manualSeconds += duration;
     });
+
+    // Fallback for older logs that may not have a `breaks[]` array.
+    if (!accounted) {
+        manualSeconds = typeof log.totalBreakSeconds === 'number' ? log.totalBreakSeconds : 0;
+        idleSeconds = 0;
+    }
 
     return { manualSeconds, idleSeconds };
 };
@@ -156,13 +164,13 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             logs.forEach((log: WorkLog) => {
                 const logDate = formatLocalDate(log.date, organizationTimezone);
                 const workTime = formatDuration(log.totalWorkSeconds);
-                const breakTime = formatDuration(log.totalBreakSeconds);
                 const clockIn = formatTimeOfDay(log.clockInTime, organizationTimezone);
                 const clockOut = formatTimeOfDay(log.clockOutTime, organizationTimezone);
                 const lateLogin = formatLateMinutes(log.lateMinutes);
                 const { manualSeconds, idleSeconds } = computeBreakBuckets(log);
                 const manualBreak = formatDuration(manualSeconds);
                 const idleBreak = formatDuration(idleSeconds);
+                const breakTime = formatDuration(manualSeconds + idleSeconds);
                 const safeClockIn = clockIn ? `"${clockIn}"` : '""';
                 const safeClockOut = clockOut ? `"${clockOut}"` : '""';
                 csvContent += `${logDate},"${log.userDisplayName}",${safeClockIn},${safeClockOut},${lateLogin},${workTime},${manualBreak},${idleBreak},${breakTime}\n`;

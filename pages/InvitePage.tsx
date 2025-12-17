@@ -2,7 +2,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { signUpWithInvite } from '../services/auth';
-import { getTeamById } from '../services/db';
 import type { Team } from '../types';
 import { AuthError } from 'firebase/auth';
 
@@ -27,12 +26,13 @@ const InvitePage: React.FC = () => {
 
         const validateInvite = async () => {
             try {
-                const teamData = await getTeamById(teamId);
-                if (teamData) {
-                    setTeam(teamData);
-                } else {
+                const resp = await fetch(`/api/validate-invite?teamId=${encodeURIComponent(teamId)}`);
+                const payload = await resp.json().catch(() => null);
+                if (!resp.ok || !payload?.valid || !payload?.team?.id) {
                     setError('This invitation link is invalid or has expired.');
+                    return;
                 }
+                setTeam({ id: payload.team.id, name: payload.team.name } as Team);
             } catch (err) {
                 setError('Failed to validate invitation link.');
             } finally {

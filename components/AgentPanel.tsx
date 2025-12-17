@@ -256,6 +256,19 @@ const AgentPanel: React.FC = () => {
                 if (currentLog && !data.manualBreak) {
                     const getDuration = (ts: any) => (Date.now() - getMillis(ts)) / 1000;
 
+                    const getLastBreak = () => {
+                        const breaks = (currentLog as any)?.breaks;
+                        if (!Array.isArray(breaks) || breaks.length === 0) return null;
+                        return breaks[breaks.length - 1];
+                    };
+
+                    const lastBreak = getLastBreak();
+                    const hasOpenIdleBreak = Boolean(
+                        lastBreak &&
+                        !lastBreak?.endTime &&
+                        deriveBreakCause(lastBreak) === 'idle'
+                    );
+
                     // Auto-Break on Idle
                     if (data.isIdle === true && currentLog.status === 'working') {
                         idleBreakActiveRef.current = true;
@@ -281,7 +294,7 @@ const AgentPanel: React.FC = () => {
                         });
                     }
                     // Auto-Resume
-                    else if (data.isIdle === false && (idleBreakActiveRef.current || currentLog.status === 'on_break' || (currentLog.status as any) === 'break')) {
+                    else if (data.isIdle === false && (idleBreakActiveRef.current || hasOpenIdleBreak)) {
                         idleBreakActiveRef.current = false;
                         // Don't auto-resume if it was a manual break (handled by manualBreak check above generally, but good to be safe)
                         const bDur = getDuration(currentLog.lastEventTimestamp);
