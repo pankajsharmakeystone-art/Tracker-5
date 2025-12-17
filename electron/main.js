@@ -1569,14 +1569,27 @@ function createRecorderWindow() {
 function startBackgroundRecording() {
   try {
     if (!recorderWindow) createRecorderWindow();
-    if (!recorderWindow || recorderWindow.isDestroyed()) return;
+    if (!recorderWindow || recorderWindow.isDestroyed()) {
+      // If we can't even reach the recorder window, recording is not actually running.
+      isRecordingActive = false;
+      if (currentUid) {
+        db.collection('agentStatus').doc(currentUid)
+          .set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
+          .catch(() => {});
+      }
+      return;
+    }
     const quality = String(cachedAdminSettings?.recordingQuality || "720p");
     recorderWindow.webContents.send('recorder-start', { recordingQuality: quality });
     log('[recorder] start command sent', { quality });
   } catch (error) {
     log('[recorder] failed to start background recording', error?.message || error);
-    // If start failed, allow future attempts by clearing the active flag.
     isRecordingActive = false;
+    if (currentUid) {
+      db.collection('agentStatus').doc(currentUid)
+        .set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
+        .catch(() => {});
+    }
   }
 }
 
