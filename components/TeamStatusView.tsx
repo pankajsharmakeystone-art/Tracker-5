@@ -201,8 +201,15 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                     
                                         const agentStatus = agentStatuses[log.userId];
                                         const presenceEntry = presence?.[log.userId];
-                                        const isConnected = presenceEntry?.state === 'online'
-                                            && isPresenceFresh(presenceEntry?.lastSeen, now, 12 * 60 * 1000);
+                                        const lastUpdateRaw = agentStatus?.lastUpdate;
+                                        const lastUpdateMs = lastUpdateRaw?.toMillis
+                                            ? lastUpdateRaw.toMillis()
+                                            : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
+                                        const isConnected = (
+                                            (presenceEntry?.state === 'online'
+                                                && isPresenceFresh(presenceEntry?.lastSeen, now, 12 * 60 * 1000))
+                                            || (typeof lastUpdateMs === 'number' && (now - lastUpdateMs) <= 12 * 60 * 1000)
+                                        );
 
                                         // Status must come from worklogs only (single source of truth).
                                         const displayStatus = normalizeStatus(log.status);

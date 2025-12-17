@@ -418,8 +418,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         return rawLogs.map(log => {
             const desktopStatus = agentStatuses?.[log.userId];
             const presenceEntry = presence?.[log.userId];
-            const lastUpdateRaw = desktopStatus?.lastUpdate;
-            const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
+                    const lastUpdateRaw = desktopStatus?.lastUpdate;
+                    const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
             const isStale = false; // show the Firestore status as-is; no stale override
             const isActive = log.status !== 'clocked_out';
             const isZombie = isSessionStale(log) && isActive;
@@ -471,8 +471,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 lateMinutes,
                 __desktop: {
                     isStale,
-                            isConnected: presenceEntry?.state === 'online'
-                                && isPresenceFresh(presenceEntry?.lastSeen, now, 12 * 60 * 1000),
+                            isConnected: (
+                                (presenceEntry?.state === 'online'
+                                    && isPresenceFresh(presenceEntry?.lastSeen, now, 12 * 60 * 1000))
+                                || (typeof lastUpdateMs === 'number' && (now - lastUpdateMs) <= 12 * 60 * 1000)
+                            ),
                     isRecording: desktopStatus?.isRecording === true
                 }
             };
