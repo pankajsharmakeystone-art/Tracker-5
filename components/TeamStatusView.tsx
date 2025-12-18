@@ -132,10 +132,25 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
     const workingCount = uniqueAgentLogs.filter(log => log.status === 'working').length;
     const onBreakCount = uniqueAgentLogs.filter(log => log.status === 'on_break' || (log.status as any) === 'break').length;
 
-    // Sort logs to show the current user on top, then alphabetical
+    // Sort: Working/Online first, then Break, then Offline. Within each group: current user first, then alphabetical.
     const displayLogs = [...uniqueAgentLogs].sort((a, b) => {
-        if (a.userId === currentUserId) return -1;
-        if (b.userId === currentUserId) return 1;
+        const aStatus = normalizeStatus(a.status);
+        const bStatus = normalizeStatus(b.status);
+
+        const priority = (s: WorkLog['status']) => {
+            if (s === 'working') return 0;
+            if (s === 'on_break') return 1;
+            return 2; // clocked_out (offline)
+        };
+
+        const pDiff = priority(aStatus) - priority(bStatus);
+        if (pDiff !== 0) return pDiff;
+
+        if (currentUserId) {
+            if (a.userId === currentUserId) return -1;
+            if (b.userId === currentUserId) return 1;
+        }
+
         return a.userDisplayName.localeCompare(b.userDisplayName);
     });
 
