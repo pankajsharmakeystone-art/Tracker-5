@@ -339,6 +339,33 @@ async function setRtdbPresence(uid, payload) {
   }
 }
 
+async function setRtdbPresenceOfflineIfSessionMatches(uid) {
+  if (!uid || !isRtdbEnabled()) return;
+  if (!desktopSessionId) return;
+  try {
+    const authed = await ensureDesktopAuth();
+    if (!authed) return;
+
+    // Guard: don't overwrite a newer desktop instance's presence.
+    // Only flip offline if the current RTDB record is for *this* session.
+    const ref = rtdb.ref(`presence/${uid}`);
+    const snap = await ref.once('value');
+    const existing = snap?.val?.() || null;
+    const existingSid = existing?.sessionId ? String(existing.sessionId) : null;
+    const thisSid = String(desktopSessionId);
+    if (existingSid && existingSid !== thisSid) return;
+
+    await ref.set({
+      state: 'offline',
+      lastSeen: RTDB_SERVER_TIMESTAMP,
+      sessionId: desktopSessionId,
+      source: 'desktop'
+    });
+  } catch (_) {
+    // best-effort
+  }
+}
+
 function startRtdbPresence(uid) {
   if (!uid || !isRtdbEnabled()) return;
   stopRtdbPresence();
@@ -1175,6 +1202,10 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   agentClockedIn = false;
   stopAgentStatusLoop();
+  // Best-effort: explicitly mark desktop offline in RTDB so the console/UI doesn't
+  // show a stuck `online` state if onDisconnect doesn't fire for any reason.
+  // Guarded by sessionId match to avoid clobbering a newer desktop session.
+  try { await setRtdbPresenceOfflineIfSessionMatches(uid); } catch (_) {}
   stopRtdbPresence();
 
   const wasRecording = isRecordingActive;
@@ -3692,6 +3723,11 @@ app.whenReady().then(() => {
 
 app.on("before-quit", async () => {
   isQuiting = true;
+  try {
+    if (currentUid) {
+      await setRtdbPresenceOfflineIfSessionMatches(currentUid);
+    }
+  } catch (_) {}
   try {
     await stopBackgroundRecordingAndFlush();
   } catch (err) {
