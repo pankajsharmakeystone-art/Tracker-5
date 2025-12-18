@@ -528,7 +528,7 @@ exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", 
  * - Sends a targeted desktopCommands.forceLogout to the previous desktop session id
  */
 exports.enforceSingleActiveDesktopSession = (0, firestore_1.onDocumentWritten)({ document: "users/{uid}", region: FUNCTIONS_REGION }, async (event) => {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     const uid = event.params.uid;
     const before = (_b = (_a = event.data) === null || _a === void 0 ? void 0 : _a.before) === null || _b === void 0 ? void 0 : _b.data();
     const after = (_d = (_c = event.data) === null || _c === void 0 ? void 0 : _c.after) === null || _d === void 0 ? void 0 : _d.data();
@@ -537,9 +537,26 @@ exports.enforceSingleActiveDesktopSession = (0, firestore_1.onDocumentWritten)({
     const newSessionId = after.activeDesktopSessionId ? String(after.activeDesktopSessionId) : null;
     if (!newSessionId)
         return;
-    const oldSessionId = (before === null || before === void 0 ? void 0 : before.activeDesktopSessionId) ? String(before.activeDesktopSessionId) : null;
+    let oldSessionId = (before === null || before === void 0 ? void 0 : before.activeDesktopSessionId) ? String(before.activeDesktopSessionId) : null;
     if (oldSessionId && oldSessionId === newSessionId)
         return;
+    // Fallback: if older desktop builds didn't persist activeDesktopSessionId,
+    // try reading the current RTDB presence sessionId so we can still target force-logout.
+    if (!oldSessionId) {
+        try {
+            const snap = await admin.database().ref(`presence/${uid}`).once('value');
+            const presence = (_e = snap === null || snap === void 0 ? void 0 : snap.val) === null || _e === void 0 ? void 0 : _e.call(snap);
+            const presenceSessionId = (presence === null || presence === void 0 ? void 0 : presence.sessionId) ? String(presence.sessionId) : null;
+            const presenceSource = (presence === null || presence === void 0 ? void 0 : presence.source) ? String(presence.source) : null;
+            const presenceState = (presence === null || presence === void 0 ? void 0 : presence.state) ? String(presence.state) : null;
+            if (presenceSessionId && presenceSource === 'desktop' && presenceState === 'online' && presenceSessionId !== newSessionId) {
+                oldSessionId = presenceSessionId;
+            }
+        }
+        catch (e) {
+            console.warn('[enforceSingleActiveDesktopSession] RTDB presence fallback failed', e);
+        }
+    }
     const nowTs = admin.firestore.Timestamp.now();
     // Find and close any active worklog for this user.
     const activeSnap = await db

@@ -609,8 +609,25 @@ export const enforceSingleActiveDesktopSession = onDocumentWritten(
     const newSessionId = after.activeDesktopSessionId ? String(after.activeDesktopSessionId) : null;
     if (!newSessionId) return;
 
-    const oldSessionId = before?.activeDesktopSessionId ? String(before.activeDesktopSessionId) : null;
+    let oldSessionId = before?.activeDesktopSessionId ? String(before.activeDesktopSessionId) : null;
     if (oldSessionId && oldSessionId === newSessionId) return;
+
+    // Fallback: if older desktop builds didn't persist activeDesktopSessionId,
+    // try reading the current RTDB presence sessionId so we can still target force-logout.
+    if (!oldSessionId) {
+      try {
+        const snap = await admin.database().ref(`presence/${uid}`).once('value');
+        const presence = snap?.val?.() as any;
+        const presenceSessionId = presence?.sessionId ? String(presence.sessionId) : null;
+        const presenceSource = presence?.source ? String(presence.source) : null;
+        const presenceState = presence?.state ? String(presence.state) : null;
+        if (presenceSessionId && presenceSource === 'desktop' && presenceState === 'online' && presenceSessionId !== newSessionId) {
+          oldSessionId = presenceSessionId;
+        }
+      } catch (e) {
+        console.warn('[enforceSingleActiveDesktopSession] RTDB presence fallback failed', e);
+      }
+    }
 
     const nowTs = admin.firestore.Timestamp.now();
 

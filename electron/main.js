@@ -2207,18 +2207,6 @@ function startCommandsWatch(uid) {
     if (cmd.forceLogout) {
       log("command forceLogout received");
 
-      // Session targeting: if this command is meant for a different desktop instance, ignore it.
-      try {
-        const targetSid = cmd.targetDesktopSessionId ? String(cmd.targetDesktopSessionId) : null;
-        const thisSid = desktopSessionId ? String(desktopSessionId) : null;
-        if (targetSid && thisSid && targetSid !== thisSid) {
-          log('[forceLogout] ignoring command targeted to different session', { targetSid, thisSid });
-          return;
-        }
-      } catch (_) {
-        // ignore
-      }
-
       // Online-only policy: ignore stale force-logout commands so users don't have to "log in twice".
       try {
         const tsMs = cmd.timestamp?.toMillis?.()
@@ -2231,6 +2219,18 @@ function startCommandsWatch(uid) {
           return;
         }
       } catch (_) {}
+
+      // Session targeting: if this command is meant for a different desktop instance, ignore it.
+      try {
+        const targetSid = cmd.targetDesktopSessionId ? String(cmd.targetDesktopSessionId) : null;
+        const thisSid = desktopSessionId ? String(desktopSessionId) : null;
+        if (targetSid && thisSid && targetSid !== thisSid) {
+          log('[forceLogout] ignoring command targeted to different session', { targetSid, thisSid });
+          return;
+        }
+      } catch (_) {
+        // ignore
+      }
 
       // Clear the command immediately while still authenticated; clockOutAndSignOutDesktop signs out.
       await db.collection("desktopCommands").doc(uid).set({ forceLogout: false }, { merge: true }).catch(()=>{});
@@ -2385,6 +2385,51 @@ function stopAgentStatusWatch() {
   if (agentStatusUnsub) {
     try { agentStatusUnsub(); } catch (e) { log("agentStatus watch cleanup failed", e?.message || e); }
     agentStatusUnsub = null;
+  }
+}
+
+async function hydrateClockedInStateFromWorklogs(uid) {
+  try {
+    if (!uid) return;
+    const authed = await ensureDesktopAuth();
+    if (!authed) return false;
+
+    // If web already told us the state, don't override it.
+    if (agentClockedIn) return true;
+
+    // Best-effort: check if there's any active worklog for this user.
+    const snap = await db.collection('worklogs')
+      .where('userId', '==', uid)
+      .where('status', 'in', ['working', 'on_break', 'break'])
+      .limit(1)
+      .get();
+
+    if (snap.empty) return false;
+
+    const doc = snap.docs[0];
+    const data = doc.data() || {};
+    const rawStatus = String(data.status || 'working').toLowerCase();
+    const isOnBreak = rawStatus === 'on_break' || rawStatus === 'break';
+
+    agentClockedIn = true;
+    startAgentStatusLoop(uid);
+
+    // Start auto-recording only when actively working.
+    const safeSettings = cachedAdminSettings || {};
+    const allowRecording = safeSettings.allowRecording !== false;
+    const recordingMode = safeSettings.recordingMode || 'auto';
+    if (!isOnBreak && recordingMode === 'auto' && allowRecording) {
+      if (!isRecordingActive) {
+        isRecordingActive = true;
+        showRecordingPopup('Recording started');
+        startBackgroundRecording();
+        await db.collection('agentStatus').doc(uid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      }
+    }
+    return true;
+  } catch (e) {
+    log('[hydrateClockedInStateFromWorklogs] failed', e?.message || e);
+    return false;
   }
 }
 
@@ -2720,6 +2765,18 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     await reconcileRecordingAfterRegister(uid);
     await reassertDesktopStatus(uid);
+
+    // If the server created an active worklog (mid-shift session switch),
+    // make sure this desktop starts behaving like a clocked-in session.
+    const hydrated = await hydrateClockedInStateFromWorklogs(uid);
+    if (!hydrated) {
+      // Handoff worklog might be created by a server trigger moments after login.
+      setTimeout(() => {
+        if (currentUid === uid) {
+          hydrateClockedInStateFromWorklogs(uid).catch(() => {});
+        }
+      }, 3000);
+    }
 
     // Presence: prefer RTDB (onDisconnect) if enabled, else Firestore heartbeat.
     startRtdbPresence(uid);
