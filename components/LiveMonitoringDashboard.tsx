@@ -418,8 +418,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         return rawLogs.map(log => {
             const desktopStatus = agentStatuses?.[log.userId];
             const presenceEntry = presence?.[log.userId];
-                    const lastUpdateRaw = desktopStatus?.lastUpdate;
-                    const lastUpdateMs = lastUpdateRaw?.toMillis ? lastUpdateRaw.toMillis() : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
             const isStale = false; // show the Firestore status as-is; no stale override
             const isActive = log.status !== 'clocked_out';
             const isZombie = isSessionStale(log) && isActive;
@@ -471,11 +469,13 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 lateMinutes,
                 __desktop: {
                     isStale,
-                            isConnected: (
-                                (presenceEntry?.state === 'online'
-                                    && isPresenceFresh(presenceEntry?.lastSeen, now, 12 * 60 * 1000))
-                                || (typeof lastUpdateMs === 'number' && (now - lastUpdateMs) <= 12 * 60 * 1000)
-                            ),
+                    // Strict "Desktop connected": RTDB presence only.
+                    // Heartbeat is every 5 minutes; allow a small grace window.
+                    isConnected: (
+                        presenceEntry?.source === 'desktop'
+                        && presenceEntry?.state === 'online'
+                        && isPresenceFresh(presenceEntry?.lastSeen, now, 7 * 60 * 1000)
+                    ),
                     isRecording: desktopStatus?.isRecording === true
                 }
             };
@@ -521,6 +521,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const handleForceLogoutAgent = async (log: WorkLog) => {
         if (!canForceLogoutAgent(log)) return;
         if (!log?.userId) return;
+        if (log.status === 'clocked_out') return;
         const confirmation = window.confirm(`Force logout ${log.userDisplayName || 'this agent'}? This will clock them out immediately and disconnect their desktop app.`);
         if (!confirmation) return;
         setForceLogoutPending(log.userId);
@@ -759,7 +760,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             Reconnect
                                         </button>
                                     )}
-                                    {canForceLogoutAgent(agent) && agent.__desktop?.isConnected && (
+                                    {canForceLogoutAgent(agent) && agent.status !== 'clocked_out' && (
                                         <button
                                             onClick={() => handleForceLogoutAgent(agent)}
                                             disabled={forceLogoutPending === agent.userId}

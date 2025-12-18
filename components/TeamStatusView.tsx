@@ -201,14 +201,14 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                     
                                         const agentStatus = agentStatuses[log.userId];
                                         const presenceEntry = presence?.[log.userId];
-                                        const lastUpdateRaw = agentStatus?.lastUpdate;
-                                        const lastUpdateMs = lastUpdateRaw?.toMillis
-                                            ? lastUpdateRaw.toMillis()
-                                            : (lastUpdateRaw?.toDate ? lastUpdateRaw.toDate().getTime() : null);
+
+                                        // Strict "Desktop connected": RTDB presence only.
+                                        // Heartbeat is every 5 minutes; allow a small grace window.
+                                        const DESKTOP_PRESENCE_MAX_AGE_MS = 7 * 60 * 1000;
                                         const isConnected = (
-                                            (presenceEntry?.state === 'online'
-                                                && isPresenceFresh(presenceEntry?.lastSeen, now, 12 * 60 * 1000))
-                                            || (typeof lastUpdateMs === 'number' && (now - lastUpdateMs) <= 12 * 60 * 1000)
+                                            presenceEntry?.source === 'desktop'
+                                            && presenceEntry?.state === 'online'
+                                            && isPresenceFresh(presenceEntry?.lastSeen, now, DESKTOP_PRESENCE_MAX_AGE_MS)
                                         );
 
                                         // Status must come from worklogs only (single source of truth).
