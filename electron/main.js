@@ -283,6 +283,7 @@ let recorderFlushWait = null;
 let tray = null;
 let isQuiting = false;
 let cachedAdminSettings = {};
+let adminSettingsReady = false;
 const getOrganizationTimezone = () => cachedAdminSettings?.organizationTimezone || DEFAULT_ORGANIZATION_TIMEZONE;
 let currentUid = null;
 let commandUnsub = null;
@@ -867,6 +868,7 @@ function hydrateAdminSettingsFromDisk() {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
       cachedAdminSettings = parsed;
+      adminSettingsReady = true;
       log("[adminSettings] hydrated cached settings from disk");
     }
   } catch (error) {
@@ -1069,6 +1071,9 @@ function schedulePendingStatusFlush(delayMs = 3000) {
 
 async function reconcileRecordingAfterRegister(uid) {
   try {
+    if (!uid) return;
+    if (!adminSettingsReady) return;
+
     const snap = await db.collection('agentStatus').doc(uid).get();
     if (!snap.exists) return;
     const data = snap.data() || {};
@@ -1079,25 +1084,59 @@ async function reconcileRecordingAfterRegister(uid) {
     const wasRecording = Boolean(data.isRecording);
     resetAutoResumeRetry();
 
-    if (!wasRecording) {
-      try {
+    const settings = cachedAdminSettings || {};
+    const mode = String(settings.recordingMode || 'auto').toLowerCase();
+    if (settings.allowRecording === false) return;
+
+    // Auto mode: ensure recording is running when agent is active.
+    if (mode === 'auto') {
+      if (!wasRecording) {
+        try {
+          isRecordingActive = true;
+          startBackgroundRecording();
+        } catch (e) {
+          console.warn('[reconcileRecordingAfterRegister] start send failed', e?.message || e);
+        }
+      } else {
+        // Keep the existing recording running; just sync flags.
         isRecordingActive = true;
-        startBackgroundRecording();
-      } catch (e) {
-        console.warn('[reconcileRecordingAfterRegister] start send failed', e?.message || e);
       }
-    } else {
-      // Keep the existing recording running; just sync flags.
-      isRecordingActive = true;
+
+      await db.collection('agentStatus').doc(uid).set({
+        status: 'working',
+        isRecording: true,
+        lastUpdate: FieldValue.serverTimestamp()
+      }, { merge: true }).catch(() => {});
+
+      agentClockedIn = true;
+      return;
     }
 
-    await db.collection('agentStatus').doc(uid).set({
-      status: 'working',
-      isRecording: true,
-      lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).catch(() => {});
+    // Manual mode: only resume if an admin previously started recording (isRecording=true).
+    if (mode === 'manual') {
+      if (!wasRecording) return;
 
-    agentClockedIn = true;
+      if (!isRecordingActive) {
+        try {
+          isRecordingActive = true;
+          showRecordingPopup('Recording resumed');
+          startBackgroundRecording();
+        } catch (e) {
+          console.warn('[reconcileRecordingAfterRegister] manual resume failed', e?.message || e);
+        }
+      }
+
+      await db.collection('agentStatus').doc(uid).set({
+        status: 'working',
+        isRecording: true,
+        lastUpdate: FieldValue.serverTimestamp()
+      }, { merge: true }).catch(() => {});
+
+      agentClockedIn = true;
+      return;
+    }
+
+    // Unknown mode: do nothing.
   } catch (err) {
     console.warn('[reconcileRecordingAfterRegister] failed', err?.message || err);
   }
@@ -1128,6 +1167,9 @@ async function reassertDesktopStatus(uid) {
 }
 
 const isAutoRecordingEnabled = () => {
+  // Safety: don't auto-start recording until admin settings are known.
+  // Prevents incorrect default-to-auto behavior when the app boots before settings sync.
+  if (!adminSettingsReady) return false;
   const settings = cachedAdminSettings || {};
   const mode = String(settings.recordingMode || 'auto').toLowerCase();
   if (settings.allowRecording === false) return false;
@@ -2110,6 +2152,7 @@ function applyAdminSettings(next) {
     ...next,
     autoClockOutEnabled: normalizedAutoClockOutEnabled
   };
+  adminSettingsReady = true;
   log("adminSettings updated:", cachedAdminSettings);
   persistAdminSettingsCache(cachedAdminSettings);
 
@@ -2741,6 +2784,13 @@ ipcMain.handle("report-renderer-error", async (_event, payload = {}) => {
 ipcMain.handle("sync-admin-settings", async (_event, settings) => {
   try {
     applyAdminSettings(settings || {});
+
+    // Now that settings are known, reconcile recording state (auto mode only).
+    try {
+      if (currentUid) {
+        await reconcileRecordingAfterRegister(currentUid);
+      }
+    } catch (_) {}
     return { success: true };
   } catch (error) {
     return { success: false, error: error?.message || String(error) };
