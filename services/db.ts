@@ -24,55 +24,55 @@ export const readOrganizationTimezone = async (): Promise<string> => {
 // --- User Management ---
 
 export const createUserDocument = async (userAuth: FirebaseUser, additionalData: { displayName?: string; role: Role; teamId?: string; teamIds?: string[] }) => {
-  if (!userAuth) return;
+    if (!userAuth) return;
 
-  const userDocRef = doc(db, 'users', userAuth.uid);
-  const snapshot = await getDoc(userDocRef);
+    const userDocRef = doc(db, 'users', userAuth.uid);
+    const snapshot = await getDoc(userDocRef);
 
-  if (!snapshot.exists()) {
-    const { email } = userAuth;
-    const { displayName, role, teamId } = additionalData;
-    const createdAt = serverTimestamp();
-    
-    let initialTeamIds: string[] = additionalData.teamIds || [];
-    if (initialTeamIds.length === 0 && teamId) {
-        initialTeamIds = [teamId];
+    if (!snapshot.exists()) {
+        const { email } = userAuth;
+        const { displayName, role, teamId } = additionalData;
+        const createdAt = serverTimestamp();
+
+        let initialTeamIds: string[] = additionalData.teamIds || [];
+        if (initialTeamIds.length === 0 && teamId) {
+            initialTeamIds = [teamId];
+        }
+
+        try {
+            await setDoc(userDocRef, {
+                displayName: userAuth.displayName || displayName,
+                email,
+                createdAt,
+                role,
+                teamId: teamId || null,
+                teamIds: initialTeamIds
+            });
+        } catch (error) {
+            console.error("Error creating user document: ", error);
+        }
     }
-
-    try {
-      await setDoc(userDocRef, {
-        displayName: userAuth.displayName || displayName,
-        email,
-        createdAt,
-        role,
-        teamId: teamId || null,
-        teamIds: initialTeamIds
-      });
-    } catch (error) {
-      console.error("Error creating user document: ", error);
-    }
-  }
-  return userDocRef;
+    return userDocRef;
 };
 
 export const getUserDocument = async (uid: string): Promise<UserData | null> => {
-  if (!uid) return null;
-  try {
-    const userDocRef = doc(db, `users/${uid}`);
-    const userSnapshot = await getDoc(userDocRef);
-    if(userSnapshot.exists()){
-        const data = userSnapshot.data();
-        let teamIds = data.teamIds || [];
-        if (!data.teamIds && data.teamId) {
-            teamIds = [data.teamId];
+    if (!uid) return null;
+    try {
+        const userDocRef = doc(db, `users/${uid}`);
+        const userSnapshot = await getDoc(userDocRef);
+        if (userSnapshot.exists()) {
+            const data = userSnapshot.data();
+            let teamIds = data.teamIds || [];
+            if (!data.teamIds && data.teamId) {
+                teamIds = [data.teamId];
+            }
+            return { uid, ...data, teamIds } as UserData;
         }
-        return { uid, ...data, teamIds } as UserData;
+        return null;
+    } catch (error) {
+        console.error("Error fetching user data", error);
+        return null;
     }
-    return null;
-  } catch (error) {
-    console.error("Error fetching user data", error);
-    return null;
-  }
 };
 
 export const adminExists = async (): Promise<boolean> => {
@@ -147,7 +147,7 @@ export const getUsersByTeam = async (teamId: string): Promise<UserData[]> => {
     const usersCollectionRef = collection(db, 'users');
     const q1 = query(usersCollectionRef, where("teamIds", "array-contains", teamId));
     const q2 = query(usersCollectionRef, where("teamId", "==", teamId));
-    
+
     try {
         const [snap1, snap2] = await Promise.all([getDocs(q1), getDocs(q2)]);
         const usersMap = new Map<string, UserData>();
@@ -273,11 +273,11 @@ export const createSessionLogId = (uid: string, date: Date | string): string => 
 export const getActiveWorkLog = async (uid: string): Promise<WorkLog | null> => {
     const logsRef = collection(db, 'worklogs');
     const q = query(
-        logsRef, 
-        where("userId", "==", uid), 
+        logsRef,
+        where("userId", "==", uid),
         where("status", "in", ["working", "on_break", "break"])
     );
-    
+
     const snapshot = await getDocs(q);
     if (!snapshot.empty) {
         const docs = snapshot.docs;
@@ -297,8 +297,8 @@ export const streamActiveWorkLog = (uid: string, callback: (log: WorkLog | null)
     const logsRef = collection(db, 'worklogs');
     // We just care if there is ANY active status.
     const q = query(
-        logsRef, 
-        where("userId", "==", uid), 
+        logsRef,
+        where("userId", "==", uid),
         where("status", "in", ["working", "on_break", "break"])
     );
 
@@ -306,7 +306,7 @@ export const streamActiveWorkLog = (uid: string, callback: (log: WorkLog | null)
         if (!snapshot.empty) {
             const docs = snapshot.docs;
             docs.sort((a, b) => getDocMillis(b.data()) - getDocMillis(a.data()));
-            
+
             const doc = docs[0];
             const data = doc.data();
             const rawStatus = data.status;
@@ -376,8 +376,8 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
             console.log("User already clocked in for today. Resuming...");
             // Ensure status is working
             if (activeLog.status !== 'working') {
-                 await updateWorkLog(activeLog.id, { status: 'working', lastEventTimestamp: serverTimestamp() });
-                 await updateAgentStatus(uid, 'online');
+                await updateWorkLog(activeLog.id, { status: 'working', lastEventTimestamp: serverTimestamp() });
+                await updateAgentStatus(uid, 'online');
             }
             return;
         } else {
@@ -405,7 +405,7 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
         if (todayShift && typeof todayShift === 'object' && 'startTime' in todayShift) {
             scheduledStart = todayShift.startTime;
             scheduledEnd = todayShift.endTime;
-            
+
             if (scheduledEnd && scheduledStart && scheduledEnd < scheduledStart) {
                 isOvernightShift = true;
             }
@@ -420,7 +420,7 @@ export const performClockIn = async (uid: string, teamId: string, userDisplayNam
 
     // 3. Create/Update Today's Log
     const newLogRef = doc(db, 'worklogs', todayLogId);
-    
+
     const logData: any = {
         userId: uid,
         userDisplayName,
@@ -493,17 +493,22 @@ export const performClockOut = async (uid: string) => {
     }
 
     const logDocRef = doc(db, 'worklogs', activeLog.id);
-    const now = Date.now();
-    
+
+    // Use Timestamp.now() for consistent time source with other Firebase timestamps.
+    // While this still uses the client clock, it's consistent with activity timestamps
+    // in the same session. The display layer recalculates from clockIn/clockOut for accuracy.
+    const nowTs = Timestamp.now();
+    const nowMillis = nowTs.toMillis();
+
     let workDuration = 0;
     let breakDuration = 0;
-    
-    const getMillis = (ts: any) => (ts?.toMillis ? ts.toMillis() : (ts?.toDate ? ts.toDate().getTime() : Date.now()));
+
+    const getMillis = (ts: any) => (ts?.toMillis ? ts.toMillis() : (ts?.toDate ? ts.toDate().getTime() : nowMillis));
 
     if (activeLog.lastEventTimestamp) {
         const lastTime = getMillis(activeLog.lastEventTimestamp);
-        const elapsed = (now - lastTime) / 1000;
-        
+        const elapsed = Math.max(0, (nowMillis - lastTime) / 1000);
+
         if (activeLog.status === 'working') {
             workDuration = elapsed;
         } else if (activeLog.status === 'on_break' || (activeLog.status as any) === 'break') {
@@ -513,8 +518,7 @@ export const performClockOut = async (uid: string) => {
 
     let activitiesUpdate: RawActivityEntry[] | undefined;
     if (Array.isArray((activeLog as any).activities)) {
-        const activityCloseTs = Timestamp.now();
-        activitiesUpdate = closeLatestActivityEntry(activeLog.activities, activityCloseTs);
+        activitiesUpdate = closeLatestActivityEntry(activeLog.activities, nowTs);
     }
 
     const updatePayload: Record<string, any> = {
@@ -561,14 +565,14 @@ export const updateWorkLog = async (logId: string, data: object) => {
  */
 export const streamTodayWorkLogs = (callback: (logs: WorkLog[]) => void, teamId?: string) => {
     const logsRef = collection(db, "worklogs");
-    
+
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const startOfTodayTimestamp = Timestamp.fromDate(startOfToday);
 
     // Query A: Started Today (Active OR Closed)
     const qToday = query(
-        logsRef, 
+        logsRef,
         where("date", ">=", startOfTodayTimestamp)
     );
 
@@ -584,7 +588,7 @@ export const streamTodayWorkLogs = (callback: (logs: WorkLog[]) => void, teamId?
 
     const emit = () => {
         const merged = new Map<string, WorkLog>();
-        
+
         // Add active logs first
         activeLogs.forEach(log => merged.set(log.id, log));
         // Overwrite/Add today's logs (ensures we get closed ones from today too)
@@ -594,7 +598,7 @@ export const streamTodayWorkLogs = (callback: (logs: WorkLog[]) => void, teamId?
         if (teamId) {
             result = result.filter(log => log.teamId === teamId);
         }
-        
+
         // Sort: Active first, then by name
         result.sort((a, b) => {
             const aActive = a.status !== 'clocked_out';
@@ -603,7 +607,7 @@ export const streamTodayWorkLogs = (callback: (logs: WorkLog[]) => void, teamId?
             if (!aActive && bActive) return 1;
             return a.userDisplayName.localeCompare(b.userDisplayName);
         });
-        
+
         callback(result);
     };
 
@@ -638,14 +642,14 @@ export const streamWorkLogsForDate = (dateString: string, callback: (logs: WorkL
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(dateString);
     endOfDay.setHours(23, 59, 59, 999);
-    
+
     const startTs = Timestamp.fromDate(startOfDay);
     const endTs = Timestamp.fromDate(endOfDay);
 
     const logsRef = collection(db, "worklogs");
-    
+
     const q = query(
-        logsRef, 
+        logsRef,
         where("date", ">=", startTs),
         where("date", "<=", endTs)
     );
@@ -670,7 +674,7 @@ export const getWorkLogsForDateRange = async (teamId: string, startDate: Date, e
     const logsCollectionRef = collection(db, 'worklogs');
     const startTs = Timestamp.fromDate(startDate);
     const endTs = Timestamp.fromDate(endDate);
-    
+
     const q = query(
         logsCollectionRef,
         where("teamId", "==", teamId),
@@ -692,7 +696,7 @@ export const getWorkLogsForDateRange = async (teamId: string, startDate: Date, e
 export const isSessionStale = (log: WorkLog): boolean => {
     // Logic: If user hasn't pinged in > 4 hours (zombie) OR is from previous day and not overnight
     if (!log.lastEventTimestamp) return false;
-    
+
     const now = Date.now();
     const lastTime = (log.lastEventTimestamp as any).toMillis ? (log.lastEventTimestamp as any).toMillis() : (log.lastEventTimestamp as any).toDate().getTime();
     const diffHours = (now - lastTime) / (1000 * 60 * 60);

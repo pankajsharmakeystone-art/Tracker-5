@@ -422,10 +422,23 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             const isActive = log.status !== 'clocked_out';
             const isZombie = isSessionStale(log) && isActive;
             
+            const { manualSeconds, idleSeconds } = aggregateBreakSeconds(log, now);
+            const totalBreak = manualSeconds + idleSeconds;
+            
             let totalWork = log.totalWorkSeconds;
 
-            // If currently active (and not stale), add live elapsed time
-            if (isActive && !isZombie && log.lastEventTimestamp) {
+            // For closed sessions, always calculate from server timestamps to avoid
+            // issues with incorrect client clocks. clockInTime and clockOutTime are
+            // server timestamps and thus always accurate.
+            if (!isActive) {
+                const clockInMs = getMillis(log.clockInTime);
+                const clockOutMs = getMillis(log.clockOutTime);
+                if (clockInMs && clockOutMs && clockOutMs > clockInMs) {
+                    const totalSessionSeconds = (clockOutMs - clockInMs) / 1000;
+                    totalWork = Math.max(0, totalSessionSeconds - totalBreak);
+                }
+            } else if (!isZombie && log.lastEventTimestamp) {
+                // For active sessions, add live elapsed time (real-time display)
                 const lastTime = (log.lastEventTimestamp as any).toMillis 
                     ? (log.lastEventTimestamp as any).toMillis() 
                     : (log.lastEventTimestamp as any).toDate().getTime();
@@ -434,9 +447,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 
                 if (log.status === 'working') totalWork += elapsed;
             }
-
-            const { manualSeconds, idleSeconds } = aggregateBreakSeconds(log, now);
-            const totalBreak = manualSeconds + idleSeconds;
             
             // Check if this log started on a previous day
             let isOvernight = false;

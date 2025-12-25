@@ -127,7 +127,7 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             setError("Please select both a start and end date.");
             return;
         }
-        
+
         const start = new Date(startDate);
         start.setHours(0, 0, 0, 0);
         const end = new Date(endDate);
@@ -143,7 +143,7 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
 
         try {
             let logs = await getWorkLogsForDateRange(teamId, start, end);
-            
+
             // Filter if a specific user is selected
             if (selectedUserId !== 'all') {
                 logs = logs.filter(log => log.userId === selectedUserId);
@@ -163,14 +163,26 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             let csvContent = "data:text/csv;charset=utf-8,Date,User Name,Clock In Time,Clock Out Time,Late Login (HH:MM),Total Work Time,Manual Break Time,Idle Break Time,Total Break Time\n";
             logs.forEach((log: WorkLog) => {
                 const logDate = formatLocalDate(log.date, organizationTimezone);
-                const workTime = formatDuration(log.totalWorkSeconds);
                 const clockIn = formatTimeOfDay(log.clockInTime, organizationTimezone);
                 const clockOut = formatTimeOfDay(log.clockOutTime, organizationTimezone);
                 const lateLogin = formatLateMinutes(log.lateMinutes);
                 const { manualSeconds, idleSeconds } = computeBreakBuckets(log);
+                const totalBreakSeconds = manualSeconds + idleSeconds;
+
+                // Calculate work time from server timestamps for accuracy
+                // This ensures correct duration even if client clock was wrong during the session
+                let workSeconds = log.totalWorkSeconds;
+                const clockInDate = normalizeDate(log.clockInTime);
+                const clockOutDate = normalizeDate(log.clockOutTime);
+                if (clockInDate && clockOutDate && clockOutDate > clockInDate) {
+                    const totalSessionSeconds = (clockOutDate.getTime() - clockInDate.getTime()) / 1000;
+                    workSeconds = Math.max(0, totalSessionSeconds - totalBreakSeconds);
+                }
+
+                const workTime = formatDuration(workSeconds);
                 const manualBreak = formatDuration(manualSeconds);
                 const idleBreak = formatDuration(idleSeconds);
-                const breakTime = formatDuration(manualSeconds + idleSeconds);
+                const breakTime = formatDuration(totalBreakSeconds);
                 const safeClockIn = clockIn ? `"${clockIn}"` : '""';
                 const safeClockOut = clockOut ? `"${clockOut}"` : '""';
                 csvContent += `${logDate},"${log.userDisplayName}",${safeClockIn},${safeClockOut},${lateLogin},${workTime},${manualBreak},${idleBreak},${breakTime}\n`;
@@ -227,7 +239,7 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
                     />
                 </div>
             </div>
-             <div className="mb-4">
+            <div className="mb-4">
                 <label htmlFor="user-select" className="block mb-2 text-sm font-medium text-gray-900 dark:text-white">Select User</label>
                 <select
                     id="user-select"
