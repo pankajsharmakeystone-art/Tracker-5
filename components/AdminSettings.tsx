@@ -67,10 +67,13 @@ const AdminSettings: React.FC = () => {
         autoUpload: false,
         uploadToDropbox: true,
         uploadToGoogleSheets: false,
+        uploadToHttp: false,
         dropboxToken: '',
         dropboxRefreshToken: '',
         dropboxAppKey: '',
         dropboxAppSecret: '',
+        httpUploadUrl: '',
+        httpUploadToken: '',
         googleServiceAccountJson: '',
         googleSpreadsheetId: '',
         googleSpreadsheetTabName: 'Uploads',
@@ -271,7 +274,7 @@ const AdminSettings: React.FC = () => {
                     description="Decide where finished recordings are stored and walk admins through the one-time credential setup."
                 />
 
-                <FormField label="Auto-Upload Destinations" description="Automatically export screen recordings once they finish encoding. Choose Dropbox, Google Drive + Sheets, or keep both enabled for redundancy.">
+                <FormField label="Auto-Upload Destinations" description="Automatically export screen recordings once they finish encoding. Choose Dropbox, Google Drive + Sheets, or your own HTTP receiver.">
                     <div className="space-y-4">
                         <ToggleSwitch
                             id="autoUpload"
@@ -307,9 +310,20 @@ const AdminSettings: React.FC = () => {
                                         onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, uploadToGoogleSheets: e.target.checked }))}
                                     />
                                 </div>
+                                <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3 dark:border-gray-700 dark:bg-gray-800">
+                                    <div className="mr-3">
+                                        <p className="text-sm font-medium text-gray-900 dark:text-gray-50">HTTP Receiver</p>
+                                        <p className="text-xs text-gray-500 dark:text-gray-400">Send files to your own server over HTTPS.</p>
+                                    </div>
+                                    <ToggleSwitch
+                                        id="uploadToHttp"
+                                        checked={settings.uploadToHttp ?? false}
+                                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, uploadToHttp: e.target.checked }))}
+                                    />
+                                </div>
                             </div>
                             <p className="text-xs text-gray-500 dark:text-gray-400">
-                                Enable one or both destinations. Google uploads require the service-account JSON, spreadsheet ID, and (optionally) a Drive folder ID shared with that service account.
+                                Enable one or more destinations. Google uploads require the service-account JSON, spreadsheet ID, and (optionally) a Drive folder ID shared with that service account.
                             </p>
                         </div>
                     )}
@@ -438,6 +452,32 @@ const AdminSettings: React.FC = () => {
                                 onChange={handleInputChange}
                                 className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
                                 placeholder="Drive Folder ID (optional)"
+                            />
+                        </FormField>
+                    </>
+                )}
+
+                {settings.autoUpload && settings.uploadToHttp && (
+                    <>
+                        <FormField label="HTTP Upload URL" description="Endpoint that receives raw binary uploads. Example: https://your-server.example.com/upload">
+                            <input
+                                type="text"
+                                name="httpUploadUrl"
+                                value={settings.httpUploadUrl || ''}
+                                onChange={handleInputChange}
+                                className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                                placeholder="https://your-server.example.com/upload"
+                            />
+                        </FormField>
+
+                        <FormField label="HTTP Upload Token (optional)" description="If your server expects a bearer token, paste it here. Clients send it as Authorization: Bearer <token>.">
+                            <input
+                                type="text"
+                                name="httpUploadToken"
+                                value={settings.httpUploadToken || ''}
+                                onChange={handleInputChange}
+                                className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                                placeholder="Optional token"
                             />
                         </FormField>
                     </>

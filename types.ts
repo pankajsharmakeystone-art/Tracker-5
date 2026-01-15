@@ -110,6 +110,9 @@ export interface AdminSettingsType {
     dropboxAppSecret?: string;
     uploadToDropbox?: boolean;
     uploadToGoogleSheets?: boolean;
+    uploadToHttp?: boolean;
+    httpUploadUrl?: string;
+    httpUploadToken?: string;
     googleServiceAccountJson?: string;
     googleSpreadsheetId?: string;
     googleSpreadsheetTabName?: string;

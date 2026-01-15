@@ -477,6 +477,7 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
       const enabledTargets = [];
       if (shouldUploadToDropbox()) enabledTargets.push('dropbox');
       if (shouldUploadToGoogleSheets()) enabledTargets.push('googleSheets');
+      if (shouldUploadToHttp()) enabledTargets.push('http');
       if (!enabledTargets.length) continue;
 
       // If all currently enabled targets already succeeded (per manifest), mark complete and delete.
@@ -509,6 +510,11 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
           googleFileName: googleDriveFileName
         });
         setTargetUploadResult(fileName, 'googleSheets', { success: !!googleResult?.success, error: googleResult?.error || googleResult?.reason || null });
+      }
+
+      if (enabledTargets.includes('http') && !isTargetUploaded(fileName, 'http')) {
+        const httpResult = await uploadToHttpTarget({ filePath, fileName, safeName, isoDate });
+        setTargetUploadResult(fileName, 'http', { success: !!httpResult?.success, error: httpResult?.error || httpResult?.reason || null });
       }
 
       const allSucceededAfter = enabledTargets.every((t) => isTargetUploaded(fileName, t));
@@ -1495,6 +1501,63 @@ function shouldUploadToGoogleSheets() {
   if (!cachedAdminSettings?.googleServiceAccountJson) return false;
   if (!googleSheetsClient || !googleDriveClient || googleSetupError) return false;
   return true;
+}
+
+const getHttpUploadConfig = () => {
+  const url = (cachedAdminSettings?.httpUploadUrl || '').trim();
+  if (!url) return null;
+  const token = (cachedAdminSettings?.httpUploadToken || '').trim();
+  return { url, token };
+};
+
+function shouldUploadToHttp() {
+  if (!cachedAdminSettings?.autoUpload) return false;
+  if (cachedAdminSettings?.uploadToHttp === false) return false;
+  return Boolean(getHttpUploadConfig()?.url);
+}
+
+async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate }) {
+  const config = getHttpUploadConfig();
+  if (!config?.url) return { success: false, reason: 'http-not-configured' };
+
+  const headers = {
+    'Content-Type': 'application/octet-stream',
+    'x-file-name': fileName,
+    'x-agent-name': safeName,
+    'x-iso-date': isoDate
+  };
+
+  if (config.token) {
+    headers.Authorization = `Bearer ${config.token}`;
+  }
+
+  try {
+    const response = await fetch(config.url, {
+      method: 'POST',
+      headers,
+      body: fs.createReadStream(filePath)
+    });
+
+    const text = await response.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch (_) {
+      parsed = text;
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        status: response.status,
+        error: parsed?.error || parsed?.message || text || 'http-upload-failed'
+      };
+    }
+
+    return { success: true, status: response.status, response: parsed };
+  } catch (error) {
+    return { success: false, error: error?.message || 'http-upload-failed' };
+  }
 }
 
 function getGoogleSheetTabName() {
@@ -3286,6 +3349,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     const enabledTargets = [];
     if (shouldUploadToDropbox()) enabledTargets.push('dropbox');
     if (shouldUploadToGoogleSheets()) enabledTargets.push('googleSheets');
+    if (shouldUploadToHttp()) enabledTargets.push('http');
 
     if (enabledTargets.includes('dropbox') && !isTargetUploaded(fileName, 'dropbox')) {
       const dropboxPath = `/recordings/${safeName}/${isoDate}/${fileName}`;
@@ -3306,6 +3370,12 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
       });
       uploadResults.push({ target: 'googleSheets', ...googleResult });
       setTargetUploadResult(fileName, 'googleSheets', { success: !!googleResult?.success, error: googleResult?.error || googleResult?.reason || null });
+    }
+
+    if (enabledTargets.includes('http') && !isTargetUploaded(fileName, 'http')) {
+      const httpResult = await uploadToHttpTarget({ filePath, fileName, safeName, isoDate });
+      uploadResults.push({ target: 'http', ...httpResult });
+      setTargetUploadResult(fileName, 'http', { success: !!httpResult?.success, error: httpResult?.error || httpResult?.reason || null });
     }
 
     if (currentUid && uploadResults.length) {
