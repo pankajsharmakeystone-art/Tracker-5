@@ -1758,8 +1758,9 @@ function startBackgroundRecording() {
       return;
     }
     const quality = String(cachedAdminSettings?.recordingQuality || "720p");
-    recorderWindow.webContents.send('recorder-start', { recordingQuality: quality });
-    log('[recorder] start command sent', { quality });
+    const fps = Number(cachedAdminSettings?.recordingFps || 30);
+    recorderWindow.webContents.send('recorder-start', { recordingQuality: quality, recordingFps: fps });
+    log('[recorder] start command sent', { quality, fps });
   } catch (error) {
     log('[recorder] failed to start background recording', error?.message || error);
     isRecordingActive = false;

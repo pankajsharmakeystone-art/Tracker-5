@@ -82,6 +82,7 @@ const AdminSettings: React.FC = () => {
         recordingMode: 'manual',
         showRecordingNotification: false,
         recordingQuality: '720p',
+        recordingFps: 30,
         autoClockOutEnabled: false,
         manualBreakTimeoutMinutes: 30,
         organizationTimezone: 'Asia/Kolkata',
@@ -258,6 +259,19 @@ const AdminSettings: React.FC = () => {
                         <option value="480p">480p</option>
                         <option value="720p">720p (Default)</option>
                         <option value="1080p">1080p</option>
+                    </select>
+                </FormField>
+
+                <FormField label="Recording Frame Rate" description="Set the target frames per second for screen recordings.">
+                    <select
+                        name="recordingFps"
+                        value={settings.recordingFps ?? 30}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                    >
+                        <option value={30}>30 fps (Default)</option>
+                        <option value={60}>60 fps</option>
+                        <option value={120}>120 fps</option>
                     </select>
                 </FormField>
 

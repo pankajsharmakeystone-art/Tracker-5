@@ -7,7 +7,7 @@ const sessions = new Map();
 
 const sanitizeName = (name) => (name || 'screen').replace(/[^a-z0-9_\-]/gi, '_');
 
-const buildConstraints = (sourceId, resolution) => {
+const buildConstraints = (sourceId, resolution, fps) => {
   const mandatory = {
     chromeMediaSource: 'desktop',
     chromeMediaSourceId: sourceId
@@ -18,15 +18,19 @@ const buildConstraints = (sourceId, resolution) => {
     mandatory.minWidth = resolution.width;
     mandatory.minHeight = resolution.height;
   }
+  if (fps && Number.isFinite(fps)) {
+    mandatory.maxFrameRate = fps;
+    mandatory.minFrameRate = fps;
+  }
   return {
     audio: false,
     video: { mandatory }
   };
 };
 
-async function startRecorderForSource(source, resolution) {
+async function startRecorderForSource(source, resolution, fps) {
   const { id, name } = source;
-  const constraints = buildConstraints(id, resolution);
+  const constraints = buildConstraints(id, resolution, fps);
   const mediaDevices = navigator.mediaDevices;
   const legacyGetUserMedia = (navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia)?.bind(navigator);
   const getUserMediaFn = (mediaDevices && mediaDevices.getUserMedia) ? mediaDevices.getUserMedia.bind(mediaDevices) : legacyGetUserMedia;
@@ -107,6 +111,7 @@ async function stopAndFlushAllRecorders() {
 ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
   try {
     const quality = String(payload.recordingQuality || '720p');
+    const fps = Number(payload.recordingFps || 30);
     const mapping = {
       '480p': { width: 640, height: 480 },
       '720p': { width: 1280, height: 720 },
@@ -124,7 +129,7 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
     const targets = screenSources.length > 0 ? screenSources : sourcesResult;
 
     for (const src of targets) {
-      await startRecorderForSource(src, resolution);
+      await startRecorderForSource(src, resolution, fps);
     }
   } catch (error) {
     console.error('[recorder] failed to start', error);

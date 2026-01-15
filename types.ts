@@ -124,6 +124,7 @@ export interface AdminSettingsType {
     manualBreakTimeoutMinutes?: number;
     allowRecording?: boolean;
     recordingQuality?: "480p" | "720p" | "1080p";
+    recordingFps?: 30 | 60 | 120;
     organizationTimezone?: string;
     showLiveTeamStatusToAgents?: boolean;
 }
