@@ -68,11 +68,11 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
     const bootstrap = async () => {
       try {
         safeClearRetry();
-        const deviceId = getOrCreateDeviceId();
-        const token = await requestDesktopToken(deviceId ?? undefined);
+        const deviceId: string | undefined = getOrCreateDeviceId() ?? undefined;
+        const token = await requestDesktopToken(deviceId);
         if (canceled) return;
         if (!window.desktopAPI?.registerUid) return;
-        const result = await window.desktopAPI.registerUid({ uid, desktopToken: token, deviceId: deviceId || undefined });
+        const result = await window.desktopAPI.registerUid({ uid, desktopToken: token, deviceId });
         if (!result?.success) {
           throw new Error(result?.error || 'desktop-register-failed');
         }
