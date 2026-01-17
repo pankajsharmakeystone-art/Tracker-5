@@ -1,7 +1,7 @@
 {
   "name": "tracker-5",
   "private": true,
-  "version": "0.5.61",
+  "version": "0.5.62",
   "type": "module",
   "main": "electron/main.js",
   "author": "Tracker 5",
