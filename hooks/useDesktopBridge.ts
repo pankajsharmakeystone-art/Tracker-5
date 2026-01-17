@@ -43,7 +43,7 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
       retryDelayMs = Math.min(retryDelayMs * 2, 30000);
     };
 
-    const getOrCreateDeviceId = (): string | null => {
+    const getOrCreateDeviceId = (): string => {
       try {
         const key = 'desktop-device-id';
         let id = localStorage.getItem(key);
@@ -52,9 +52,9 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
           id = randomUuid || `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
           localStorage.setItem(key, id);
         }
-        return id;
+        return id || `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       } catch {
-        return null;
+        return `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       }
     };
 
@@ -68,7 +68,7 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
     const bootstrap = async () => {
       try {
         safeClearRetry();
-        const deviceId: string | undefined = getOrCreateDeviceId() ?? undefined;
+        const deviceId = getOrCreateDeviceId();
         const token = await requestDesktopToken(deviceId);
         if (canceled) return;
         if (!window.desktopAPI?.registerUid) return;
