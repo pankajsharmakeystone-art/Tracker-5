@@ -12,6 +12,8 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
   useEffect(() => {
     if (!uid || typeof window === 'undefined' || !window.desktopAPI) return;
 
+    const safeUid = uid;
+
     let canceled = false;
     let unsubscribeSettings: (() => void) | null = null;
     let heartbeat: ReturnType<typeof setInterval> | null = null;
@@ -72,7 +74,7 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
         const token = await requestDesktopToken(deviceId);
         if (canceled) return;
         if (!window.desktopAPI?.registerUid) return;
-        const result = await window.desktopAPI.registerUid({ uid, desktopToken: token, deviceId });
+        const result = await window.desktopAPI.registerUid({ uid: safeUid, desktopToken: token, deviceId });
         if (!result?.success) {
           throw new Error(result?.error || 'desktop-register-failed');
         }
