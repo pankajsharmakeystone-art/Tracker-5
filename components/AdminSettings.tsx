@@ -83,6 +83,7 @@ const AdminSettings: React.FC = () => {
         showRecordingNotification: false,
         recordingQuality: '720p',
         recordingFps: 30,
+        recordingSegmentMinutes: 5,
         autoClockOutEnabled: false,
         manualBreakTimeoutMinutes: 30,
         organizationTimezone: 'Asia/Kolkata',
@@ -273,6 +274,21 @@ const AdminSettings: React.FC = () => {
                         <option value={60}>60 fps</option>
                         <option value={120}>120 fps</option>
                     </select>
+                </FormField>
+
+                <FormField
+                    label="Recording Segment Minutes"
+                    description="Rotate recordings every N minutes to reduce data loss. Set to 0 to disable rotation."
+                >
+                    <input
+                        type="number"
+                        name="recordingSegmentMinutes"
+                        min={0}
+                        max={240}
+                        value={settings.recordingSegmentMinutes ?? 5}
+                        onChange={handleInputChange}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                    />
                 </FormField>
 
                 <FormField label="Show Recording Notification" description="Show a desktop notification when screen recording starts or stops.">
