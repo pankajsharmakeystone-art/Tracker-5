@@ -488,8 +488,13 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
         continue;
       }
 
+      const entry = getManifestEntry(fileName) || {};
+      const ownerUid = entry.ownerUid || null;
+      const ownerName = entry.ownerName || null;
+
       // Use the file timestamp for stable paths and names across retries.
-      const safeName = (cachedDisplayName ? String(cachedDisplayName) : (currentUid || 'unknown')).replace(/[\/:*?"<>|]/g, '-');
+      const safeNameSource = ownerName || ownerUid || cachedDisplayName || currentUid || 'unknown';
+      const safeName = String(safeNameSource).replace(/[\/:*?"<>|]/g, '-');
       const isoDate = getIsoDateFromMs(stat.mtimeMs);
       const googleDriveFileName = `${safeName}-${isoDate}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
 
@@ -527,11 +532,71 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
     log('[uploads] retry scan failed', err?.message || err);
   }
 }
+
+function getRecordingSegmentIntervalMs() {
+  const rawMinutes = cachedAdminSettings?.recordingSegmentMinutes ?? process.env.RECORDING_SEGMENT_MINUTES ?? 5;
+  const minutes = Number(rawMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
+  return Math.max(1, minutes) * 60 * 1000;
+}
+
+function stopRecordingSegmentLoop() {
+  if (recordingSegmentInterval) {
+    clearInterval(recordingSegmentInterval);
+    recordingSegmentInterval = null;
+  }
+}
+
+function startRecordingSegmentLoop() {
+  const intervalMs = getRecordingSegmentIntervalMs();
+  if (!intervalMs) {
+    stopRecordingSegmentLoop();
+    return;
+  }
+  if (recordingSegmentInterval) return;
+  recordingSegmentInterval = setInterval(async () => {
+    if (!currentUid || !agentClockedIn) return;
+    if (!isRecordingActive) return;
+    if (!isAutoRecordingEnabled()) return;
+    if (recordingSegmentInFlight) return;
+    recordingSegmentInFlight = true;
+    try {
+      await stopBackgroundRecordingAndFlush({ timeoutMs: 5000, payload: { suppressAutoResume: true } });
+      if (currentUid && agentClockedIn && isRecordingActive && isAutoRecordingEnabled()) {
+        startBackgroundRecording();
+      }
+    } catch (_) {}
+    finally {
+      recordingSegmentInFlight = false;
+    }
+  }, intervalMs);
+}
+
+function restartRecordingSegmentLoop() {
+  stopRecordingSegmentLoop();
+  startRecordingSegmentLoop();
+}
+
+function startUploadRetryLoop() {
+  if (uploadRetryInterval) return;
+  const intervalMs = 5 * 60 * 1000;
+  uploadRetryInterval = setInterval(async () => {
+    if (!currentUid) return;
+    if (!cachedAdminSettings?.autoUpload) return;
+    try {
+      await retryPendingRecordingUploadsOnLogin();
+    } catch (_) {}
+  }, intervalMs);
+}
 let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
 const APP_BASE_URL = process.env.APP_BASE_URL || 'https://tracker-5.vercel.app';
+
+let recordingSegmentInterval = null;
+let recordingSegmentInFlight = false;
+let uploadRetryInterval = null;
 
 // ---------- HEALTH / CRASH TELEMETRY (best-effort) ----------
 const HEALTH_EVENT_STACK_LIMIT = 2000;
@@ -1781,9 +1846,11 @@ function stopBackgroundRecording() {
   }
 }
 
-function stopBackgroundRecordingAndFlush(timeoutMs = 7000) {
+function stopBackgroundRecordingAndFlush(options = {}) {
   if (!recorderWindow || recorderWindow.isDestroyed()) return Promise.resolve();
   if (recorderFlushWait) return recorderFlushWait;
+  const timeoutMs = Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 7000;
+  const payload = options?.payload || {};
   recorderFlushWait = new Promise((resolve) => {
     let settled = false;
     const done = () => {
@@ -1805,7 +1872,7 @@ function stopBackgroundRecordingAndFlush(timeoutMs = 7000) {
 
     ipcMain.on('recorder-flushed', handler);
     try {
-      recorderWindow.webContents.send('recorder-stop-and-flush');
+      recorderWindow.webContents.send('recorder-stop-and-flush', payload);
     } catch (err) {
       log('[recorder] failed to request flush', err?.message || err);
       clearTimeout(timer);
@@ -2261,6 +2328,8 @@ function applyAdminSettings(next) {
   // and state mismatches). Auto clock-out is enforced server-side via the scheduled Cloud Function.
   // Keep the desktop watcher disabled to avoid conflicting enforcement.
   stopAutoClockOutWatcher();
+
+  restartRecordingSegmentLoop();
 
 }
 
@@ -3074,7 +3143,10 @@ async function applyAgentStatus(status) {
     }, "manual_break");
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
-    stopBackgroundRecording();
+    await stopBackgroundRecordingAndFlush();
+    try {
+      await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
+    } catch (_) {}
 
     closeManualBreakReminderWindow();
     return { success: true };
@@ -3094,7 +3166,10 @@ async function applyAgentStatus(status) {
     resetAutoResumeRetry();
 
     if (wasRecording) showRecordingPopup('Recording stopped');
-    stopBackgroundRecording();
+    await stopBackgroundRecordingAndFlush();
+    try {
+      await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
+    } catch (_) {}
 
     await writeAgentStatusOrThrow({
       status: 'offline',
@@ -3159,7 +3234,10 @@ async function applyAgentStatus(status) {
     resetAutoResumeRetry();
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
-    stopBackgroundRecording();
+    await stopBackgroundRecordingAndFlush();
+    try {
+      await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
+    } catch (_) {}
 
     await writeAgentStatusOrThrow({
       status: 'break',
@@ -3314,12 +3392,15 @@ ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
   if (currentUid) {
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
   }
+  scheduleAutoResumeRetry(payload?.error || "recorder-failed");
   return { success: true };
 });
 
 const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
-  const shouldEvaluateAutoResume = Boolean(meta?.isLastSession);
+  const shouldEvaluateAutoResume = Boolean(meta?.isLastSession && !meta?.suppressAutoResume);
   try {
+    const ownerUid = currentUid || meta?.ownerUid || null;
+    const ownerName = cachedDisplayName || meta?.ownerName || null;
     const buffer = Buffer.from(arrayBuffer);
     const filePath = path.join(RECORDINGS_DIR, fileName);
     await fs.promises.writeFile(filePath, buffer);
@@ -3328,7 +3409,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     // File meta for manifest / retry logic.
     try {
       const stat = fs.statSync(filePath);
-      upsertManifestEntry(fileName, { size: stat.size, mtimeMs: stat.mtimeMs });
+      upsertManifestEntry(fileName, { size: stat.size, mtimeMs: stat.mtimeMs, ownerUid, ownerName });
     } catch (_) {}
 
     // If this file was already fully handled (e.g., delete failed previously), skip work.
@@ -3337,7 +3418,8 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
       return { success: true, skipped: true, reason: 'already-completed' };
     }
 
-    const safeName = (cachedDisplayName ? String(cachedDisplayName) : (currentUid || 'unknown')).replace(/[\/:*?"<>|]/g, '-');
+    const safeNameSource = ownerName || ownerUid || cachedDisplayName || currentUid || 'unknown';
+    const safeName = String(safeNameSource).replace(/[\/:*?"<>|]/g, '-');
     // Use file mtime for stable paths across retries.
     let isoDate = getIsoDateFromMs(Date.now());
     try {
@@ -3838,6 +3920,26 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
   });
+
+  const handleSystemRecordingFlush = async (reason) => {
+    if (!isRecordingActive) return;
+    log(`[system] ${reason} detected; stopping recorder for flush`);
+    try {
+      await stopBackgroundRecordingAndFlush({ timeoutMs: 3000 });
+    } catch (_) {}
+    try {
+      await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
+    } catch (_) {}
+  };
+
+  try {
+    powerMonitor.on('lock-screen', () => { handleSystemRecordingFlush('lock-screen'); });
+    powerMonitor.on('suspend', () => { handleSystemRecordingFlush('suspend'); });
+    powerMonitor.on('shutdown', () => { handleSystemRecordingFlush('shutdown'); });
+  } catch (_) {}
+
+  startRecordingSegmentLoop();
+  startUploadRetryLoop();
 
   scheduleAutoUpdateCheck();
 });

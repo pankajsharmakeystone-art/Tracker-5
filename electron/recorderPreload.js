@@ -4,6 +4,7 @@ const { ipcRenderer, desktopCapturer } = require('electron');
 // finished blobs back to the main process for saving/uploading.
 
 const sessions = new Map();
+let nextSaveMeta = null;
 
 const sanitizeName = (name) => (name || 'screen').replace(/[^a-z0-9_\-]/gi, '_');
 
@@ -70,9 +71,11 @@ async function startRecorderForSource(source, resolution, fps) {
       const safeName = sanitizeName(session.sourceName || 'screen');
       const fileName = `recording-${safeName}-${Date.now()}.webm`;
       const isLastSession = sessions.size === 1;
-      await ipcRenderer.invoke('recorder-save', fileName, arrayBuffer, { isLastSession });
+      const saveMeta = { isLastSession, ...(nextSaveMeta || {}) };
+      ipcRenderer.invoke('recorder-save', fileName, arrayBuffer, saveMeta)
+        .catch((err) => console.error('[recorder] failed to send recording', err));
     } catch (err) {
-      console.error('[recorder] failed to send recording', err);
+      console.error('[recorder] failed to prepare recording', err);
     } finally {
       try {
         session?.stream?.getTracks()?.forEach((t) => t.stop());
@@ -146,12 +149,14 @@ ipcRenderer.on('recorder-stop', async () => {
   }
 });
 
-ipcRenderer.on('recorder-stop-and-flush', async () => {
+ipcRenderer.on('recorder-stop-and-flush', async (_event, payload = {}) => {
   try {
+    nextSaveMeta = payload || null;
     await stopAndFlushAllRecorders();
   } catch (err) {
     console.warn('[recorder] stop-and-flush failed', err);
   } finally {
+    nextSaveMeta = null;
     try {
       ipcRenderer.send('recorder-flushed');
     } catch (e) {
