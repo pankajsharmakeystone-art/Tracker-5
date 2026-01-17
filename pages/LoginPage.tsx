@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { signIn, signInWithGoogle } from '../services/auth';
 import { AuthError } from 'firebase/auth';
@@ -15,7 +15,20 @@ const LoginPage: React.FC = () => {
     const [password, setPassword] = useState('');
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
+    const [desktopBlockedMessage, setDesktopBlockedMessage] = useState<string | null>(null);
     const navigate = useNavigate();
+
+    useEffect(() => {
+        try {
+            const msg = localStorage.getItem('desktop-login-blocked-message');
+            if (msg) {
+                setDesktopBlockedMessage(msg);
+                localStorage.removeItem('desktop-login-blocked-message');
+            }
+        } catch {
+            // ignore
+        }
+    }, []);
 
     const handleEmailSignIn = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -58,6 +71,11 @@ const LoginPage: React.FC = () => {
                     <h1 className="text-xl font-bold leading-tight tracking-tight text-gray-900 md:text-2xl dark:text-white">
                         Sign in to your account
                     </h1>
+                    {desktopBlockedMessage && (
+                        <p className="text-sm font-light text-yellow-700 dark:text-yellow-300 bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-800 rounded-md p-2">
+                            {desktopBlockedMessage}
+                        </p>
+                    )}
                     {error && <p className="text-sm font-light text-red-500 dark:text-red-400">{error}</p>}
                     <form className="space-y-4 md:space-y-6" onSubmit={handleEmailSignIn}>
                         <div>

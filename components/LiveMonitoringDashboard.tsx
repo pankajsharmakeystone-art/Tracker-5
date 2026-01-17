@@ -370,14 +370,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         return () => { mounted = false; };
     }, []);
 
-    useEffect(() => {
-        if (!viewingLog) return;
-        const latest = rawLogs.find((log) => log.id === viewingLog.id);
-        if (latest && latest !== viewingLog) {
-            setViewingLog(latest);
-        }
-    }, [rawLogs, viewingLog]);
-
     const isToday = useMemo(() => {
         const d = new Date();
         const year = d.getFullYear();

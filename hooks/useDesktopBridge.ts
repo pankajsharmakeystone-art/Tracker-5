@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { requestDesktopToken } from '../services/desktop';
+import { logout } from '../services/auth';
 import { streamGlobalAdminSettings } from '../services/db';
 import type { AdminSettingsType } from '../types';
 
@@ -42,6 +43,13 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
       retryDelayMs = Math.min(retryDelayMs * 2, 30000);
     };
 
+    const isLoginBlockedError = (error: any) => {
+      const code = String(error?.code || '').toLowerCase();
+      if (code.includes('failed-precondition')) return true;
+      const message = String(error?.message || '').toLowerCase();
+      return message.includes('already logged in');
+    };
+
     const bootstrap = async () => {
       try {
         safeClearRetry();
@@ -57,6 +65,28 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
       } catch (error) {
         console.error('[DesktopBridge] Failed to register desktop session:', error);
         isRegistered = false;
+        if (isLoginBlockedError(error)) {
+          const message = 'You are already logged in on another machine. Please log out there first, then sign in here.';
+          try {
+            localStorage.setItem('desktop-login-blocked-message', message);
+          } catch {
+            // ignore
+          }
+          try {
+            await logout();
+          } catch {
+            // ignore
+          }
+          try {
+            window.location.hash = '#/login';
+          } catch {
+            // ignore
+          }
+          canceled = true;
+          safeClearRetry();
+          safeClearHeartbeat();
+          return;
+        }
         scheduleRetry();
       }
     };

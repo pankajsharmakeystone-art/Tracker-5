@@ -183,6 +183,9 @@ exports.issueDesktopToken = functions
         if (user.desktopDisabled === true) {
             throw new functions.https.HttpsError("permission-denied", "Desktop access disabled for this user.");
         }
+        if (user.isLoggedIn === true && user.activeDesktopSessionId) {
+            throw new functions.https.HttpsError("failed-precondition", "You are already logged in on another machine. Please log out there first.");
+        }
         const token = await admin.auth().createCustomToken(uid, { desktop: true });
         return { token };
     }
@@ -528,122 +531,7 @@ exports.autoClockOutAtShiftEnd = (0, scheduler_1.onSchedule)("every 5 minutes", 
  * - Sends a targeted desktopCommands.forceLogout to the previous desktop session id
  */
 exports.enforceSingleActiveDesktopSession = (0, firestore_1.onDocumentWritten)({ document: "users/{uid}", region: FUNCTIONS_REGION }, async (event) => {
-    var _a, _b, _c, _d, _e;
-    const uid = event.params.uid;
-    const before = (_b = (_a = event.data) === null || _a === void 0 ? void 0 : _a.before) === null || _b === void 0 ? void 0 : _b.data();
-    const after = (_d = (_c = event.data) === null || _c === void 0 ? void 0 : _c.after) === null || _d === void 0 ? void 0 : _d.data();
-    if (!after)
-        return;
-    const newSessionId = after.activeDesktopSessionId ? String(after.activeDesktopSessionId) : null;
-    if (!newSessionId)
-        return;
-    let oldSessionId = (before === null || before === void 0 ? void 0 : before.activeDesktopSessionId) ? String(before.activeDesktopSessionId) : null;
-    if (oldSessionId && oldSessionId === newSessionId)
-        return;
-    // Fallback: if older desktop builds didn't persist activeDesktopSessionId,
-    // try reading the current RTDB presence sessionId so we can still target force-logout.
-    if (!oldSessionId) {
-        try {
-            const snap = await admin.database().ref(`presence/${uid}`).once('value');
-            const presence = (_e = snap === null || snap === void 0 ? void 0 : snap.val) === null || _e === void 0 ? void 0 : _e.call(snap);
-            const presenceSessionId = (presence === null || presence === void 0 ? void 0 : presence.sessionId) ? String(presence.sessionId) : null;
-            const presenceSource = (presence === null || presence === void 0 ? void 0 : presence.source) ? String(presence.source) : null;
-            const presenceState = (presence === null || presence === void 0 ? void 0 : presence.state) ? String(presence.state) : null;
-            if (presenceSessionId && presenceSource === 'desktop' && presenceState === 'online' && presenceSessionId !== newSessionId) {
-                oldSessionId = presenceSessionId;
-            }
-        }
-        catch (e) {
-            console.warn('[enforceSingleActiveDesktopSession] RTDB presence fallback failed', e);
-        }
-    }
-    const nowTs = admin.firestore.Timestamp.now();
-    // Find and close any active worklog for this user.
-    const activeSnap = await db
-        .collection("worklogs")
-        .where("userId", "==", uid)
-        .where("status", "in", ["working", "on_break", "break"])
-        .orderBy("clockInTime", "desc")
-        .limit(1)
-        .get();
-    const batch = db.batch();
-    if (!activeSnap.empty) {
-        const docSnap = activeSnap.docs[0];
-        const data = docSnap.data() || {};
-        const lastEventMillis = getTimestampMillis(data.lastEventTimestamp);
-        const nowMillis = nowTs.toMillis();
-        let workDelta = 0;
-        let breakDelta = 0;
-        if (lastEventMillis != null && nowMillis > lastEventMillis) {
-            const elapsedSeconds = (nowMillis - lastEventMillis) / 1000;
-            const normalizedStatus = (data.status || "working").toString().toLowerCase();
-            if (["on_break", "break"].includes(normalizedStatus)) {
-                breakDelta = elapsedSeconds;
-            }
-            else {
-                workDelta = elapsedSeconds;
-            }
-        }
-        const updates = {
-            status: "clocked_out",
-            clockOutTime: nowTs,
-            lastEventTimestamp: nowTs,
-        };
-        if (workDelta > 0)
-            updates.totalWorkSeconds = admin.firestore.FieldValue.increment(workDelta);
-        if (breakDelta > 0)
-            updates.totalBreakSeconds = admin.firestore.FieldValue.increment(breakDelta);
-        const updatedActivities = closeLatestActivityEntry(data.activities, nowTs);
-        if (updatedActivities)
-            updates.activities = updatedActivities;
-        const updatedBreaks = closeOpenBreakEntry(data.breaks, nowTs);
-        if (updatedBreaks)
-            updates.breaks = updatedBreaks;
-        batch.update(db.collection("worklogs").doc(docSnap.id), updates);
-    }
-    // Create a new worklog starting at the new desktop login time.
-    const userDisplayName = (after.displayName || after.userDisplayName || after.name || "").toString();
-    const teamId = (after.teamId || (Array.isArray(after.teamIds) ? after.teamIds[0] : null)) || null;
-    const newLogRef = db.collection("worklogs").doc();
-    batch.set(newLogRef, {
-        userId: uid,
-        userDisplayName,
-        teamId,
-        date: nowTs,
-        clockInTime: nowTs,
-        clockOutTime: null,
-        status: "working",
-        activities: [
-            {
-                type: "working",
-                startTime: nowTs,
-                endTime: null,
-            },
-        ],
-        breaks: [],
-        totalWorkSeconds: 0,
-        totalBreakSeconds: 0,
-        lastEventTimestamp: nowTs,
-        startedBy: "desktop_session_switch",
-        desktopSessionId: newSessionId,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    // Ensure agentStatus shows working after the switch.
-    batch.set(db.collection("agentStatus").doc(uid), {
-        status: "working",
-        manualBreak: false,
-        breakStartedAt: admin.firestore.FieldValue.delete(),
-        lastUpdate: nowTs,
-    }, { merge: true });
-    // Force-logout the previous desktop session only.
-    if (oldSessionId) {
-        batch.set(db.collection("desktopCommands").doc(uid), {
-            forceLogout: true,
-            timestamp: nowTs,
-            targetDesktopSessionId: oldSessionId,
-            reason: "desktop_session_switch",
-        }, { merge: true });
-    }
-    await batch.commit();
+    // Disabled: session-switch auto-close is no longer used.
+    return;
 });
 //# sourceMappingURL=index.js.map
