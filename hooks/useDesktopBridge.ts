@@ -48,13 +48,14 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
     const getOrCreateDeviceId = (): string => {
       try {
         const key = 'desktop-device-id';
-        let id = localStorage.getItem(key);
-        if (!id) {
-          const randomUuid = (globalThis as any)?.crypto?.randomUUID?.();
-          id = randomUuid || `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-          localStorage.setItem(key, id);
+        const existing = localStorage.getItem(key);
+        if (existing) {
+          return existing;
         }
-        return id || `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        const randomUuid = (globalThis as any)?.crypto?.randomUUID?.();
+        const newId: string = randomUuid || `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        localStorage.setItem(key, newId);
+        return newId;
       } catch {
         return `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       }
