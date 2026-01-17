@@ -192,6 +192,9 @@ export const issueDesktopToken = functions
     }
 
     const uid = context.auth.uid;
+    const deviceId = _data && (typeof (_data as any).deviceId === 'string' || typeof (_data as any).deviceId === 'number')
+      ? String(( _data as any).deviceId)
+      : null;
 
     try {
       const userSnap = await db.collection("users").doc(uid).get();
@@ -205,11 +208,19 @@ export const issueDesktopToken = functions
       }
 
       if (user.isLoggedIn === true && user.activeDesktopSessionId) {
-        throw new functions.https.HttpsError(
-          "failed-precondition",
-          "You are already logged in on another machine. Please log out there first."
-        );
+        const activeDeviceId = user.activeDesktopDeviceId ? String(user.activeDesktopDeviceId) : null;
+        if (activeDeviceId && deviceId && activeDeviceId === deviceId) {
+          // Allow same-machine re-login.
+        } else if (!activeDeviceId) {
+          // Backward-compatible: allow if device id was never stored.
+        } else {
+          throw new functions.https.HttpsError(
+            "failed-precondition",
+            "You are already logged in on another machine. Please log out there first."
+          );
+        }
       }
+
 
       const token = await admin.auth().createCustomToken(uid, { desktop: true });
       return { token };

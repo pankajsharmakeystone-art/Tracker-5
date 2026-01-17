@@ -2935,6 +2935,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
     const normalized = typeof payload === "string" ? { uid: payload } : (payload || {});
     const uid = normalized?.uid;
     const desktopToken = normalized?.desktopToken;
+    const deviceId = normalized?.deviceId;
     if (!uid) return { success: false, error: "no-uid" };
 
     if (desktopToken) {
@@ -2998,13 +2999,17 @@ ipcMain.handle("register-uid", async (_, payload) => {
     // Publish the active desktop session id so server-side can enforce "single active desktop"
     // and target force-logout to only the previous machine.
     try {
-      await db.collection("users").doc(uid).set({
+      const sessionPayload = {
         isLoggedIn: true,
         activeDesktopSessionId: desktopSessionId,
         activeDesktopSessionStartedAt: FieldValue.serverTimestamp(),
         activeDesktopMachineName: (() => { try { return require('os').hostname(); } catch { return null; } })(),
         activeDesktopPlatform: process.platform
-      }, { merge: true });
+      };
+      if (deviceId) {
+        sessionPayload.activeDesktopDeviceId = String(deviceId);
+      }
+      await db.collection("users").doc(uid).set(sessionPayload, { merge: true });
     } catch (_) {
       // ignore
     }

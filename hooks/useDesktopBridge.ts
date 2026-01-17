@@ -43,6 +43,21 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
       retryDelayMs = Math.min(retryDelayMs * 2, 30000);
     };
 
+    const getOrCreateDeviceId = (): string | null => {
+      try {
+        const key = 'desktop-device-id';
+        let id = localStorage.getItem(key);
+        if (!id) {
+          const randomUuid = (globalThis as any)?.crypto?.randomUUID?.();
+          id = randomUuid || `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+          localStorage.setItem(key, id);
+        }
+        return id;
+      } catch {
+        return null;
+      }
+    };
+
     const isLoginBlockedError = (error: any) => {
       const code = String(error?.code || '').toLowerCase();
       if (code.includes('failed-precondition')) return true;
@@ -53,10 +68,11 @@ const useDesktopBridge = ({ uid }: DesktopBridgeOptions) => {
     const bootstrap = async () => {
       try {
         safeClearRetry();
-        const token = await requestDesktopToken();
+        const deviceId = getOrCreateDeviceId();
+        const token = await requestDesktopToken(deviceId || undefined);
         if (canceled) return;
         if (!window.desktopAPI?.registerUid) return;
-        const result = await window.desktopAPI.registerUid({ uid, desktopToken: token });
+        const result = await window.desktopAPI.registerUid({ uid, desktopToken: token, deviceId: deviceId || undefined });
         if (!result?.success) {
           throw new Error(result?.error || 'desktop-register-failed');
         }

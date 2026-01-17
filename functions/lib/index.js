@@ -174,6 +174,9 @@ exports.issueDesktopToken = functions
         throw new functions.https.HttpsError("unauthenticated", "Authentication required.");
     }
     const uid = context.auth.uid;
+    const deviceId = _data && (typeof _data.deviceId === 'string' || typeof _data.deviceId === 'number')
+        ? String(_data.deviceId)
+        : null;
     try {
         const userSnap = await db.collection("users").doc(uid).get();
         if (!userSnap.exists) {
@@ -184,7 +187,16 @@ exports.issueDesktopToken = functions
             throw new functions.https.HttpsError("permission-denied", "Desktop access disabled for this user.");
         }
         if (user.isLoggedIn === true && user.activeDesktopSessionId) {
-            throw new functions.https.HttpsError("failed-precondition", "You are already logged in on another machine. Please log out there first.");
+            const activeDeviceId = user.activeDesktopDeviceId ? String(user.activeDesktopDeviceId) : null;
+            if (activeDeviceId && deviceId && activeDeviceId === deviceId) {
+                // Allow same-machine re-login.
+            }
+            else if (!activeDeviceId) {
+                // Backward-compatible: allow if device id was never stored.
+            }
+            else {
+                throw new functions.https.HttpsError("failed-precondition", "You are already logged in on another machine. Please log out there first.");
+            }
         }
         const token = await admin.auth().createCustomToken(uid, { desktop: true });
         return { token };
