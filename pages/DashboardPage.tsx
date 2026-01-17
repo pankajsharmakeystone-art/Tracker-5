@@ -9,6 +9,21 @@ import AdminPanel from '../components/AdminPanel';
 import AgentPanel from '../components/AgentPanel';
 import ManagerPanel from '../components/ManagerPanel';
 
+const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> => {
+    let timer: number | undefined;
+    try {
+        const timeoutPromise = new Promise<undefined>((resolve) => {
+            timer = window.setTimeout(() => resolve(undefined), timeoutMs);
+        });
+        const result = await Promise.race([promise, timeoutPromise]);
+        return result as T | undefined;
+    } finally {
+        if (typeof timer !== 'undefined') {
+            clearTimeout(timer);
+        }
+    }
+};
+
 const DashboardPage: React.FC = () => {
     const { user, userData, loading } = useAuth();
     const navigate = useNavigate();
@@ -74,7 +89,7 @@ const DashboardPage: React.FC = () => {
         if (currentUid) {
             try {
                 // Update Firestore agentStatus to offline (connectivity is tracked in RTDB presence)
-                await updateAgentStatus(currentUid, 'offline');
+                await withTimeout(updateAgentStatus(currentUid, 'offline'), 2000);
             } catch (e) {
                 console.error("Failed to update agent status during logout:", e);
             }
@@ -113,7 +128,7 @@ const DashboardPage: React.FC = () => {
             // Web-side clock out + logout
             if (currentUid) {
                  try {
-                     await performClockOut(currentUid);
+                     await withTimeout(performClockOut(currentUid), 2500);
                  } catch (e) {
                      console.error("Error performing DB clock out:", e);
                  }
