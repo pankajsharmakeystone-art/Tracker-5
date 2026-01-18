@@ -110,6 +110,7 @@ const AgentPanel: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const [displayWorkSeconds, setDisplayWorkSeconds] = useState(0);
     const [displayBreakSeconds, setDisplayBreakSeconds] = useState(0);
+    const [isAway, setIsAway] = useState(false); // Track screen lock "away" state
     const [activeTab, setActiveTab] = useState('timeClock');
 
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
@@ -263,6 +264,7 @@ const AgentPanel: React.FC = () => {
                 const data = snap.data();
                 manualBreakRef.current = !!data.manualBreak;
                 isIdleRef.current = !!data.isIdle; // Update idle ref for timer calculation
+                setIsAway(!!data.isAway); // Track screen lock away state
                 if (data.manualBreak) idleBreakActiveRef.current = false;
 
                 // Track break start
@@ -477,7 +479,9 @@ const AgentPanel: React.FC = () => {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                         <div className="p-4 bg-gray-100 dark:bg-gray-800 rounded-lg border text-center">
                             <p className="text-sm text-gray-500">CURRENT STATUS</p>
-                            <p className="text-2xl font-bold mt-1 uppercase text-gray-900 dark:text-white">{workLog?.status.replace('_', ' ') || 'Clocked Out'}</p>
+                            <p className={`text-2xl font-bold mt-1 uppercase ${isAway ? 'text-amber-600' : 'text-gray-900 dark:text-white'}`}>
+                                {isAway ? '🔒 Away' : (workLog?.status.replace('_', ' ') || 'Clocked Out')}
+                            </p>
                         </div>
                         <div className="grid grid-cols-2 gap-4">
                             <div className="p-4 bg-gray-100 dark:bg-gray-800 rounded-lg border text-center">

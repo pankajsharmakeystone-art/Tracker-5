@@ -615,6 +615,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         if (agent.isZombie) {
             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200 animate-pulse">Stale / Zombie</span>;
         }
+        // Check for Away status from agentStatuses (screen lock)
+        const desktopStatus = agentStatuses?.[agent.userId];
+        if (desktopStatus?.isAway || agent.status === 'away') {
+            return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">🔒 Away</span>;
+        }
         switch (agent.status) {
             case 'working':
                 return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Working</span>;

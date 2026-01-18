@@ -329,6 +329,7 @@ let commandUnsub = null;
 let statusInterval = null;
 let lastIdleState = false; // track previous idle state
 let agentClockedIn = false; // only monitor idle when true
+let isAway = false; // track screen lock "away" state
 
 // Presence heartbeat interval (RTDB lastSeen refresh) — 5 minutes per product requirement.
 const DESKTOP_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
@@ -1387,7 +1388,8 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     .catch(() => { });
 
   if (wasRecording) showRecordingPopup("Recording stopped");
-  stopBackgroundRecording();
+  // Use flush to ensure current recording segment is saved before upload
+  await stopBackgroundRecordingAndFlush({ payload: { stopReason: 'signed_out' } });
 
   // Best-effort: flush any pending uploads before losing auth / returning to login.
   // This is especially important for mid-shift handoffs where the old machine must upload.
@@ -4037,8 +4039,57 @@ app.whenReady().then(() => {
     } catch (_) { }
   };
 
+  // Handle Away status when screen is locked/unlocked
+  const handleScreenLock = async () => {
+    handleSystemRecordingFlush('lock-screen');
+
+    // Only set Away status if user is clocked in and working
+    if (!currentUid || !agentClockedIn || manualBreakActive) return;
+
+    isAway = true;
+    log('[away] Screen locked - setting Away status');
+
+    try {
+      await db.collection('agentStatus').doc(currentUid).set({
+        status: 'away',
+        isAway: true,
+        awayReason: 'screen_lock',
+        awayStartedAt: FieldValue.serverTimestamp(),
+        lastUpdate: FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (e) {
+      log('[away] Failed to set Away status:', e?.message || e);
+    }
+  };
+
+  const handleScreenUnlock = async () => {
+    // Only clear Away status if we were away due to screen lock
+    if (!currentUid || !isAway) return;
+
+    isAway = false;
+    log('[away] Screen unlocked - restoring online status');
+
+    try {
+      await db.collection('agentStatus').doc(currentUid).set({
+        status: 'online',
+        isAway: false,
+        awayReason: FieldValue.delete(),
+        awayStartedAt: FieldValue.delete(),
+        lastUpdate: FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (e) {
+      log('[away] Failed to clear Away status:', e?.message || e);
+    }
+
+    // Resume recording if needed after unlock
+    if (agentClockedIn && !manualBreakActive) {
+      await resumeRecordingIfNeeded(currentUid);
+    }
+  };
+
   try {
-    powerMonitor.on('lock-screen', () => { handleSystemRecordingFlush('lock-screen'); });
+    powerMonitor.on('lock-screen', () => { handleScreenLock(); });
+    powerMonitor.on('unlock-screen', () => { handleScreenUnlock(); });
     powerMonitor.on('suspend', () => { handleSystemRecordingFlush('suspend'); });
     powerMonitor.on('shutdown', () => { handleSystemRecordingFlush('shutdown'); });
   } catch (_) { }
