@@ -730,15 +730,25 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                         <span className="text-blue-500 animate-pulse">Active...</span>
                                     )}
                                 </td>
-                                <td className="py-4 px-6 font-mono font-bold text-gray-700 dark:text-gray-200">
-                                    {formatDuration(agent.displayWork)}
-                                </td>
-                                <td className="py-4 px-6 font-mono text-gray-700 dark:text-gray-200">
-                                    {formatDuration(agent.manualBreakSeconds ?? agent.displayBreak)}
-                                </td>
-                                <td className="py-4 px-6 font-mono text-gray-600 dark:text-gray-300">
-                                    {formatDuration(agent.idleBreakSeconds ?? 0)}
-                                </td>
+                                {(() => {
+                                    const desktopStatus = agentStatuses?.[agent.userId];
+                                    const isOnManualBreak = agent.status === 'on_break' && !desktopStatus?.isIdle;
+                                    const isIdle = desktopStatus?.isIdle === true;
+                                    const isWorking = agent.status === 'working' && !isIdle && !isOnManualBreak;
+                                    return (
+                                        <>
+                                            <td className={`py-4 px-6 font-mono font-bold ${isWorking ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 rounded' : 'text-gray-700 dark:text-gray-200'}`}>
+                                                {formatDuration(agent.displayWork)}
+                                            </td>
+                                            <td className={`py-4 px-6 font-mono ${isOnManualBreak ? 'bg-yellow-100 dark:bg-yellow-900/40 text-yellow-700 dark:text-yellow-300 font-bold rounded' : 'text-gray-700 dark:text-gray-200'}`}>
+                                                {formatDuration(agent.manualBreakSeconds ?? agent.displayBreak)}
+                                            </td>
+                                            <td className={`py-4 px-6 font-mono ${isIdle ? 'bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300 font-bold rounded' : 'text-gray-600 dark:text-gray-300'}`}>
+                                                {formatDuration(agent.idleBreakSeconds ?? 0)}
+                                            </td>
+                                        </>
+                                    );
+                                })()}
                                 <td className="py-4 px-6 text-center">
                                     {getRecordingIndicator({
                                         isConnected: agent.__desktop?.isConnected,

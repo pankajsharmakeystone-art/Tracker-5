@@ -1306,6 +1306,7 @@ const isAutoRecordingEnabled = () => {
 
 async function resumeRecordingIfNeeded(uid) {
   if (!uid || !agentClockedIn) return;
+  if (isAway) return; // Don't resume recording while screen is locked
   if (!isAutoRecordingEnabled()) return;
   if (isRecordingActive) {
     log("Recording already active, skipping auto resume.");
@@ -1326,6 +1327,7 @@ function scheduleAutoResumeRecording(options = {}) {
   const { force = false, reason = null } = options;
   if (autoResumeInFlight) return;
   if (!currentUid || !agentClockedIn) return;
+  if (isAway) return; // Don't auto-resume recording while screen is locked
   if (!isAutoRecordingEnabled()) return;
   if (!force && !isRecordingActive) return;
 
@@ -1353,6 +1355,7 @@ function scheduleAutoResumeRecording(options = {}) {
 
 function scheduleAutoResumeRetry(reason = "retry") {
   if (!currentUid || !agentClockedIn) return;
+  if (isAway) return; // Don't retry resume while screen is locked
   clearAutoResumeRetryTimer();
   const delay = autoResumeRetryDelayMs;
   autoResumeRetryTimer = setTimeout(() => {
