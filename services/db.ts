@@ -1036,7 +1036,10 @@ export const streamRecordingLogs = (
         if (options.teamId) {
             logs = logs.filter(log => log.teamId === options.teamId);
         }
-        if (options.status && options.status !== 'all') {
+        // Handle status filtering - 'failed_or_pending' excludes success logs
+        if (options.status === 'failed_or_pending') {
+            logs = logs.filter(log => log.status === 'failed' || log.status === 'pending');
+        } else if (options.status && options.status !== 'all') {
             logs = logs.filter(log => log.status === options.status);
         }
 

@@ -9,15 +9,29 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
     const [logs, setLogs] = useState<RecordingLogEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [statusFilter, setStatusFilter] = useState<string>('all');
+    const [userFilter, setUserFilter] = useState<string>('all');
+
+    // Date range filter - default to last 7 days
+    const getDefaultStartDate = () => {
+        const d = new Date();
+        d.setDate(d.getDate() - 7);
+        return d.toISOString().split('T')[0];
+    };
+    const getDefaultEndDate = () => new Date().toISOString().split('T')[0];
+
+    const [startDate, setStartDate] = useState(getDefaultStartDate);
+    const [endDate, setEndDate] = useState(getDefaultEndDate);
 
     useEffect(() => {
         setLoading(true);
+        // Only fetch failed and pending logs (exclude success)
+        const effectiveStatus = statusFilter === 'all' ? 'failed_or_pending' : statusFilter;
         const unsubscribe = streamRecordingLogs(
             (fetchedLogs) => {
                 setLogs(fetchedLogs);
                 setLoading(false);
             },
-            { teamId, status: statusFilter }
+            { teamId, status: effectiveStatus }
         );
         return () => unsubscribe();
     }, [teamId, statusFilter]);
@@ -97,11 +111,29 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
         }
     };
 
+    // Apply client-side user filter and date filter
+    const filteredLogs = logs.filter(l => {
+        // User filter
+        if (userFilter !== 'all' && l.userName !== userFilter) return false;
+
+        // Date filter
+        if (l.loggedAt) {
+            try {
+                const logDate = l.loggedAt.toDate?.() || new Date(l.loggedAt);
+                const logDateStr = logDate.toISOString().split('T')[0];
+                if (startDate && logDateStr < startDate) return false;
+                if (endDate && logDateStr > endDate) return false;
+            } catch {
+                // If date parsing fails, include the log
+            }
+        }
+        return true;
+    });
+
     const stats = {
-        success: logs.filter(l => l.status === 'success').length,
-        failed: logs.filter(l => l.status === 'failed').length,
-        pending: logs.filter(l => l.status === 'pending').length,
-        total: logs.length
+        failed: filteredLogs.filter(l => l.status === 'failed').length,
+        pending: filteredLogs.filter(l => l.status === 'pending').length,
+        total: filteredLogs.length
     };
 
     if (loading) {
@@ -116,14 +148,10 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
     return (
         <div className="space-y-4">
             {/* Stats Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-3 gap-4">
                 <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border dark:border-gray-700 shadow-sm">
                     <div className="text-2xl font-bold text-gray-800 dark:text-white">{stats.total}</div>
                     <div className="text-sm text-gray-500 dark:text-gray-400">Total Logs</div>
-                </div>
-                <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border dark:border-gray-700 shadow-sm">
-                    <div className="text-2xl font-bold text-green-600">{stats.success}</div>
-                    <div className="text-sm text-gray-500 dark:text-gray-400">Successful</div>
                 </div>
                 <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border dark:border-gray-700 shadow-sm">
                     <div className="text-2xl font-bold text-red-600">{stats.failed}</div>
@@ -135,19 +163,51 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
                 </div>
             </div>
 
-            {/* Filter */}
-            <div className="flex items-center gap-4 bg-white dark:bg-gray-800 p-4 rounded-lg border dark:border-gray-700">
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Filter by status:</label>
-                <select
-                    value={statusFilter}
-                    onChange={(e) => setStatusFilter(e.target.value)}
-                    className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                >
-                    <option value="all">All</option>
-                    <option value="success">✓ Successful</option>
-                    <option value="failed">✗ Failed</option>
-                    <option value="pending">⏳ Pending</option>
-                </select>
+            {/* Filters */}
+            <div className="flex flex-wrap items-center gap-4 bg-white dark:bg-gray-800 p-4 rounded-lg border dark:border-gray-700">
+                <div className="flex items-center gap-2">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Status:</label>
+                    <select
+                        value={statusFilter}
+                        onChange={(e) => setStatusFilter(e.target.value)}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                    >
+                        <option value="all">All (Failed + Pending)</option>
+                        <option value="failed">✗ Failed</option>
+                        <option value="pending">⏳ Pending</option>
+                    </select>
+                </div>
+                <div className="flex items-center gap-2">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300">User:</label>
+                    <select
+                        value={userFilter}
+                        onChange={(e) => setUserFilter(e.target.value)}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2 dark:bg-gray-700 dark:border-gray-600 dark:text-white min-w-[150px]"
+                    >
+                        <option value="all">All Users</option>
+                        {Array.from(new Set(logs.map(l => l.userName).filter((n): n is string => Boolean(n)))).sort().map(name => (
+                            <option key={name} value={name}>{name}</option>
+                        ))}
+                    </select>
+                </div>
+                <div className="flex items-center gap-2">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300">From:</label>
+                    <input
+                        type="date"
+                        value={startDate}
+                        onChange={(e) => setStartDate(e.target.value)}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                    />
+                </div>
+                <div className="flex items-center gap-2">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300">To:</label>
+                    <input
+                        type="date"
+                        value={endDate}
+                        onChange={(e) => setEndDate(e.target.value)}
+                        className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                    />
+                </div>
             </div>
 
             {/* Table */}
@@ -169,14 +229,14 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
                             </tr>
                         </thead>
                         <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                            {logs.length === 0 ? (
+                            {filteredLogs.length === 0 ? (
                                 <tr>
                                     <td colSpan={10} className="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
                                         No recording logs found
                                     </td>
                                 </tr>
                             ) : (
-                                logs.map((log) => (
+                                filteredLogs.map((log) => (
                                     <tr key={log.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                                         <td className="px-4 py-3 whitespace-nowrap">
                                             <div className="text-sm font-medium text-gray-900 dark:text-white">{log.userName || 'Unknown'}</div>
