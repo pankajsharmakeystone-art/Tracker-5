@@ -11,7 +11,7 @@ import LiveStreamModal from './LiveStreamModal';
 import ActivitySheet from './ActivitySheet';
 
 interface Props {
-  teamId?: string;
+    teamId?: string;
 }
 
 const formatDuration = (totalSeconds: number): string => {
@@ -80,11 +80,19 @@ const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
     let idleSeconds = 0;
     let accounted = false;
 
+    // When session is clocked out, don't add any live elapsed time
+    const isClockedOut = log.status === 'clocked_out';
+    // Use lastEventTimestamp as the cutoff for clocked out sessions
+    const cutoffMs = isClockedOut
+        ? (getMillis(log.lastEventTimestamp as any) ?? nowMs)
+        : nowMs;
+
     breaks.forEach((entry: any) => {
         const startMs = getMillis(entry?.startTime);
         if (startMs == null) return;
         const endMs = entry?.endTime ? getMillis(entry.endTime) : null;
-        const effectiveEnd = endMs ?? nowMs;
+        // For open breaks, use cutoff (lastEvent for clocked out, now for active)
+        const effectiveEnd = endMs ?? cutoffMs;
         if (effectiveEnd <= startMs) return;
         accounted = true;
         const duration = (effectiveEnd - startMs) / 1000;
@@ -96,7 +104,8 @@ const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
         manualSeconds = typeof log.totalBreakSeconds === 'number' ? log.totalBreakSeconds : 0;
         const isOnBreak = log.status === 'on_break' || (log.status as any) === 'break';
         const lastEventMs = getMillis(log.lastEventTimestamp as any);
-        if (isOnBreak && lastEventMs != null && nowMs > lastEventMs) {
+        // Only add live elapsed if actively on break (not clocked out)
+        if (isOnBreak && !isClockedOut && lastEventMs != null && nowMs > lastEventMs) {
             manualSeconds += (nowMs - lastEventMs) / 1000;
         }
     }
@@ -196,29 +205,29 @@ const EditTimeModal = ({ log, onClose, timezone }: { log: WorkLog, onClose: () =
 
             const newStartMillis = startDate.getTime();
             const newEndMillis = endDate ? endDate.getTime() : Date.now();
-            
+
             // Recalculate Valid Break Seconds
             // We must only count breaks that fall WITHIN the new start/end times.
             let newTotalBreakSeconds = 0;
-            
+
             if (log.breaks && log.breaks.length > 0) {
                 log.breaks.forEach(b => {
                     const bStart = b.startTime.toDate().getTime();
                     const bEnd = b.endTime ? b.endTime.toDate().getTime() : Date.now();
-                    
+
                     // Find intersection of [bStart, bEnd] with [newStart, newEnd]
                     const overlapStart = Math.max(bStart, newStartMillis);
                     const overlapEnd = Math.min(bEnd, newEndMillis);
-                    
+
                     if (overlapEnd > overlapStart) {
                         newTotalBreakSeconds += (overlapEnd - overlapStart) / 1000;
                     }
                 });
             }
-            
+
             const totalElapsedSeconds = (newEndMillis - newStartMillis) / 1000;
             const newTotalWorkSeconds = Math.max(0, totalElapsedSeconds - newTotalBreakSeconds);
-            
+
             updates.totalWorkSeconds = newTotalWorkSeconds;
             updates.totalBreakSeconds = newTotalBreakSeconds;
 
@@ -257,13 +266,13 @@ const EditTimeModal = ({ log, onClose, timezone }: { log: WorkLog, onClose: () =
         <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex justify-center items-center p-4" aria-modal="true" role="dialog">
             <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-xl w-full max-w-md border dark:border-gray-700">
                 <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Edit Time Log</h3>
-                
+
                 {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
 
                 <div className="mb-4">
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Clock In Time</label>
-                    <input 
-                        type="datetime-local" 
+                    <input
+                        type="datetime-local"
                         value={startTime}
                         onChange={(e) => setStartTime(e.target.value)}
                         step="1"
@@ -273,8 +282,8 @@ const EditTimeModal = ({ log, onClose, timezone }: { log: WorkLog, onClose: () =
 
                 <div className="mb-6">
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Clock Out Time</label>
-                    <input 
-                        type="datetime-local" 
+                    <input
+                        type="datetime-local"
                         value={endTime}
                         onChange={(e) => setEndTime(e.target.value)}
                         step="1"
@@ -284,14 +293,14 @@ const EditTimeModal = ({ log, onClose, timezone }: { log: WorkLog, onClose: () =
                 </div>
 
                 <div className="flex justify-end gap-3">
-                    <button 
+                    <button
                         onClick={onClose}
                         disabled={saving}
                         className="px-4 py-2 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
                     >
                         Cancel
                     </button>
-                    <button 
+                    <button
                         onClick={handleSave}
                         disabled={saving}
                         className="px-4 py-2 text-white bg-blue-600 rounded hover:bg-blue-700 disabled:opacity-50"
@@ -346,7 +355,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [reconnectPending, setReconnectPending] = useState<string | null>(null);
     const reconnectRequestRef = React.useRef<{ uid: string; requestId: string } | null>(null);
     const reconnectTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    
+
     const [selectedDate, setSelectedDate] = useState(() => {
         const d = new Date();
         const year = d.getFullYear();
@@ -354,7 +363,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         const day = String(d.getDate()).padStart(2, '0');
         return `${year}-${month}-${day}`;
     });
-    
+
     const [now, setNow] = useState(Date.now());
 
     useEffect(() => {
@@ -366,7 +375,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         let mounted = true;
         readOrganizationTimezone()
             .then((tz) => { if (mounted && tz) setOrganizationTimezone(tz); })
-            .catch(() => {/* ignore */});
+            .catch(() => {/* ignore */ });
         return () => { mounted = false; };
     }, []);
 
@@ -421,10 +430,10 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             const isStale = false; // show the Firestore status as-is; no stale override
             const isActive = log.status !== 'clocked_out';
             const isZombie = isSessionStale(log) && isActive;
-            
+
             const { manualSeconds, idleSeconds } = aggregateBreakSeconds(log, now);
             const totalBreak = manualSeconds + idleSeconds;
-            
+
             let totalWork = log.totalWorkSeconds;
 
             // For closed sessions, always calculate from server timestamps to avoid
@@ -439,22 +448,28 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 }
             } else if (!isZombie && log.lastEventTimestamp) {
                 // For active sessions, add live elapsed time (real-time display)
-                const lastTime = (log.lastEventTimestamp as any).toMillis 
-                    ? (log.lastEventTimestamp as any).toMillis() 
+                const lastTime = (log.lastEventTimestamp as any).toMillis
+                    ? (log.lastEventTimestamp as any).toMillis()
                     : (log.lastEventTimestamp as any).toDate().getTime();
-                
+
                 const elapsed = Math.max(0, (now - lastTime) / 1000);
-                
-                if (log.status === 'working') totalWork += elapsed;
+
+                // Only count work time if status is 'working' AND not idle/on manual break
+                // This ensures mutual exclusivity between work/idle/break counters
+                const isAgentIdle = desktopStatus?.isIdle === true;
+                const isAgentOnManualBreak = desktopStatus?.manualBreak === true;
+                if (log.status === 'working' && !isAgentIdle && !isAgentOnManualBreak) {
+                    totalWork += elapsed;
+                }
             }
-            
+
             // Check if this log started on a previous day
             let isOvernight = false;
             if (log.date) {
                 const logDate = (log.date as any).toDate();
                 const selected = new Date(selectedDate);
                 // Basic check: if log date is before selected viewing date (which is usually today)
-                if (logDate.setHours(0,0,0,0) < selected.setHours(0,0,0,0)) {
+                if (logDate.setHours(0, 0, 0, 0) < selected.setHours(0, 0, 0, 0)) {
                     isOvernight = true;
                 }
             }
@@ -598,7 +613,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
     const getStatusBadge = (agent: any) => {
         if (agent.isZombie) {
-             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200 animate-pulse">Stale / Zombie</span>;
+            return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200 animate-pulse">Stale / Zombie</span>;
         }
         switch (agent.status) {
             case 'working':
@@ -626,7 +641,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         }
         return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-200">Rec Off</span>;
     };
-    
+
     if (loading && !rawLogs.length) return <div className="p-8 flex justify-center"><Spinner /></div>;
 
     return (
@@ -652,20 +667,20 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                     timezone={organizationTimezone}
                 />
             )}
-            
+
             <div className="mb-4 flex flex-col sm:flex-row justify-between items-center gap-4 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border dark:border-gray-700">
                 <h3 className="text-lg font-medium text-gray-900 dark:text-white">
                     Monitoring
                 </h3>
                 <div className="flex items-center gap-2">
-                     <label htmlFor="monitor-date" className="text-sm font-medium text-gray-700 dark:text-gray-300">Date:</label>
-                     <input 
-                        type="date" 
+                    <label htmlFor="monitor-date" className="text-sm font-medium text-gray-700 dark:text-gray-300">Date:</label>
+                    <input
+                        type="date"
                         id="monitor-date"
                         value={selectedDate}
                         onChange={(e) => setSelectedDate(e.target.value)}
                         className="bg-white border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
-                     />
+                    />
                 </div>
             </div>
 

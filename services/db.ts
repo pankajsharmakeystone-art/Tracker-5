@@ -995,3 +995,71 @@ export const forceLogoutAgent = async (uid: string) => {
         throw error;
     }
 };
+
+// --- Recording Logs ---
+
+export type RecordingLogEntry = {
+    id: string;
+    userId: string;
+    userName: string | null;
+    teamId: string | null;
+    fileName: string;
+    status: 'success' | 'failed' | 'pending';
+    uploadTarget: 'dropbox' | 'googleSheets' | 'http' | null;
+    machineName: string | null;
+    fileSize: number | null;
+    durationMs: number | null;
+    downloadUrl: string | null;
+    error: string | null;
+    retryCount: number;
+    createdAt: any;
+    uploadedAt: any;
+    loggedAt: any;
+};
+
+export const streamRecordingLogs = (
+    callback: (logs: RecordingLogEntry[]) => void,
+    options: { teamId?: string; status?: string; limitCount?: number } = {}
+) => {
+    const logsRef = collection(db, 'recordingLogs');
+
+    // Build query - order by loggedAt descending
+    let q = query(logsRef, orderBy('loggedAt', 'desc'), limit(options.limitCount || 200));
+
+    return onSnapshot(q, (snapshot) => {
+        let logs = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        } as RecordingLogEntry));
+
+        // Client-side filtering for team and status (since we can't do compound orderBy with where)
+        if (options.teamId) {
+            logs = logs.filter(log => log.teamId === options.teamId);
+        }
+        if (options.status && options.status !== 'all') {
+            logs = logs.filter(log => log.status === options.status);
+        }
+
+        callback(logs);
+    }, (error) => {
+        console.error('[streamRecordingLogs] error:', error);
+        callback([]);
+    });
+};
+
+export const getRecordingLogStats = async (teamId?: string): Promise<{ success: number; failed: number; pending: number }> => {
+    const logsRef = collection(db, 'recordingLogs');
+    const snapshot = await getDocs(logsRef);
+
+    let logs = snapshot.docs.map(doc => doc.data());
+    if (teamId) {
+        logs = logs.filter(log => log.teamId === teamId);
+    }
+
+    return {
+        success: logs.filter(l => l.status === 'success').length,
+        failed: logs.filter(l => l.status === 'failed').length,
+        pending: logs.filter(l => l.status === 'pending').length
+    };
+};
+

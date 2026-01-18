@@ -13,6 +13,7 @@ const fetch = require("node-fetch");
 const electronLog = require("electron-log");
 const { DateTime } = require("luxon");
 const { google } = require("googleapis");
+const fixWebmDuration = require("fix-webm-duration");
 
 // auto-updater
 const { autoUpdater } = require("electron-updater");
@@ -32,7 +33,7 @@ autoUpdater.autoDownload = true;
 app.setAppUserModelId(APP_USER_MODEL_ID);
 
 // ---------- HELPER FUNCTIONS ----------
-function log(...args){ console.log("[electron]", ...args); }
+function log(...args) { console.log("[electron]", ...args); }
 
 function emitAutoUpdateStatus(event, payload = {}) {
   const safePayload = payload || {};
@@ -272,8 +273,46 @@ function isRecordingCompleted(fileName) {
 
 loadUploadedManifest();
 
+// ---------- RECORDING LOGS (Firestore) ----------
+// Logs upload events to Firestore so admins/managers can see upload status
+async function logRecordingEvent(eventData = {}) {
+  try {
+    const authed = await ensureDesktopAuth();
+    if (!authed) {
+      log('[recordingLogs] auth missing, skipping log');
+      return null;
+    }
+
+    const payload = {
+      userId: eventData.userId || currentUid || null,
+      userName: eventData.userName || cachedDisplayName || null,
+      teamId: eventData.teamId || null,
+      fileName: eventData.fileName || null,
+      status: eventData.status || 'unknown', // 'success' | 'failed' | 'pending'
+      uploadTarget: eventData.uploadTarget || null, // 'dropbox' | 'googleSheets' | 'http'
+      machineName: os.hostname() || null,
+      fileSize: eventData.fileSize || null,
+      durationMs: eventData.durationMs || null,
+      downloadUrl: eventData.downloadUrl || null,
+      error: eventData.error || null,
+      retryCount: eventData.retryCount || 0,
+      stopReason: eventData.stopReason || null, // 'lock-screen' | 'manual_break' | 'clocked_out' | 'suspend' | 'shutdown' | etc.
+      createdAt: eventData.createdAt || FieldValue.serverTimestamp(),
+      uploadedAt: eventData.status === 'success' ? FieldValue.serverTimestamp() : null,
+      loggedAt: FieldValue.serverTimestamp()
+    };
+
+    const docRef = await db.collection('recordingLogs').add(payload);
+    log('[recordingLogs] logged event:', payload.status, payload.fileName);
+    return docRef.id;
+  } catch (err) {
+    log('[recordingLogs] failed to log event:', err?.message || err);
+    return null;
+  }
+}
+
 // Path to the uploaded icon you asked to use for the popup
-const POPUP_ICON_PATH = "/mnt/data/a35a616b-074d-4238-a09e-5dcb70efb649.png"; 
+const POPUP_ICON_PATH = "/mnt/data/a35a616b-074d-4238-a09e-5dcb70efb649.png";
 const ADMIN_SETTINGS_CACHE_PATH = path.join(app.getPath("userData"), "admin-settings.json");
 
 // ---------- GLOBALS ----------
@@ -315,7 +354,7 @@ function stopRtdbPresence() {
     if (rtdbConnectedRef && rtdbConnectedCallback) {
       rtdbConnectedRef.off('value', rtdbConnectedCallback);
     }
-  } catch (_) {}
+  } catch (_) { }
   rtdbConnectedRef = null;
   rtdbConnectedCallback = null;
 
@@ -324,7 +363,7 @@ function stopRtdbPresence() {
       clearInterval(rtdbPresenceHeartbeatInterval);
       rtdbPresenceHeartbeatInterval = null;
     }
-  } catch (_) {}
+  } catch (_) { }
 
   rtdbPresenceRef = null;
 }
@@ -418,7 +457,7 @@ function startRtdbPresence(uid) {
 
   // Heartbeat refresh (5 minutes) to update lastSeen.
   rtdbPresenceHeartbeatInterval = setInterval(() => {
-    setRtdbPresence(uid, buildOnlinePayload()).catch(() => {});
+    setRtdbPresence(uid, buildOnlinePayload()).catch(() => { });
   }, DESKTOP_HEARTBEAT_INTERVAL_MS);
 }
 
@@ -470,7 +509,7 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
 
       if (isRecordingCompleted(fileName)) {
         // File might remain if delete previously failed — clean it up.
-        try { await fs.promises.unlink(filePath); } catch (_) {}
+        try { await fs.promises.unlink(filePath); } catch (_) { }
         continue;
       }
 
@@ -484,13 +523,30 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
       const allDone = enabledTargets.every((t) => isTargetUploaded(fileName, t));
       if (allDone) {
         markRecordingCompleted(fileName);
-        try { await fs.promises.unlink(filePath); } catch (_) {}
+        try { await fs.promises.unlink(filePath); } catch (_) { }
         continue;
       }
 
       const entry = getManifestEntry(fileName) || {};
       const ownerUid = entry.ownerUid || null;
       const ownerName = entry.ownerName || null;
+
+      // Owner-check: Skip files that belong to a different user
+      // This prevents uploading recordings to the wrong user's account
+      if (ownerUid && ownerUid !== currentUid) {
+        log('[uploads] skipping file owned by different user:', ownerUid, 'current:', currentUid);
+
+        // Log pending status so admin can see which files are waiting for their owner
+        await logRecordingEvent({
+          userId: ownerUid,
+          userName: ownerName,
+          fileName,
+          status: 'pending',
+          fileSize: stat.size,
+          error: 'waiting-for-owner-login'
+        });
+        continue;
+      }
 
       // Use the file timestamp for stable paths and names across retries.
       const safeNameSource = ownerName || ownerUid || cachedDisplayName || currentUid || 'unknown';
@@ -525,7 +581,7 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
       const allSucceededAfter = enabledTargets.every((t) => isTargetUploaded(fileName, t));
       if (allSucceededAfter) {
         markRecordingCompleted(fileName);
-        try { await fs.promises.unlink(filePath); } catch (_) {}
+        try { await fs.promises.unlink(filePath); } catch (_) { }
       }
     }
   } catch (err) {
@@ -565,7 +621,7 @@ function startRecordingSegmentLoop() {
       if (currentUid && agentClockedIn && isRecordingActive && isAutoRecordingEnabled()) {
         startBackgroundRecording();
       }
-    } catch (_) {}
+    } catch (_) { }
     finally {
       recordingSegmentInFlight = false;
     }
@@ -585,7 +641,7 @@ function startUploadRetryLoop() {
     if (!cachedAdminSettings?.autoUpload) return;
     try {
       await retryPendingRecordingUploadsOnLogin();
-    } catch (_) {}
+    } catch (_) { }
   }, intervalMs);
 }
 let isRecordingActive = false; // track recording
@@ -648,7 +704,7 @@ const snapshotLocal = (type, details = {}) => {
       stack: null,
       uid: currentUid || null
     });
-  } catch (_) {}
+  } catch (_) { }
 };
 
 const getProcessMetrics = () => {
@@ -733,7 +789,7 @@ async function attemptDesktopRecovery(reason = "watchdog") {
       // Avoid hot-looping and leave it to renderer re-register flow.
       return false;
     }
-  } catch (_) {}
+  } catch (_) { }
 
   try {
     // Restart watches/loops
@@ -743,23 +799,23 @@ async function attemptDesktopRecovery(reason = "watchdog") {
     startAgentStatusWatch(currentUid);
     stopAutoClockConfigWatch();
     startAutoClockConfigWatch(currentUid);
-  } catch (_) {}
+  } catch (_) { }
 
   try {
     await flushPendingAgentStatuses();
-  } catch (_) {}
+  } catch (_) { }
 
   try {
     await reassertDesktopStatus(currentUid);
-  } catch (_) {}
+  } catch (_) { }
 
   // Last resort: if we still have queued writes, reload the renderer to reset the app state.
   try {
     if (pendingAgentStatuses.length > 0) {
       await recordHealthEvent("watchdog_recovery_incomplete", { reason, pending: pendingAgentStatuses.length });
-      try { mainWindow?.webContents?.reload?.(); } catch (_) {}
+      try { mainWindow?.webContents?.reload?.(); } catch (_) { }
     }
-  } catch (_) {}
+  } catch (_) { }
 
   return true;
 }
@@ -782,7 +838,7 @@ function startWatchdog() {
       // 1) Ping renderer and reload if it stops responding
       if (mainWindow?.webContents) {
         const pingId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        try { mainWindow.webContents.send("health-ping", { id: pingId }); } catch (_) {}
+        try { mainWindow.webContents.send("health-ping", { id: pingId }); } catch (_) { }
         if (watchdogPingTimeout) clearTimeout(watchdogPingTimeout);
         watchdogPingTimeout = setTimeout(async () => {
           watchdogPingTimeout = null;
@@ -790,7 +846,7 @@ function startWatchdog() {
           if (age <= WATCHDOG_PING_INTERVAL_MS + WATCHDOG_PING_TIMEOUT_MS) return;
           log("[watchdog] renderer pong stale:", age);
           await recordHealthEvent("watchdog_renderer_stale", { ageMs: age });
-          try { mainWindow?.webContents?.reload?.(); } catch (_) {}
+          try { mainWindow?.webContents?.reload?.(); } catch (_) { }
         }, WATCHDOG_PING_TIMEOUT_MS);
       }
 
@@ -840,7 +896,7 @@ function startMainLagMonitor() {
 
       if (driftMs > MAIN_LAG_SEVERE_THRESHOLD_MS) {
         await attemptDesktopRecovery("main_event_loop_lag_severe");
-        try { mainWindow?.webContents?.reload?.(); } catch (_) {}
+        try { mainWindow?.webContents?.reload?.(); } catch (_) { }
       }
     }
   }, MAIN_LAG_CHECK_INTERVAL_MS);
@@ -997,7 +1053,7 @@ function requestRendererReauth(reason = "unknown") {
   try {
     log("[auth] requesting renderer re-register:", reason);
     mainWindow?.webContents?.send?.("desktop-auth-required", { reason });
-  } catch (_) {}
+  } catch (_) { }
 }
 
 function clearAutoResumeRetryTimer() {
@@ -1177,7 +1233,7 @@ async function reconcileRecordingAfterRegister(uid) {
         status: 'working',
         isRecording: true,
         lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true }).catch(() => {});
+      }, { merge: true }).catch(() => { });
 
       agentClockedIn = true;
       return;
@@ -1201,7 +1257,7 @@ async function reconcileRecordingAfterRegister(uid) {
         status: 'working',
         isRecording: true,
         lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true }).catch(() => {});
+      }, { merge: true }).catch(() => { });
 
       agentClockedIn = true;
       return;
@@ -1230,7 +1286,7 @@ async function reassertDesktopStatus(uid) {
         breakStartedAt: FieldValue.delete(),
         isIdle: false,
         lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true }).catch(() => {});
+      }, { merge: true }).catch(() => { });
     }
   } catch (err) {
     console.warn('[reassertDesktopStatus] failed', err?.message || err);
@@ -1260,7 +1316,7 @@ async function resumeRecordingIfNeeded(uid) {
     await db.collection('agentStatus').doc(uid)
       .set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true });
     recordStatusWriteSuccess();
-  } catch (_) {}
+  } catch (_) { }
   showRecordingPopup("Recording resumed");
   startBackgroundRecording();
 }
@@ -1318,7 +1374,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   // Best-effort: explicitly mark desktop offline in RTDB so the console/UI doesn't
   // show a stuck `online` state if onDisconnect doesn't fire for any reason.
   // Guarded by sessionId match to avoid clobbering a newer desktop session.
-  try { await setRtdbPresenceOfflineIfSessionMatches(uid); } catch (_) {}
+  try { await setRtdbPresenceOfflineIfSessionMatches(uid); } catch (_) { }
   stopRtdbPresence();
 
   const wasRecording = isRecordingActive;
@@ -1328,7 +1384,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   await db.collection('agentStatus').doc(uid)
     .set({ isRecording: false }, { merge: true })
-    .catch(() => {});
+    .catch(() => { });
 
   if (wasRecording) showRecordingPopup("Recording stopped");
   stopBackgroundRecording();
@@ -1347,7 +1403,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     idleReason: FieldValue.delete(),
     lockedBySystem: false,
     lastUpdate: FieldValue.serverTimestamp()
-  }, { merge: true }).catch(()=>{});
+  }, { merge: true }).catch(() => { });
 
   // Keep the user profile in sync when desktop drives the clock-out/sign-out flow.
   // In multi-desktop handoff scenarios, avoid clobbering the new desktop's session.
@@ -1406,7 +1462,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     log("[forceLogout] failed to clear agentStatus forceLogout fields", e?.message || e);
   }
 
-  if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
+  if (commandUnsub) { try { commandUnsub(); } catch (e) { } commandUnsub = null; }
   stopAgentStatusWatch();
   stopAutoClockConfigWatch();
   pendingAgentStatuses.length = 0;
@@ -1456,7 +1512,7 @@ async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
         lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true });
     recordStatusWriteSuccess();
-  } catch (_) {}
+  } catch (_) { }
 }
 
 async function pushActiveStatus(uid, { idleSecs } = {}) {
@@ -1477,7 +1533,7 @@ async function pushActiveStatus(uid, { idleSecs } = {}) {
         lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true });
     recordStatusWriteSuccess();
-  } catch (_) {}
+  } catch (_) { }
   await resumeRecordingIfNeeded(uid);
 }
 
@@ -1713,7 +1769,7 @@ function createMainWindow() {
 
   // Send handshake to renderer
   mainWindow.webContents.on("did-finish-load", () => {
-    try { mainWindow.webContents.send("desktop-ready", { ok: true }); } catch(e) {}
+    try { mainWindow.webContents.send("desktop-ready", { ok: true }); } catch (e) { }
     // Start watchdog once renderer is loaded.
     startWatchdog();
     startMainLagMonitor();
@@ -1818,7 +1874,7 @@ function startBackgroundRecording() {
       if (currentUid) {
         db.collection('agentStatus').doc(currentUid)
           .set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
-          .catch(() => {});
+          .catch(() => { });
       }
       return;
     }
@@ -1832,7 +1888,7 @@ function startBackgroundRecording() {
     if (currentUid) {
       db.collection('agentStatus').doc(currentUid)
         .set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
-        .catch(() => {});
+        .catch(() => { });
     }
   }
 }
@@ -1895,7 +1951,7 @@ function createTray() {
     tray.setToolTip("Workforce Desktop");
     tray.setContextMenu(menu);
     tray.on("click", () => { if (mainWindow) mainWindow.show(); });
-  } catch(e) {
+  } catch (e) {
     log("tray init failed", e.message);
   }
 }
@@ -1970,7 +2026,7 @@ function showRecordingPopup(message) {
   try {
     // Close previous popup if present
     if (popupWindow) {
-      try { popupWindow.close(); } catch(e){}
+      try { popupWindow.close(); } catch (e) { }
       popupWindow = null;
     }
 
@@ -1981,45 +2037,45 @@ function showRecordingPopup(message) {
     const x = workArea.x + workArea.width - popupWidth - 16; // 16px margin
     const y = workArea.y + workArea.height - popupHeight - 16;
 
-  popupWindow = new BrowserWindow({
-    width: popupWidth,
-    height: popupHeight,
-    x,
-    y,
+    popupWindow = new BrowserWindow({
+      width: popupWidth,
+      height: popupHeight,
+      x,
+      y,
 
-    // ❗ MUST BE OUTSIDE APP WINDOW
-    parent: null,
-    modal: false,
+      // ❗ MUST BE OUTSIDE APP WINDOW
+      parent: null,
+      modal: false,
 
-    // ❗ Needed for OS-level floating window
-    type: "toolbar",                   // <--- REQUIRED
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    frame: false,
-    transparent: false,
+      // ❗ Needed for OS-level floating window
+      type: "toolbar",                   // <--- REQUIRED
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      frame: false,
+      transparent: false,
 
-    // Cannot be dismissed without clicking inside popup
-    focusable: true,
-    minimizable: false,
-    maximizable: false,
-    closable: false,
-    resizable: false,
+      // Cannot be dismissed without clicking inside popup
+      focusable: true,
+      minimizable: false,
+      maximizable: false,
+      closable: false,
+      resizable: false,
 
-    webPreferences: {
+      webPreferences: {
         contextIsolation: true,
         nodeIntegration: false
-    }
-  });
+      }
+    });
 
-  // ⭐ Required: show on ALL workspaces (desktop)
-  popupWindow.setVisibleOnAllWorkspaces(true, {
+    // ⭐ Required: show on ALL workspaces (desktop)
+    popupWindow.setVisibleOnAllWorkspaces(true, {
       visibleOnFullScreen: true
-  });
+    });
 
-  // ⭐ Keeps popup on top even if user clicks anywhere else
-  popupWindow.on("blur", () => {
+    // ⭐ Keeps popup on top even if user clicks anywhere else
+    popupWindow.on("blur", () => {
       popupWindow.focus();
-  });
+    });
 
     const safeIconUrl = `file://${POPUP_ICON_PATH}`;
     const html = `
@@ -2057,7 +2113,7 @@ function showRecordingPopup(message) {
     // Close after 4 seconds
     setTimeout(() => {
       if (popupWindow) {
-        try { popupWindow.close(); } catch(e){}
+        try { popupWindow.close(); } catch (e) { }
         popupWindow = null;
       }
     }, 4000);
@@ -2081,7 +2137,7 @@ function closeManualBreakReminderWindow() {
     try {
       manualBreakReminderWindow.removeAllListeners('closed');
       manualBreakReminderWindow.destroy();
-    } catch (e) {}
+    } catch (e) { }
     manualBreakReminderWindow = null;
   }
   manualBreakReminderPayloadKey = null;
@@ -2210,7 +2266,7 @@ async function endBreakFromDesktopFlow() {
       breakStartedAt: FieldValue.delete(),
       isIdle: false,
       lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).catch(()=>{});
+    }, { merge: true }).catch(() => { });
 
     try {
       if (mainWindow && mainWindow.webContents) {
@@ -2335,7 +2391,7 @@ function applyAdminSettings(next) {
 
 // ---------- DESKTOP COMMANDS ----------
 function startCommandsWatch(uid) {
-  if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
+  if (commandUnsub) { try { commandUnsub(); } catch (e) { } commandUnsub = null; }
   if (!uid) return;
 
   const docRef = db.collection("desktopCommands").doc(uid);
@@ -2355,10 +2411,10 @@ function startCommandsWatch(uid) {
           log('[reconnect] ignoring stale reconnect request', { requestId, ageMs });
           await db.collection("desktopCommands").doc(uid).set({
             reconnectRequestId: FieldValue.delete()
-          }, { merge: true }).catch(()=>{});
+          }, { merge: true }).catch(() => { });
           return;
         }
-      } catch (_) {}
+      } catch (_) { }
 
       log('[reconnect] request received', requestId);
       try {
@@ -2376,7 +2432,7 @@ function startCommandsWatch(uid) {
           reconnectAckId: requestId,
           reconnectAckAt: FieldValue.serverTimestamp(),
           lastUpdate: FieldValue.serverTimestamp()
-        }, { merge: true }).catch(()=>{});
+        }, { merge: true }).catch(() => { });
       } catch (e) {
         log('[reconnect] failed', e?.message || e);
         await db.collection("agentStatus").doc(uid).set({
@@ -2384,31 +2440,31 @@ function startCommandsWatch(uid) {
           reconnectAckAt: FieldValue.serverTimestamp(),
           reconnectError: e?.message || String(e),
           lastUpdate: FieldValue.serverTimestamp()
-        }, { merge: true }).catch(()=>{});
+        }, { merge: true }).catch(() => { });
       } finally {
         await db.collection("desktopCommands").doc(uid).set({
           reconnectRequestId: FieldValue.delete()
-        }, { merge: true }).catch(()=>{});
+        }, { merge: true }).catch(() => { });
       }
     }
 
     if (cmd.startRecording) {
       log("command startRecording received");
       isRecordingActive = true;
-      if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
       showRecordingPopup("Recording started by admin");
       startBackgroundRecording();
-      await db.collection("desktopCommands").doc(uid).update({ startRecording: false }).catch(()=>{});
+      await db.collection("desktopCommands").doc(uid).update({ startRecording: false }).catch(() => { });
     }
 
     if (cmd.stopRecording) {
       log("command stopRecording received");
       isRecordingActive = false;
       resetAutoResumeRetry();
-      if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
       showRecordingPopup("Recording stopped by admin");
       stopBackgroundRecording();
-      await db.collection("desktopCommands").doc(uid).update({ stopRecording: false }).catch(()=>{});
+      await db.collection("desktopCommands").doc(uid).update({ stopRecording: false }).catch(() => { });
     }
 
     if (cmd.forceLogout) {
@@ -2422,10 +2478,10 @@ function startCommandsWatch(uid) {
         const ageMs = tsMs != null ? (Date.now() - tsMs) : Number.POSITIVE_INFINITY;
         if (!Number.isFinite(ageMs) || ageMs > FORCE_LOGOUT_TTL_MS) {
           log("[forceLogout] ignoring stale desktopCommands.forceLogout", { ageMs });
-          await db.collection("desktopCommands").doc(uid).set({ forceLogout: false }, { merge: true }).catch(()=>{});
+          await db.collection("desktopCommands").doc(uid).set({ forceLogout: false }, { merge: true }).catch(() => { });
           return;
         }
-      } catch (_) {}
+      } catch (_) { }
 
       // Session targeting: if this command is meant for a different desktop instance, ignore it.
       try {
@@ -2440,7 +2496,7 @@ function startCommandsWatch(uid) {
       }
 
       // Clear the command immediately while still authenticated; clockOutAndSignOutDesktop signs out.
-      await db.collection("desktopCommands").doc(uid).set({ forceLogout: false }, { merge: true }).catch(()=>{});
+      await db.collection("desktopCommands").doc(uid).set({ forceLogout: false }, { merge: true }).catch(() => { });
       await clockOutAndSignOutDesktop("force_logout", { notifyRenderer: true });
       return;
     }
@@ -2449,22 +2505,22 @@ function startCommandsWatch(uid) {
       log("force break cmd");
       await db.collection('agentStatus').doc(uid)
         .set({ status: "break", lastUpdate: FieldValue.serverTimestamp() }, { merge: true });
-      await db.collection("desktopCommands").doc(uid).update({ forceBreak: false }).catch(()=>{});
+      await db.collection("desktopCommands").doc(uid).update({ forceBreak: false }).catch(() => { });
     }
 
     if (cmd.bringOnline) {
       if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
-      await db.collection("desktopCommands").doc(uid).update({ bringOnline: false }).catch(()=>{});
+      await db.collection("desktopCommands").doc(uid).update({ bringOnline: false }).catch(() => { });
     }
 
     if (cmd.minimizeToTray) {
       if (mainWindow) mainWindow.hide();
-      await db.collection("desktopCommands").doc(uid).update({ minimizeToTray: false }).catch(()=>{});
+      await db.collection("desktopCommands").doc(uid).update({ minimizeToTray: false }).catch(() => { });
     }
 
     if (typeof cmd.setAutoLaunch !== "undefined") {
       app.setLoginItemSettings({ openAtLogin: !!cmd.setAutoLaunch });
-      await db.collection("desktopCommands").doc(uid).update({ setAutoLaunch: FieldValue.delete() }).catch(()=>{});
+      await db.collection("desktopCommands").doc(uid).update({ setAutoLaunch: FieldValue.delete() }).catch(() => { });
     }
   }, (error) => {
     console.error('[commandsWatch] listener error', error?.message || error);
@@ -2561,26 +2617,26 @@ function startAgentStatusLoop(uid) {
 
       closeManualBreakReminderWindow();
 
-  // --------------------------
-  // Idle detected (idleLimit>0)
-  // --------------------------
-  if (shouldForceIdle && !lastIdleState) {
-    lastIdleState = true;
-    log("User idle detected — setting status to break");
-    await pushIdleStatus(uid, { idleSecs, reason: idleReason });
-    return;
-  }
+      // --------------------------
+      // Idle detected (idleLimit>0)
+      // --------------------------
+      if (shouldForceIdle && !lastIdleState) {
+        lastIdleState = true;
+        log("User idle detected — setting status to break");
+        await pushIdleStatus(uid, { idleSecs, reason: idleReason });
+        return;
+      }
 
-  if (!shouldForceIdle && lastIdleState) {
-    lastIdleState = false;
-    log("Idle cleared — setting status to online");
-    await pushActiveStatus(uid, { idleSecs });
-    return;
-  }
+      if (!shouldForceIdle && lastIdleState) {
+        lastIdleState = false;
+        log("Idle cleared — setting status to online");
+        await pushActiveStatus(uid, { idleSecs });
+        return;
+      }
 
       // No transition -> do nothing (transitions-only)
 
-    } catch(e){ console.error("[statusLoop] error", e); }
+    } catch (e) { console.error("[statusLoop] error", e); }
   }, 3000);
 }
 
@@ -2630,7 +2686,7 @@ async function hydrateClockedInStateFromWorklogs(uid) {
         isRecordingActive = true;
         showRecordingPopup('Recording started');
         startBackgroundRecording();
-        await db.collection('agentStatus').doc(uid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+        await db.collection('agentStatus').doc(uid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
       }
     }
     return true;
@@ -2667,7 +2723,7 @@ function startAgentStatusWatch(uid) {
           clearManualBreakReminderTimer();
           closeManualBreakReminderWindow();
         }
-      } catch (_) {}
+      } catch (_) { }
 
       const remoteForceLogoutRequestId = data.forceLogoutRequestId || null;
       if (remoteForceLogoutRequestId) {
@@ -2682,10 +2738,10 @@ function startAgentStatusWatch(uid) {
               forceLogoutRequestId: FieldValue.delete(),
               forceLogoutRequestedAt: FieldValue.delete(),
               forceLogoutRequestedBy: FieldValue.delete()
-            }, { merge: true }).catch(() => {});
+            }, { merge: true }).catch(() => { });
             return;
           }
-        } catch (_) {}
+        } catch (_) { }
 
         // If the request was already completed, just clear the request fields so a user
         // can log back in without getting immediately kicked again.
@@ -2701,10 +2757,10 @@ function startAgentStatusWatch(uid) {
               forceLogoutRequestId: FieldValue.delete(),
               forceLogoutRequestedAt: FieldValue.delete(),
               forceLogoutRequestedBy: FieldValue.delete()
-            }, { merge: true }).catch(() => {});
+            }, { merge: true }).catch(() => { });
             return;
           }
-        } catch (_) {}
+        } catch (_) { }
 
         if (remoteForceLogoutRequestId !== lastForceLogoutRequestId) {
           lastForceLogoutRequestId = remoteForceLogoutRequestId;
@@ -2853,9 +2909,9 @@ async function performAutoClockOut() {
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
     resetAutoResumeRetry();
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(()=>{});
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false }, { merge: true }).catch(() => { });
     if (wasRecording) showRecordingPopup("Recording stopped (auto clock-out)");
-    
+
     // Always send stop command to renderer
     if (mainWindow) mainWindow.webContents.send("command-stop-recording", { uid: currentUid });
     stopBackgroundRecording();
@@ -2865,7 +2921,7 @@ async function performAutoClockOut() {
       status: 'offline',
       isIdle: false,
       lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true }).catch(()=>{});
+    }, { merge: true }).catch(() => { });
 
     // Keep the user profile in sync on desktop-driven auto clock-out.
     try {
@@ -2887,7 +2943,7 @@ async function performAutoClockOut() {
       if (mainWindow && mainWindow.webContents) {
         mainWindow.webContents.send("clear-desktop-uid");
       }
-    } catch(e) { console.warn("[performAutoClockOut] failed to send clear-desktop-uid", e); }
+    } catch (e) { console.warn("[performAutoClockOut] failed to send clear-desktop-uid", e); }
 
     // optionally: perform any upload logic if you want here (your current Dropbox uploads happen on save)
     // keep currentUid as-is but mark agentClockedIn false
@@ -2923,7 +2979,7 @@ ipcMain.handle("sync-admin-settings", async (_event, settings) => {
       if (currentUid) {
         await reconcileRecordingAfterRegister(currentUid);
       }
-    } catch (_) {}
+    } catch (_) { }
     return { success: true };
   } catch (error) {
     return { success: false, error: error?.message || String(error) };
@@ -2988,7 +3044,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
       // Handoff worklog might be created by a server trigger moments after login.
       setTimeout(() => {
         if (currentUid === uid) {
-          hydrateClockedInStateFromWorklogs(uid).catch(() => {});
+          hydrateClockedInStateFromWorklogs(uid).catch(() => { });
         }
       }, 3000);
     }
@@ -3016,7 +3072,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     setTimeout(() => {
       // best-effort: only retry after the app is fully up and admin settings likely synced.
-      retryPendingRecordingUploadsOnLogin().catch(() => {});
+      retryPendingRecordingUploadsOnLogin().catch(() => { });
     }, 10 * 1000);
 
     // Upload the latest locally persisted health event (if any) so crashes that couldn't
@@ -3054,14 +3110,14 @@ ipcMain.handle("register-uid", async (_, payload) => {
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
     log("Registered uid:", uid);
     return { success: true };
-  } catch(e){
+  } catch (e) {
     return { success: false, error: e.message };
   }
 });
 
 ipcMain.handle("unregister-uid", async () => {
   try {
-    if (commandUnsub) { try { commandUnsub(); } catch(e){} commandUnsub = null; }
+    if (commandUnsub) { try { commandUnsub(); } catch (e) { } commandUnsub = null; }
     stopAgentStatusLoop();
     stopAgentStatusWatch();
     stopAutoClockConfigWatch();
@@ -3069,7 +3125,7 @@ ipcMain.handle("unregister-uid", async () => {
     stopRtdbPresence();
     pendingAgentStatuses.length = 0;
     if (currentUid) {
-      await db.collection("agentStatus").doc(currentUid).set({ status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      await db.collection("agentStatus").doc(currentUid).set({ status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
     }
 
     // ensure renderer clears local desktop uid to prevent auto login
@@ -3077,7 +3133,7 @@ ipcMain.handle("unregister-uid", async () => {
       if (mainWindow && mainWindow.webContents) {
         mainWindow.webContents.send("clear-desktop-uid");
       }
-    } catch(e) { console.warn("[unregister-uid] failed to send clear-desktop-uid", e); }
+    } catch (e) { console.warn("[unregister-uid] failed to send clear-desktop-uid", e); }
 
     currentUid = null;
     agentClockedIn = false;
@@ -3089,7 +3145,7 @@ ipcMain.handle("unregister-uid", async () => {
     closeManualBreakReminderWindow();
     try { await clientAuth.signOut(); } catch (signOutErr) { console.warn("[unregister-uid] signOut failed", signOutErr?.message || signOutErr); }
     return { success: true };
-  } catch(e){
+  } catch (e) {
     return { success: false, error: e.message };
   }
 });
@@ -3135,8 +3191,8 @@ async function applyAgentStatus(status) {
     scheduleManualBreakReminderIfNeeded();
 
     const wasRecording = isRecordingActive;
-    isRecordingActive = false;
-    resetAutoResumeRetry();
+    // NOTE: We defer setting isRecordingActive = false until AFTER the flush completes.
+    // This allows the lock-screen handler to help if the user locks the screen during flush.
 
     await writeAgentStatusOrThrow({
       status: 'break',
@@ -3148,10 +3204,15 @@ async function applyAgentStatus(status) {
     }, "manual_break");
 
     if (wasRecording) showRecordingPopup('Recording paused (break)');
-    await stopBackgroundRecordingAndFlush();
+    await stopBackgroundRecordingAndFlush({ payload: { stopReason: 'manual_break' } });
+
+    // Set flag AFTER flush completes so lock-screen handler can help if needed during flush
+    isRecordingActive = false;
+    resetAutoResumeRetry();
+
     try {
       await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
-    } catch (_) {}
+    } catch (_) { }
 
     closeManualBreakReminderWindow();
     return { success: true };
@@ -3171,10 +3232,10 @@ async function applyAgentStatus(status) {
     resetAutoResumeRetry();
 
     if (wasRecording) showRecordingPopup('Recording stopped');
-    await stopBackgroundRecordingAndFlush();
+    await stopBackgroundRecordingAndFlush({ payload: { stopReason: 'clocked_out' } });
     try {
       await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
-    } catch (_) {}
+    } catch (_) { }
 
     await writeAgentStatusOrThrow({
       status: 'offline',
@@ -3242,7 +3303,7 @@ async function applyAgentStatus(status) {
     await stopBackgroundRecordingAndFlush();
     try {
       await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
-    } catch (_) {}
+    } catch (_) { }
 
     await writeAgentStatusOrThrow({
       status: 'break',
@@ -3283,7 +3344,7 @@ async function flushPendingAgentStatuses() {
 
 ipcMain.handle("set-agent-status", async (_, status) => {
   try {
-    log("set-agent-status received:", status); 
+    log("set-agent-status received:", status);
     if (!currentUid) {
       log('Desktop not registered yet. Queuing status:', status);
       pendingAgentStatuses.push(status);
@@ -3320,7 +3381,7 @@ ipcMain.handle("start-recording", async () => {
     // This path is retained for compatibility but now simply starts the background recorder
     isRecordingActive = true;
     if (currentUid) {
-      await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
     }
     showRecordingPopup("Recording started");
     startBackgroundRecording();
@@ -3372,7 +3433,7 @@ ipcMain.handle("stop-recording", async (_, meta = {}) => {
     isRecordingActive = false;
     autoResumeInFlight = false;
     if (currentUid) {
-      await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+      await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
     }
     const popupMessage = meta?.autoRetry ? "Recording interrupted. Retrying..." : "Recording stopped";
     showRecordingPopup(popupMessage);
@@ -3395,7 +3456,7 @@ ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
   isRecordingActive = false;
   resetAutoResumeRetry();
   if (currentUid) {
-    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(()=>{});
+    await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
   }
   scheduleAutoResumeRetry(payload?.error || "recorder-failed");
   return { success: true };
@@ -3406,8 +3467,23 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
   try {
     const ownerUid = currentUid || meta?.ownerUid || null;
     const ownerName = cachedDisplayName || meta?.ownerName || null;
-    const buffer = Buffer.from(arrayBuffer);
+    let buffer = Buffer.from(arrayBuffer);
     const filePath = path.join(RECORDINGS_DIR, fileName);
+
+    // Fix WebM duration metadata for proper playback
+    const recordingDurationMs = meta?.durationMs || null;
+    if (recordingDurationMs && recordingDurationMs > 0) {
+      try {
+        const blob = new Blob([buffer], { type: 'video/webm' });
+        const fixedBlob = await fixWebmDuration(blob, recordingDurationMs, { logger: false });
+        const fixedArrayBuffer = await fixedBlob.arrayBuffer();
+        buffer = Buffer.from(fixedArrayBuffer);
+        log("[recorder] Fixed WebM duration:", recordingDurationMs, "ms");
+      } catch (fixErr) {
+        log("[recorder] WebM duration fix failed (using original):", fixErr?.message || fixErr);
+      }
+    }
+
     await fs.promises.writeFile(filePath, buffer);
     log("Saved recording to:", filePath);
 
@@ -3415,11 +3491,11 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     try {
       const stat = fs.statSync(filePath);
       upsertManifestEntry(fileName, { size: stat.size, mtimeMs: stat.mtimeMs, ownerUid, ownerName });
-    } catch (_) {}
+    } catch (_) { }
 
     // If this file was already fully handled (e.g., delete failed previously), skip work.
     if (isRecordingCompleted(fileName)) {
-      try { await fs.promises.unlink(filePath); } catch (_) {}
+      try { await fs.promises.unlink(filePath); } catch (_) { }
       return { success: true, skipped: true, reason: 'already-completed' };
     }
 
@@ -3430,7 +3506,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     try {
       const stat = fs.statSync(filePath);
       isoDate = getIsoDateFromMs(stat.mtimeMs);
-    } catch (_) {}
+    } catch (_) { }
     const googleDriveFileName = `${safeName}-${isoDate}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
     const uploadResults = [];
 
@@ -3491,6 +3567,26 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
       ? enabledTargets.every((t) => isTargetUploaded(fileName, t))
       : uploadResults.some((entry) => entry.success);
 
+    // Log recording events for admin visibility
+    for (const result of uploadResults) {
+      const downloadUrl = result.meta?.webViewLink || result.meta?.webContentLink ||
+        (result.meta?.id ? `https://drive.google.com/file/d/${result.meta.id}/view` : null) ||
+        (result.path && result.target === 'dropbox' ? `dropbox:${result.path}` : null);
+
+      await logRecordingEvent({
+        userId: ownerUid || currentUid,
+        userName: ownerName || cachedDisplayName,
+        fileName,
+        status: result.success ? 'success' : 'failed',
+        uploadTarget: result.target,
+        fileSize: buffer?.length || null,
+        durationMs: meta?.durationMs || null,
+        stopReason: meta?.stopReason || null,
+        downloadUrl,
+        error: result.success ? null : (result.error || result.reason || 'upload-failed')
+      });
+    }
+
     if (allEnabledSucceeded) {
       markRecordingCompleted(fileName);
       try {
@@ -3501,7 +3597,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     }
 
     return { success: true, filePath, uploads: uploadResults };
-  } catch(e){
+  } catch (e) {
     console.error("[notify-recording-saved] error", e);
     return { success: false, error: e.message };
   } finally {
@@ -3548,7 +3644,7 @@ ipcMain.handle("upload-dropbox", async (_, filePath, dropboxPathOverride) => {
     const fileName = path.basename(filePath || "recording.webm");
     const dropboxPath = dropboxPathOverride || `/manual-uploads/${fileName}`;
     return await uploadToDropboxWithPath(filePath, dropboxPath);
-  } catch(e){
+  } catch (e) {
     return { success: false, error: e.message };
   }
 });
@@ -3635,7 +3731,7 @@ async function refreshDropboxToken() {
     if (currentUid) {
       await db.collection('agentStatus').doc(currentUid)
         .set({ lastTokenRefresh: FieldValue.serverTimestamp() }, { merge: true })
-        .catch(()=>{});
+        .catch(() => { });
     }
 
     return cachedDropboxAccessToken;
@@ -3790,7 +3886,7 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
 
       try {
         log("[dropbox] upload ok", { path: body?.path_display || dropboxPath, id: body?.id || null });
-      } catch (_) {}
+      } catch (_) { }
       return { success: true, meta: body };
     }
 
@@ -3828,7 +3924,7 @@ async function uploadToDropboxWithPath(filePath, dropboxPath) {
 
     try {
       log("[dropbox] chunked upload ok", { path: finishJson?.path_display || dropboxPath, id: finishJson?.id || null });
-    } catch (_) {}
+    } catch (_) { }
     return { success: true, meta: finishJson };
   } catch (e) {
     return { success: false, error: e.message };
@@ -3927,21 +4023,25 @@ app.whenReady().then(() => {
   });
 
   const handleSystemRecordingFlush = async (reason) => {
-    if (!isRecordingActive) return;
+    // Also help if there's a flush in progress (e.g., manual break started but screen locked before flush finished)
+    if (!isRecordingActive && !recorderFlushWait) return;
     log(`[system] ${reason} detected; stopping recorder for flush`);
     try {
-      await stopBackgroundRecordingAndFlush({ timeoutMs: 3000 });
-    } catch (_) {}
+      await stopBackgroundRecordingAndFlush({
+        timeoutMs: 3000,
+        payload: { suppressAutoResume: true, stopReason: reason }
+      });
+    } catch (_) { }
     try {
       await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
-    } catch (_) {}
+    } catch (_) { }
   };
 
   try {
     powerMonitor.on('lock-screen', () => { handleSystemRecordingFlush('lock-screen'); });
     powerMonitor.on('suspend', () => { handleSystemRecordingFlush('suspend'); });
     powerMonitor.on('shutdown', () => { handleSystemRecordingFlush('shutdown'); });
-  } catch (_) {}
+  } catch (_) { }
 
   startRecordingSegmentLoop();
   startUploadRetryLoop();
@@ -3955,7 +4055,7 @@ app.on("before-quit", async () => {
     if (currentUid) {
       await setRtdbPresenceOfflineIfSessionMatches(currentUid);
     }
-  } catch (_) {}
+  } catch (_) { }
   try {
     await stopBackgroundRecordingAndFlush();
   } catch (err) {

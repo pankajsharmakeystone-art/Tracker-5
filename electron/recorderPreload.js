@@ -51,8 +51,9 @@ async function startRecorderForSource(source, resolution, fps) {
   const mediaRecorder = new MediaRecorder(stream, options);
   let finalizeResolve;
   const finalizePromise = new Promise((resolve) => { finalizeResolve = resolve; });
+  const startTime = Date.now();
 
-  sessions.set(id, { mediaRecorder, recordedChunks, stream, sourceName: name, finalizePromise });
+  sessions.set(id, { mediaRecorder, recordedChunks, stream, sourceName: name, finalizePromise, startTime });
 
   mediaRecorder.ondataavailable = (event) => {
     if (event.data && event.data.size > 0) recordedChunks.push(event.data);
@@ -71,7 +72,8 @@ async function startRecorderForSource(source, resolution, fps) {
       const safeName = sanitizeName(session.sourceName || 'screen');
       const fileName = `recording-${safeName}-${Date.now()}.webm`;
       const isLastSession = sessions.size === 1;
-      const saveMeta = { isLastSession, ...(nextSaveMeta || {}) };
+      const durationMs = session.startTime ? (Date.now() - session.startTime) : null;
+      const saveMeta = { isLastSession, durationMs, ...(nextSaveMeta || {}) };
       ipcRenderer.invoke('recorder-save', fileName, arrayBuffer, saveMeta)
         .catch((err) => console.error('[recorder] failed to send recording', err));
     } catch (err) {
@@ -79,7 +81,7 @@ async function startRecorderForSource(source, resolution, fps) {
     } finally {
       try {
         session?.stream?.getTracks()?.forEach((t) => t.stop());
-      } catch (e) {}
+      } catch (e) { }
       sessions.delete(id);
       finalizeResolve?.();
     }
@@ -137,7 +139,7 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
   } catch (error) {
     console.error('[recorder] failed to start', error);
     await stopAllRecorders();
-    ipcRenderer.invoke('recorder-failed', { error: error?.message || String(error) }).catch(() => {});
+    ipcRenderer.invoke('recorder-failed', { error: error?.message || String(error) }).catch(() => { });
   }
 });
 

@@ -43,11 +43,18 @@ const deriveBreakDurations = (log: WorkLog, nowMs: number, getMillis: (ts: any) 
     let idleSeconds = 0;
     let accounted = false;
 
+    // When session is clocked out, don't add any live elapsed time
+    const isClockedOut = log.status === 'clocked_out';
+    // Use lastEventTimestamp as the cutoff for clocked out sessions
+    const lastEventMs = log.lastEventTimestamp ? getMillis(log.lastEventTimestamp) : nowMs;
+    const cutoffMs = isClockedOut ? lastEventMs : nowMs;
+
     breaks.forEach((entry: any) => {
         const startMs = entry?.startTime ? getMillis(entry.startTime) : null;
         if (startMs == null) return;
         const endMs = entry?.endTime ? getMillis(entry.endTime) : null;
-        const effectiveEnd = endMs ?? nowMs;
+        // For open breaks, use cutoff (lastEvent for clocked out, now for active)
+        const effectiveEnd = endMs ?? cutoffMs;
         if (effectiveEnd <= startMs) return;
         accounted = true;
         const duration = (effectiveEnd - startMs) / 1000;
@@ -58,9 +65,9 @@ const deriveBreakDurations = (log: WorkLog, nowMs: number, getMillis: (ts: any) 
     if (!accounted) {
         manualSeconds = typeof log.totalBreakSeconds === 'number' ? log.totalBreakSeconds : 0;
         const isOnBreak = log.status === 'on_break' || (log.status as any) === 'break';
-        const lastEvent = log.lastEventTimestamp ? getMillis(log.lastEventTimestamp) : null;
-        if (isOnBreak && lastEvent && nowMs > lastEvent) {
-            manualSeconds += (nowMs - lastEvent) / 1000;
+        // Only add live elapsed if actively on break (not clocked out)
+        if (isOnBreak && !isClockedOut && lastEventMs && nowMs > lastEventMs) {
+            manualSeconds += (nowMs - lastEventMs) / 1000;
         }
     }
 
@@ -113,6 +120,7 @@ const AgentPanel: React.FC = () => {
     const workLogRef = useRef<WorkLog | null>(null);
     const manualBreakRef = useRef(false);
     const idleBreakActiveRef = useRef(false);
+    const isIdleRef = useRef(false); // Track remote isIdle state for timer calculation
     const lastDesktopSyncRef = useRef<'working' | 'clocked_out' | 'manual_break' | null>(null);
 
     const reportDesktopError = useCallback((payload: any) => {
@@ -171,13 +179,13 @@ const AgentPanel: React.FC = () => {
                 const ids = userData.teamIds || (userData.teamId ? [userData.teamId] : []);
                 if (ids.length > 0) {
                     try {
-                         const promises = ids.map((id: string) => getTeamById(id));
-                         const results = await Promise.all(promises);
-                         const validTeams = results.filter((t: Team | null) => t !== null) as Team[];
-                         setAvailableTeams(validTeams);
-                         if (validTeams.length > 0 && !activeTeamId) {
-                             setActiveTeamId(validTeams[0].id);
-                         }
+                        const promises = ids.map((id: string) => getTeamById(id));
+                        const results = await Promise.all(promises);
+                        const validTeams = results.filter((t: Team | null) => t !== null) as Team[];
+                        setAvailableTeams(validTeams);
+                        if (validTeams.length > 0 && !activeTeamId) {
+                            setActiveTeamId(validTeams[0].id);
+                        }
                     } catch (e) { console.error(e); }
                 }
             }
@@ -219,7 +227,13 @@ const AgentPanel: React.FC = () => {
         const updateDisplays = () => {
             const now = Date.now();
             const lastEventTime = workLog.lastEventTimestamp ? getMillis(workLog.lastEventTimestamp) : null;
-            if (lastEventTime && workLog.status === 'working') {
+            // Only count work time when status is 'working' AND not idle/on manual break
+            // This ensures mutual exclusivity between work/idle/break counters
+            const shouldCountWork = lastEventTime
+                && workLog.status === 'working'
+                && !isIdleRef.current
+                && !manualBreakRef.current;
+            if (shouldCountWork) {
                 const elapsed = Math.max(0, (now - lastEventTime) / 1000);
                 setDisplayWorkSeconds(workLog.totalWorkSeconds + elapsed);
             } else {
@@ -248,8 +262,9 @@ const AgentPanel: React.FC = () => {
             if (snap.exists()) {
                 const data = snap.data();
                 manualBreakRef.current = !!data.manualBreak;
+                isIdleRef.current = !!data.isIdle; // Update idle ref for timer calculation
                 if (data.manualBreak) idleBreakActiveRef.current = false;
-                
+
                 // Track break start
                 // Handle Idle Changes Logic (Sync with Firestore)
                 const currentLog = workLogRef.current;
@@ -300,9 +315,9 @@ const AgentPanel: React.FC = () => {
                         const bDur = getDuration(currentLog.lastEventTimestamp);
                         const newBreaks = [...(currentLog.breaks || [])];
                         const resumeTs = Timestamp.now();
-                            if (newBreaks.length > 0) {
-                                newBreaks[newBreaks.length - 1].endTime = resumeTs;
-                            }
+                        if (newBreaks.length > 0) {
+                            newBreaks[newBreaks.length - 1].endTime = resumeTs;
+                        }
                         const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, resumeTs, {
                             type: 'working',
                             startTime: resumeTs,
@@ -444,7 +459,7 @@ const AgentPanel: React.FC = () => {
             <div className="flex justify-between items-center mb-4">
                 <h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-200">Agent Dashboard</h2>
                 {availableTeams.length > 1 && (
-                     <select value={activeTeamId || ''} onChange={(e) => setActiveTeamId(e.target.value)} className="bg-gray-50 border text-sm rounded-lg p-1.5 dark:bg-gray-700 dark:text-white">
+                    <select value={activeTeamId || ''} onChange={(e) => setActiveTeamId(e.target.value)} className="bg-gray-50 border text-sm rounded-lg p-1.5 dark:bg-gray-700 dark:text-white">
                         {availableTeams.map(team => <option key={team.id} value={team.id}>{team.name}</option>)}
                     </select>
                 )}

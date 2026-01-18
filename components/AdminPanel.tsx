@@ -10,6 +10,7 @@ import TeamStatusView from './TeamStatusView';
 import SchedulingPanel from './SchedulingPanel';
 import ReportsPanel from './ReportsPanel';
 import AdminSettings from './AdminSettings';
+import RecordingLogsPanel from './RecordingLogsPanel';
 
 const AdminPanel: React.FC = () => {
     const { user } = useAuth();
@@ -30,7 +31,7 @@ const AdminPanel: React.FC = () => {
             unsubscribe = streamTeamsForAdmin(user.uid, (adminTeams) => {
                 setTeams(adminTeams);
                 setLoading(false);
-                
+
                 // Set defaults if not already set
                 if (adminTeams.length > 0) {
                     if (!selectedTeamIdForSchedule) setSelectedTeamIdForSchedule(adminTeams[0].id);
@@ -58,7 +59,7 @@ const AdminPanel: React.FC = () => {
             setError('Failed to create team.');
         }
     };
-    
+
     const handleCopyToClipboard = (teamId: string) => {
         const inviteLink = `${window.location.origin}${window.location.pathname}#/invite/${teamId}`;
         navigator.clipboard.writeText(inviteLink).then(() => {
@@ -81,7 +82,7 @@ const AdminPanel: React.FC = () => {
     return (
         <div>
             <h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-200 mb-4">Admin Controls</h2>
-            
+
             <TeamStatusView canControlRecording={true} />
 
             <div className="mb-6 border-b border-gray-200 dark:border-gray-700">
@@ -90,6 +91,7 @@ const AdminPanel: React.FC = () => {
                     <TabButton tabName="teams" title="Team Management" />
                     <TabButton tabName="scheduling" title="Scheduling" />
                     <TabButton tabName="reports" title="Reports" />
+                    <TabButton tabName="recordingLogs" title="Recording Logs" />
                     <TabButton tabName="appSettings" title="Application Settings" />
                     <TabButton tabName="monitoring" title="Detailed Monitoring" />
                 </nav>
@@ -99,11 +101,11 @@ const AdminPanel: React.FC = () => {
 
             <div id="tab-content">
                 {activeTab === 'monitoring' && <LiveMonitoringDashboard />}
-                
+
                 {activeTab === 'users' && <UserManagementTable />}
-                
+
                 {activeTab === 'teams' && (
-                     <div>
+                    <div>
                         <div className="mb-8 p-4 bg-gray-100 dark:bg-gray-800/50 rounded-lg border dark:border-gray-700">
                             <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">Create a New Team</h3>
                             <form onSubmit={handleCreateTeam} className="flex flex-col sm:flex-row gap-2">
@@ -142,7 +144,7 @@ const AdminPanel: React.FC = () => {
                 )}
 
                 {activeTab === 'scheduling' && (
-                     <div>
+                    <div>
                         {teams.length > 0 ? (
                             <>
                                 <div className="mb-4 max-w-sm">
@@ -161,13 +163,13 @@ const AdminPanel: React.FC = () => {
                                 {selectedTeamIdForSchedule && <SchedulingPanel teamId={selectedTeamIdForSchedule} />}
                             </>
                         ) : (
-                             <p className="text-gray-500 dark:text-gray-400">Please create a team first to manage schedules.</p>
+                            <p className="text-gray-500 dark:text-gray-400">Please create a team first to manage schedules.</p>
                         )}
                     </div>
                 )}
 
-                 {activeTab === 'reports' && (
-                     <div>
+                {activeTab === 'reports' && (
+                    <div>
                         {teams.length > 0 ? (
                             <>
                                 <div className="mb-4 max-w-sm">
@@ -186,12 +188,14 @@ const AdminPanel: React.FC = () => {
                                 {selectedTeamIdForReports && <ReportsPanel teamId={selectedTeamIdForReports} />}
                             </>
                         ) : (
-                             <p className="text-gray-500 dark:text-gray-400">Please create a team first to generate reports.</p>
+                            <p className="text-gray-500 dark:text-gray-400">Please create a team first to generate reports.</p>
                         )}
                     </div>
                 )}
 
                 {activeTab === 'appSettings' && <AdminSettings />}
+
+                {activeTab === 'recordingLogs' && <RecordingLogsPanel />}
 
             </div>
         </div>

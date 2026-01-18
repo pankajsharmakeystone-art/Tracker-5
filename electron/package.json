@@ -1,6 +1,6 @@
 {
   "name": "electron-app",
-  "version": "0.5.61",
+  "version": "0.5.62",
   "description": "",
   "main": "main.js",
   "scripts": {
@@ -14,9 +14,10 @@
   "dependencies": {
     "electron-updater": "^6.6.2",
     "firebase-admin": "^13.6.0",
+    "fix-webm-duration": "^1.0.6",
     "googleapis": "^166.0.0",
-    "node-fetch": "^2.7.0",
-    "luxon": "^3.5.0"
+    "luxon": "^3.5.0",
+    "node-fetch": "^2.7.0"
   },
   "devDependencies": {
     "electron": "^30.0.9"
