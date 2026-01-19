@@ -4141,6 +4141,7 @@ app.whenReady().then(() => {
         timeoutMs: 3000,
         payload: { suppressAutoResume: true, stopReason: reason }
       });
+      isRecordingActive = false; // Ensure flag is reset so it can resume on unlock
     } catch (_) { }
     try {
       await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
