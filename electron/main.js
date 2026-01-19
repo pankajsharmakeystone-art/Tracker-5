@@ -480,6 +480,22 @@ function getIsoDateFromMs(ms) {
   }
 }
 
+function getIsoTimeFromMs(ms) {
+  try {
+    const d = new Date(ms);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${hh}-${mm}-${ss}`;
+  } catch (_) {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    return `${hh}-${mm}-${ss}`;
+  }
+}
+
 async function retryPendingRecordingUploadsOnLogin(options = {}) {
   // Only retry when we're registered and authenticated.
   if (!currentUid) return;
@@ -553,10 +569,11 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
       const safeNameSource = ownerName || ownerUid || cachedDisplayName || currentUid || 'unknown';
       const safeName = String(safeNameSource).replace(/[\/:*?"<>|]/g, '-');
       const isoDate = getIsoDateFromMs(stat.mtimeMs);
-      const googleDriveFileName = `${safeName}-${isoDate}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
+      const isoTime = getIsoTimeFromMs(stat.mtimeMs);
+      const googleDriveFileName = `${safeName}-${isoDate}-${isoTime}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
 
       if (enabledTargets.includes('dropbox') && !isTargetUploaded(fileName, 'dropbox')) {
-        const dropboxPath = `/recordings/${safeName}/${isoDate}/${fileName}`;
+        const dropboxPath = `/recordings/${safeName}/${isoDate}/${isoTime}-${fileName}`;
         log("[uploads] retrying Dropbox upload:", dropboxPath);
         const dropboxResult = await uploadToDropboxWithPath(filePath, dropboxPath);
         setTargetUploadResult(fileName, 'dropbox', { success: !!dropboxResult?.success, error: dropboxResult?.error || dropboxResult?.reason || null });
@@ -575,7 +592,7 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
       }
 
       if (enabledTargets.includes('http') && !isTargetUploaded(fileName, 'http')) {
-        const httpResult = await uploadToHttpTarget({ filePath, fileName, safeName, isoDate });
+        const httpResult = await uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTime });
         setTargetUploadResult(fileName, 'http', { success: !!httpResult?.success, error: httpResult?.error || httpResult?.reason || null });
       }
 
@@ -1642,7 +1659,7 @@ function shouldUploadToHttp() {
   return Boolean(getHttpUploadConfig()?.url);
 }
 
-async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate }) {
+async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTime }) {
   const config = getHttpUploadConfig();
   if (!config?.url) return { success: false, reason: 'http-not-configured' };
 
@@ -1650,7 +1667,8 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate }) {
     'Content-Type': 'application/octet-stream',
     'x-file-name': fileName,
     'x-agent-name': safeName,
-    'x-iso-date': isoDate
+    'x-iso-date': isoDate,
+    'x-iso-time': isoTime
   };
 
   if (config.token) {
@@ -3508,11 +3526,13 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     const safeName = String(safeNameSource).replace(/[\/:*?"<>|]/g, '-');
     // Use file mtime for stable paths across retries.
     let isoDate = getIsoDateFromMs(Date.now());
+    let isoTime = getIsoTimeFromMs(Date.now());
     try {
       const stat = fs.statSync(filePath);
       isoDate = getIsoDateFromMs(stat.mtimeMs);
+      isoTime = getIsoTimeFromMs(stat.mtimeMs);
     } catch (_) { }
-    const googleDriveFileName = `${safeName}-${isoDate}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
+    const googleDriveFileName = `${safeName}-${isoDate}-${isoTime}-${fileName}`.replace(/[\/:*?"<>|]/g, '-');
     const uploadResults = [];
 
     const enabledTargets = [];
@@ -3521,7 +3541,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     if (shouldUploadToHttp()) enabledTargets.push('http');
 
     if (enabledTargets.includes('dropbox') && !isTargetUploaded(fileName, 'dropbox')) {
-      const dropboxPath = `/recordings/${safeName}/${isoDate}/${fileName}`;
+      const dropboxPath = `/recordings/${safeName}/${isoDate}/${isoTime}-${fileName}`;
       log("uploading to Dropbox:", dropboxPath);
       const dropboxResult = await uploadToDropboxWithPath(filePath, dropboxPath);
       uploadResults.push({ target: 'dropbox', path: dropboxPath, ...dropboxResult });
@@ -3542,7 +3562,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     }
 
     if (enabledTargets.includes('http') && !isTargetUploaded(fileName, 'http')) {
-      const httpResult = await uploadToHttpTarget({ filePath, fileName, safeName, isoDate });
+      const httpResult = await uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTime });
       uploadResults.push({ target: 'http', ...httpResult });
       setTargetUploadResult(fileName, 'http', { success: !!httpResult?.success, error: httpResult?.error || httpResult?.reason || null });
     }
