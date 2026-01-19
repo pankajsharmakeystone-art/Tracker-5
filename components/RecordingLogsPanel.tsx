@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { streamRecordingLogs, clearRecordingLogs, type RecordingLogEntry } from '../services/db';
+import { streamRecordingLogs, clearRecordingLogs, requestRecordingRetry, type RecordingLogEntry } from '../services/db';
 
 interface RecordingLogsPanelProps {
     teamId?: string;
@@ -11,6 +11,8 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
     const [statusFilter, setStatusFilter] = useState<string>('all');
     const [userFilter, setUserFilter] = useState<string>('all');
     const [clearing, setClearing] = useState(false);
+    const [retryingLogId, setRetryingLogId] = useState<string | null>(null);
+    const [retryError, setRetryError] = useState<string | null>(null);
 
     // Date range filter - default to last 7 days
     const getDefaultStartDate = () => {
@@ -332,6 +334,51 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
                                                 </a>
                                             ) : log.status === 'pending' ? (
                                                 <span className="text-xs text-yellow-600 dark:text-yellow-400">Awaiting owner login</span>
+                                            ) : log.status === 'failed' ? (
+                                                <button
+                                                    onClick={async () => {
+                                                        if (!log.fileName || !log.machineName || !log.userId) {
+                                                            setRetryError('Missing required info for retry');
+                                                            return;
+                                                        }
+                                                        setRetryingLogId(log.id);
+                                                        setRetryError(null);
+                                                        try {
+                                                            const result = await requestRecordingRetry(log.id, log.fileName, log.machineName, log.userId);
+                                                            if (!result.success) {
+                                                                if (result.error === 'file-not-found') {
+                                                                    setRetryError('Recording file not available on agent machine');
+                                                                } else {
+                                                                    setRetryError(result.error || 'Retry failed');
+                                                                }
+                                                            }
+                                                        } catch (e) {
+                                                            setRetryError((e as Error).message);
+                                                        } finally {
+                                                            setRetryingLogId(null);
+                                                        }
+                                                    }}
+                                                    disabled={retryingLogId === log.id}
+                                                    className="inline-flex items-center px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700 focus:ring-2 focus:ring-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    title={retryError && retryingLogId === null ? retryError : 'Retry upload'}
+                                                >
+                                                    {retryingLogId === log.id ? (
+                                                        <>
+                                                            <svg className="w-3 h-3 mr-1 animate-spin" fill="none" viewBox="0 0 24 24">
+                                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                            </svg>
+                                                            Retrying...
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                                            </svg>
+                                                            Retry
+                                                        </>
+                                                    )}
+                                                </button>
                                             ) : (
                                                 <span className="text-gray-400 text-sm">-</span>
                                             )}

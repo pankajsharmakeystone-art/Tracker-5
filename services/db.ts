@@ -1122,3 +1122,69 @@ export const clearRecordingLogs = async (options: { status?: string; teamId?: st
 
     return deletedCount;
 };
+
+/**
+ * Request a retry for a specific recording upload
+ * Writes a retry command to Firestore that the desktop app will pick up
+ * @param logId - The ID of the recording log entry to retry
+ * @param fileName - The name of the recording file
+ * @param machineName - The machine name where the file is stored
+ * @param userId - The user ID who owns the recording
+ */
+export const requestRecordingRetry = async (
+    logId: string,
+    fileName: string,
+    machineName: string,
+    userId: string
+): Promise<{ success: boolean; error?: string }> => {
+    try {
+        if (!logId || !fileName || !machineName || !userId) {
+            return { success: false, error: 'Missing required parameters' };
+        }
+
+        // Write the retry command to recordinLogRetryCommands collection
+        const commandRef = doc(db, 'recordingRetryCommands', logId);
+        await setDoc(commandRef, {
+            logId,
+            fileName,
+            machineName,
+            userId,
+            status: 'pending',
+            requestedAt: serverTimestamp(),
+            processedAt: null,
+            result: null,
+            error: null
+        });
+
+        return { success: true };
+    } catch (error) {
+        console.error('[requestRecordingRetry] error:', error);
+        return { success: false, error: (error as Error).message };
+    }
+};
+
+/**
+ * Get the status of a retry command
+ */
+export const getRetryCommandStatus = async (logId: string): Promise<{
+    status: 'pending' | 'processing' | 'completed' | 'failed' | 'not_found';
+    error?: string;
+    result?: any;
+}> => {
+    try {
+        const commandRef = doc(db, 'recordingRetryCommands', logId);
+        const snap = await getDoc(commandRef);
+        if (!snap.exists()) {
+            return { status: 'not_found' };
+        }
+        const data = snap.data();
+        return {
+            status: data.status || 'pending',
+            error: data.error || undefined,
+            result: data.result || undefined
+        };
+    } catch (error) {
+        console.error('[getRetryCommandStatus] error:', error);
+        return { status: 'not_found', error: (error as Error).message };
+    }
+};

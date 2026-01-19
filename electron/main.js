@@ -311,6 +311,127 @@ async function logRecordingEvent(eventData = {}) {
   }
 }
 
+// Update an existing recording log entry (used for retry status updates)
+async function updateRecordingLog(logId, updates = {}) {
+  try {
+    if (!logId) return false;
+    const authed = await ensureDesktopAuth();
+    if (!authed) return false;
+
+    await db.collection('recordingLogs').doc(logId).update({
+      ...updates,
+      lastUpdatedAt: FieldValue.serverTimestamp()
+    });
+    log('[recordingLogs] updated log:', logId, updates.status || '');
+    return true;
+  } catch (err) {
+    log('[recordingLogs] failed to update log:', err?.message || err);
+    return false;
+  }
+}
+
+// Retry uploading a specific recording file by fileName
+// Returns { success, error } - error 'file-not-found' if file was deleted
+async function retrySpecificRecordingUpload(fileName, logId = null) {
+  if (!fileName) return { success: false, error: 'missing-filename' };
+
+  const filePath = path.join(RECORDINGS_DIR, fileName);
+
+  // Check if file exists
+  if (!fs.existsSync(filePath)) {
+    log('[retry] File not found:', filePath);
+    if (logId) {
+      await updateRecordingLog(logId, {
+        status: 'failed',
+        error: 'file-not-found',
+        retryAttemptedAt: FieldValue.serverTimestamp()
+      });
+    }
+    return { success: false, error: 'file-not-found' };
+  }
+
+  try {
+    const stat = fs.statSync(filePath);
+    const safeName = String(cachedDisplayName || currentUid || 'unknown').replace(/[\\/:*?"<>|]/g, '-');
+    const isoDate = getIsoDateFromMs(stat.mtimeMs);
+    const isoTime = getIsoTimeFromMs(stat.mtimeMs);
+    const googleDriveFileName = `${safeName}-${isoDate}-${isoTime}-${fileName}`.replace(/[\\/:*?"<>|]/g, '-');
+
+    const enabledTargets = [];
+    if (shouldUploadToDropbox()) enabledTargets.push('dropbox');
+    if (shouldUploadToGoogleSheets()) enabledTargets.push('googleSheets');
+    if (shouldUploadToHttp()) enabledTargets.push('http');
+
+    if (enabledTargets.length === 0) {
+      return { success: false, error: 'no-upload-targets-enabled' };
+    }
+
+    const uploadResults = [];
+
+    if (enabledTargets.includes('dropbox')) {
+      const dropboxPath = `/recordings/${safeName}/${isoDate}/${isoTime}-${fileName}`;
+      log("[retry] uploading to Dropbox:", dropboxPath);
+      const dropboxResult = await uploadToDropboxWithPath(filePath, dropboxPath);
+      uploadResults.push({ target: 'dropbox', path: dropboxPath, ...dropboxResult });
+    }
+
+    if (enabledTargets.includes('googleSheets')) {
+      log("[retry] uploading to Google Drive/Sheets:", filePath);
+      const googleResult = await uploadRecordingToGoogleTargets({
+        filePath,
+        fileName,
+        safeName,
+        isoDate,
+        googleFileName: googleDriveFileName
+      });
+      uploadResults.push({ target: 'googleSheets', ...googleResult });
+    }
+
+    if (enabledTargets.includes('http')) {
+      const httpResult = await uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTime });
+      uploadResults.push({ target: 'http', ...httpResult });
+    }
+
+    const allSucceeded = uploadResults.every(r => r.success);
+    const anySucceeded = uploadResults.some(r => r.success);
+
+    // Update the log entry with retry result
+    if (logId) {
+      const newStatus = allSucceeded ? 'success' : 'failed';
+      const downloadUrl = uploadResults.find(r => r.success && r.meta?.webViewLink)?.meta?.webViewLink || null;
+      await updateRecordingLog(logId, {
+        status: newStatus,
+        error: allSucceeded ? null : (uploadResults.find(r => !r.success)?.error || 'partial-failure'),
+        downloadUrl,
+        retryAttemptedAt: FieldValue.serverTimestamp(),
+        retriedAt: allSucceeded ? FieldValue.serverTimestamp() : null
+      });
+    }
+
+    // Delete file if all uploads succeeded
+    if (allSucceeded) {
+      markRecordingCompleted(fileName);
+      try { await fs.promises.unlink(filePath); } catch (_) { }
+    }
+
+    return {
+      success: allSucceeded,
+      partial: anySucceeded && !allSucceeded,
+      results: uploadResults
+    };
+  } catch (err) {
+    log('[retry] upload failed:', err?.message || err);
+    if (logId) {
+      await updateRecordingLog(logId, {
+        status: 'failed',
+        error: err?.message || 'retry-failed',
+        retryAttemptedAt: FieldValue.serverTimestamp()
+      });
+    }
+    return { success: false, error: err?.message || 'retry-failed' };
+  }
+}
+
 // Path to the uploaded icon you asked to use for the popup
 const POPUP_ICON_PATH = "/mnt/data/a35a616b-074d-4238-a09e-5dcb70efb649.png";
 const ADMIN_SETTINGS_CACHE_PATH = path.join(app.getPath("userData"), "admin-settings.json");
@@ -661,6 +782,64 @@ function startUploadRetryLoop() {
       await retryPendingRecordingUploadsOnLogin();
     } catch (_) { }
   }, intervalMs);
+}
+
+// Listener for retry commands from admin panel
+let recordingRetryCommandsUnsub = null;
+function startRecordingRetryCommandsListener() {
+  if (recordingRetryCommandsUnsub) return;
+  if (!currentUid) return;
+
+  const machineName = os.hostname();
+  log('[retryCommands] Starting listener for machine:', machineName);
+
+  recordingRetryCommandsUnsub = db.collection('recordingRetryCommands')
+    .where('machineName', '==', machineName)
+    .where('status', '==', 'pending')
+    .onSnapshot(async (snapshot) => {
+      if (snapshot.empty) return;
+
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data();
+        const commandId = docSnap.id;
+        const { fileName, logId } = data;
+
+        if (!fileName) continue;
+
+        log('[retryCommands] Processing retry command:', commandId, fileName);
+
+        // Mark as processing
+        try {
+          await docSnap.ref.update({ status: 'processing', processedAt: FieldValue.serverTimestamp() });
+        } catch (_) { }
+
+        // Attempt the retry
+        const result = await retrySpecificRecordingUpload(fileName, logId || commandId);
+
+        // Update command status
+        try {
+          await docSnap.ref.update({
+            status: result.success ? 'completed' : 'failed',
+            result: result.success ? { message: 'Upload successful' } : null,
+            error: result.error || null,
+            completedAt: FieldValue.serverTimestamp()
+          });
+        } catch (err) {
+          log('[retryCommands] Failed to update command status:', err?.message || err);
+        }
+
+        log('[retryCommands] Retry result:', commandId, result.success ? 'success' : result.error);
+      }
+    }, (error) => {
+      log('[retryCommands] Listener error:', error?.message || error);
+    });
+}
+
+function stopRecordingRetryCommandsListener() {
+  if (recordingRetryCommandsUnsub) {
+    try { recordingRetryCommandsUnsub(); } catch (_) { }
+    recordingRetryCommandsUnsub = null;
+  }
 }
 let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
@@ -3472,17 +3651,37 @@ ipcMain.handle("live-stream-get-sources", async () => {
 });
 
 // Background recorder helper: expose sources to recorder window (avoids missing desktopCapturer in preload)
+// Includes retry logic to handle timing issues after wake from sleep or rapid lock/unlock
 ipcMain.handle('recorder-get-sources', async () => {
-  try {
-    const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
-    return {
-      success: true,
-      sources: sources.map((s) => ({ id: s.id, name: s.name }))
-    };
-  } catch (error) {
-    console.error('[recorder] get-sources failed', error?.message || error);
-    return { success: false, error: error?.message || String(error) };
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 500;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+      if (sources && sources.length > 0) {
+        return {
+          success: true,
+          sources: sources.map((s) => ({ id: s.id, name: s.name }))
+        };
+      }
+      // Empty sources array - retry after delay
+      if (attempt < MAX_RETRIES) {
+        log(`[recorder] get-sources returned empty (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY_MS}ms...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      }
+    } catch (error) {
+      console.error(`[recorder] get-sources failed (attempt ${attempt}/${MAX_RETRIES})`, error?.message || error);
+      if (attempt < MAX_RETRIES) {
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      } else {
+        return { success: false, error: error?.message || String(error) };
+      }
+    }
   }
+  // All retries exhausted with empty sources
+  log('[recorder] get-sources failed: no sources found after all retries');
+  return { success: false, error: 'no-sources-found' };
 });
 
 ipcMain.handle("stop-recording", async (_, meta = {}) => {
@@ -4220,6 +4419,7 @@ app.whenReady().then(() => {
 
   startRecordingSegmentLoop();
   startUploadRetryLoop();
+  startRecordingRetryCommandsListener();
 
   scheduleAutoUpdateCheck();
 });
