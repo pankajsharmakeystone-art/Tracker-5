@@ -3,7 +3,7 @@ import type { User as FirebaseAuthUser } from 'firebase/auth';
 export interface BreakEntry {
     startTime: any;
     endTime: any;
-    cause?: 'manual' | 'idle';
+    cause?: 'manual' | 'idle' | 'away';
 }
 
 export type ActivityType = 'working' | 'on_break';
@@ -34,7 +34,7 @@ export interface WorkLog {
 
     totalWorkSeconds: number;
     totalBreakSeconds: number;
-            onDesktopRequestEndBreak?: (callback: (data?: any) => void) => (() => void) | void;
+    onDesktopRequestEndBreak?: (callback: (data?: any) => void) => (() => void) | void;
 
     teamId?: string;
     startTime?: any;

@@ -53,8 +53,7 @@
     "productName": "Tracker 5 Desktop",
     "files": [
       "dist/**/*",
-      "electron/**/*",
-      "!electron/node_modules"
+      "electron/**/*"
     ],
     "asar": true,
     "directories": {

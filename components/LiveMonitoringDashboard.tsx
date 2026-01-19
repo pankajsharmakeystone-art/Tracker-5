@@ -615,8 +615,12 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         if (agent.isZombie) {
             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200 animate-pulse">Stale / Zombie</span>;
         }
-        // Check for Away status from agentStatuses (screen lock)
         const desktopStatus = agentStatuses?.[agent.userId];
+        // Priority: Idle break takes precedence over Away (since idle counts as break hours)
+        if (desktopStatus?.isIdle) {
+            return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200">Idle Break</span>;
+        }
+        // Check for Away status from agentStatuses (screen lock) - only if not on idle break
         if (desktopStatus?.isAway || agent.status === 'away') {
             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">🔒 Away</span>;
         }

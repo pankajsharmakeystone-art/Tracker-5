@@ -4,7 +4,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
     startTime: Date;
     endTime: Date | null;
     durationSeconds: number;
-    cause?: 'manual' | 'idle';
+    cause?: 'manual' | 'idle' | 'away';
 }> {
     const toDate = (ts: any): Date | null => {
         if (!ts) return null;
@@ -47,7 +47,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
                 const effectiveEnd = end ?? nowDate;
                 const durationSeconds = Math.max(0, (effectiveEnd.getTime() - start.getTime()) / 1000);
                 const normalizedType = (entry.type || '').toLowerCase() === 'on_break' ? 'On Break' : 'Working';
-                const cause = entry.cause === 'idle' ? 'idle' : entry.cause === 'manual' ? 'manual' : undefined;
+                const cause = entry.cause === 'idle' ? 'idle' : entry.cause === 'away' ? 'away' : entry.cause === 'manual' ? 'manual' : undefined;
                 return {
                     type: normalizedType as 'Working' | 'On Break',
                     startTime: start,
@@ -56,7 +56,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
                     cause,
                 };
             })
-            .filter(Boolean) as Array<{ type: 'Working' | 'On Break'; startTime: Date; endTime: Date | null; durationSeconds: number; cause?: 'manual' | 'idle'; }>;
+            .filter(Boolean) as Array<{ type: 'Working' | 'On Break'; startTime: Date; endTime: Date | null; durationSeconds: number; cause?: 'manual' | 'idle' | 'away'; }>;
 
         return segments.sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0));
     }
@@ -68,7 +68,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
             startTime: Date;
             endTime: Date | null;
             durationSeconds: number;
-            cause?: 'manual' | 'idle';
+            cause?: 'manual' | 'idle' | 'away';
         }> = [];
 
         const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
@@ -188,7 +188,7 @@ interface Segment {
     startTime: Date;
     endTime: Date | null;
     durationSeconds: number;
-    cause?: 'manual' | 'idle';
+    cause?: 'manual' | 'idle' | 'away';
 }
 
 const toDate = (ts: any): Date | null => {
@@ -261,7 +261,7 @@ const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog,
                                     <span className="text-green-800 dark:text-green-300 font-bold">Working</span>
                                 ) : (
                                     <span className="text-yellow-800 dark:text-yellow-300 font-bold">
-                                        {seg.cause ? `On Break (${seg.cause === 'idle' ? 'Idle' : 'Manual'})` : 'On Break'}
+                                        {seg.cause ? `On Break (${seg.cause === 'idle' ? 'Idle' : seg.cause === 'away' ? 'Away' : 'Manual'})` : 'On Break'}
                                     </span>
                                 )}
                             </td>

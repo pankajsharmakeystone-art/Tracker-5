@@ -23,7 +23,15 @@ const formatDuration = (totalSeconds: number): string => {
         .join(':');
 };
 
-const getStatusIndicator = (status: WorkLog['status']) => {
+const getStatusIndicator = (status: WorkLog['status'], agentStatus?: any) => {
+    // Priority: Idle break takes precedence over Away (since idle counts as break hours)
+    if (agentStatus?.isIdle) {
+        return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200">Idle Break</span>;
+    }
+    // Check for Away status from agentStatus (screen lock) - only if not on idle break
+    if (agentStatus?.isAway) {
+        return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">🔒 Away</span>;
+    }
     switch (status) {
         case 'working':
             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Working</span>;
@@ -54,7 +62,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
 
     useEffect(() => {
         setLoading(true);
-        
+
         // Stream work logs (who is working today)
         const unsubscribeWorkLogs = streamTodayWorkLogs((logs) => {
             setWorkLogs(logs);
@@ -100,20 +108,20 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
     // Deduplicate logs by userId to ensure one row per agent in this status view
     const uniqueAgentLogs = useMemo(() => {
         const agentMap = new Map<string, WorkLog>();
-        
+
         workLogs.forEach(log => {
             const existing = agentMap.get(log.userId);
             if (!existing) {
                 agentMap.set(log.userId, log);
                 return;
             }
-            
+
             // Logic: Prioritize 'Working'/'On Break' over 'Clocked Out'
             // If both are active or both inactive, pick the one with the later start time
-            
+
             const isNewActive = log.status === 'working' || log.status === 'on_break' || (log.status as any) === 'break';
             const isExistingActive = existing.status === 'working' || existing.status === 'on_break' || (existing.status as any) === 'break';
-            
+
             if (isNewActive && !isExistingActive) {
                 agentMap.set(log.userId, log);
             } else if (isNewActive === isExistingActive) {
@@ -125,7 +133,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                 }
             }
         });
-        
+
         return Array.from(agentMap.values());
     }, [workLogs]);
 
@@ -158,7 +166,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
 
     return (
         <div className="mb-8 bg-white dark:bg-gray-800/50 shadow-md rounded-xl border dark:border-gray-700">
-            <div 
+            <div
                 className={`px-6 py-4 flex justify-between items-center ${isMinimizable ? 'cursor-pointer' : ''}`}
                 onClick={() => isMinimizable && setIsMinimized(!isMinimized)}
                 aria-expanded={!isMinimized}
@@ -209,11 +217,11 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                     </div>
                                 </div>
                                 <div className="divide-y divide-gray-200 dark:divide-gray-700">
-                                     {(displayLogs.length > 0) ? displayLogs.map(log => {
+                                    {(displayLogs.length > 0) ? displayLogs.map(log => {
                                         const duration = (log.status === 'working' || log.status === 'on_break' || (log.status as any) === 'break') && log.lastEventTimestamp
                                             ? formatDuration(Math.max(0, Math.floor((now - (log.lastEventTimestamp as Timestamp).toDate().getTime()) / 1000)))
                                             : null;
-                                    
+
                                         const agentStatus = agentStatuses[log.userId];
                                         const presenceEntry = presence?.[log.userId];
 
@@ -231,8 +239,8 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                         const displayRecording = isConnected && agentStatus?.isRecording === true;
 
                                         return (
-                                            <div 
-                                                key={log.id} 
+                                            <div
+                                                key={log.id}
                                                 className={`px-6 py-4 flex justify-between items-center hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors duration-150 ${log.userId === currentUserId ? 'bg-blue-50 dark:bg-blue-900/40' : ''}`}
                                             >
                                                 <div className="flex flex-col">
@@ -252,7 +260,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                         </span>
                                                     </div>
                                                 </div>
-                                                
+
                                                 <div className="flex items-center gap-4 flex-wrap justify-end">
                                                     {showRecordingControls && (
                                                         <div className="flex items-center gap-2 w-32 justify-center">
@@ -276,7 +284,7 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                     )}
 
                                                     <div className="flex items-center gap-4 w-32 justify-end">
-                                                        {getStatusIndicator(displayStatus as any)}
+                                                        {getStatusIndicator(displayStatus as any, agentStatus)}
                                                         <span className="font-mono text-sm text-gray-500 dark:text-gray-400 w-16 text-right">
                                                             {duration || '--:--'}
                                                         </span>
@@ -284,8 +292,8 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                                 </div>
                                             </div>
                                         );
-                                     }) : (
-                                         <div className="px-6 py-4 text-center text-gray-500 dark:text-gray-400">
+                                    }) : (
+                                        <div className="px-6 py-4 text-center text-gray-500 dark:text-gray-400">
                                             No agent activity recorded for today.
                                         </div>
                                     )}

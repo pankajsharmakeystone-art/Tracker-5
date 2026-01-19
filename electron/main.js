@@ -3633,6 +3633,91 @@ ipcMain.handle("request-sign-out", async () => {
   }
 });
 
+// Clock out and sign out desktop helper function
+const clockOutAndSignOutDesktop = async (reason, options = {}) => {
+  const { notifyRenderer = true } = options;
+  const uid = currentUid;
+
+  if (!uid) {
+    log('[clockOutAndSignOutDesktop] No current UID, skipping...');
+    return;
+  }
+
+  log(`[clockOutAndSignOutDesktop] Clocking out user ${uid}, reason: ${reason}`);
+
+  try {
+    // Stop recording if active
+    if (isRecordingActive) {
+      await stopBackgroundRecordingAndFlush({ timeoutMs: 3000, payload: { stopReason: reason } });
+    }
+
+    // Update worklog status to clocked_out
+    const worklogsSnap = await db.collection('worklogs')
+      .where('userId', '==', uid)
+      .where('status', 'in', ['working', 'on_break', 'break'])
+      .limit(1)
+      .get();
+
+    if (!worklogsSnap.empty) {
+      const worklogDoc = worklogsSnap.docs[0];
+      const worklogData = worklogDoc.data() || {};
+      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+      // Close any open break entries
+      for (let i = breaks.length - 1; i >= 0; i--) {
+        if (!breaks[i].endTime) {
+          breaks[i] = { ...breaks[i], endTime: FieldValue.serverTimestamp() };
+        }
+      }
+
+      await worklogDoc.ref.update({
+        status: 'clocked_out',
+        clockOutTime: FieldValue.serverTimestamp(),
+        lastEventTimestamp: FieldValue.serverTimestamp(),
+        breaks
+      });
+      log('[clockOutAndSignOutDesktop] Worklog updated to clocked_out');
+    }
+
+    // Update agent status to offline
+    await db.collection('agentStatus').doc(uid).set({
+      status: 'offline',
+      isRecording: false,
+      isIdle: false,
+      isAway: false,
+      manualBreak: false,
+      lastUpdate: FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    // Clear user session fields to allow re-login
+    await db.collection('users').doc(uid).update({
+      isLoggedIn: false,
+      activeDesktopSessionId: FieldValue.delete(),
+      activeDesktopDeviceId: FieldValue.delete(),
+      activeDesktopMachineName: FieldValue.delete(),
+      activeDesktopSessionStartedAt: FieldValue.delete(),
+      lastClockOut: FieldValue.serverTimestamp(),
+      sessionClearedAt: FieldValue.serverTimestamp()
+    });
+
+    // Stop status loop
+    stopAgentStatusLoop();
+    agentClockedIn = false;
+    isAway = false;
+    manualBreakActive = false;
+
+    // Notify renderer if needed
+    if (notifyRenderer && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('signed-out', { reason });
+    }
+
+    log('[clockOutAndSignOutDesktop] Clock out complete');
+  } catch (e) {
+    log('[clockOutAndSignOutDesktop] Error:', e?.message || e);
+    throw e;
+  }
+};
+
 // Clock out and then unregister (used when web chooses "Clock Out & Sign Out")
 ipcMain.handle("clock-out-and-sign-out", async () => {
   try {
@@ -4063,6 +4148,36 @@ app.whenReady().then(() => {
     } catch (e) {
       log('[away] Failed to set Away status:', e?.message || e);
     }
+
+    // Add break entry with cause 'away' to the active worklog for activity logs
+    try {
+      const worklogsSnap = await db.collection('worklogs')
+        .where('userId', '==', currentUid)
+        .where('status', 'in', ['working', 'on_break', 'break'])
+        .limit(1)
+        .get();
+
+      if (!worklogsSnap.empty) {
+        const worklogDoc = worklogsSnap.docs[0];
+        const worklogData = worklogDoc.data() || {};
+        const existingBreaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+        // Add new break entry with cause 'away'
+        const newBreak = {
+          startTime: FieldValue.serverTimestamp(),
+          endTime: null,
+          cause: 'away'
+        };
+
+        await worklogDoc.ref.update({
+          breaks: [...existingBreaks, newBreak],
+          lastEventTimestamp: FieldValue.serverTimestamp()
+        });
+        log('[away] Added away break entry to worklog');
+      }
+    } catch (e) {
+      log('[away] Failed to add away break entry to worklog:', e?.message || e);
+    }
   };
 
   const handleScreenUnlock = async () => {
@@ -4082,6 +4197,41 @@ app.whenReady().then(() => {
       }, { merge: true });
     } catch (e) {
       log('[away] Failed to clear Away status:', e?.message || e);
+    }
+
+    // Close the open away break entry in the worklog
+    try {
+      const worklogsSnap = await db.collection('worklogs')
+        .where('userId', '==', currentUid)
+        .where('status', 'in', ['working', 'on_break', 'break'])
+        .limit(1)
+        .get();
+
+      if (!worklogsSnap.empty) {
+        const worklogDoc = worklogsSnap.docs[0];
+        const worklogData = worklogDoc.data() || {};
+        const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+        // Find the last open break entry with cause 'away' and close it
+        let updated = false;
+        for (let i = breaks.length - 1; i >= 0; i--) {
+          if (breaks[i].cause === 'away' && !breaks[i].endTime) {
+            breaks[i] = { ...breaks[i], endTime: FieldValue.serverTimestamp() };
+            updated = true;
+            break;
+          }
+        }
+
+        if (updated) {
+          await worklogDoc.ref.update({
+            breaks,
+            lastEventTimestamp: FieldValue.serverTimestamp()
+          });
+          log('[away] Closed away break entry in worklog');
+        }
+      }
+    } catch (e) {
+      log('[away] Failed to close away break entry in worklog:', e?.message || e);
     }
 
     // Resume recording if needed after unlock

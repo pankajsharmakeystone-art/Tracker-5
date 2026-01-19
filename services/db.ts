@@ -544,6 +544,10 @@ export const performClockOut = async (uid: string) => {
     await updateDoc(userDocRef, {
         isLoggedIn: false,
         activeSession: deleteField(),
+        activeDesktopSessionId: deleteField(),
+        activeDesktopDeviceId: deleteField(),
+        activeDesktopMachineName: deleteField(),
+        activeDesktopSessionStartedAt: deleteField(),
         lastClockOut: serverTimestamp(),
         sessionClearedAt: serverTimestamp()
     });
@@ -979,6 +983,21 @@ export const forceLogoutAgent = async (uid: string) => {
         console.error('[forceLogoutAgent] Failed to clock out user before forcing logout', error);
     }
 
+    // Ensure user session fields are cleared even if performClockOut failed
+    try {
+        const userDocRef = doc(db, 'users', uid);
+        await updateDoc(userDocRef, {
+            isLoggedIn: false,
+            activeDesktopSessionId: deleteField(),
+            activeDesktopDeviceId: deleteField(),
+            activeDesktopMachineName: deleteField(),
+            activeDesktopSessionStartedAt: deleteField(),
+            sessionClearedAt: serverTimestamp()
+        });
+    } catch (error) {
+        console.error('[forceLogoutAgent] Failed to clear user session fields', error);
+    }
+
     try {
         // Prefer session-targeted forceLogout (prevents clobbering a newly logged-in desktop).
         let targetDesktopSessionId: string | null = null;
@@ -1066,3 +1085,40 @@ export const getRecordingLogStats = async (teamId?: string): Promise<{ success: 
     };
 };
 
+/**
+ * Clear all recording logs from Firestore
+ * @param options - Optional filters: status ('all', 'failed', 'pending'), teamId
+ */
+export const clearRecordingLogs = async (options: { status?: string; teamId?: string } = {}): Promise<number> => {
+    const logsRef = collection(db, 'recordingLogs');
+    const snapshot = await getDocs(logsRef);
+
+    let docsToDelete = snapshot.docs;
+
+    // Apply filters
+    if (options.teamId) {
+        docsToDelete = docsToDelete.filter(doc => doc.data().teamId === options.teamId);
+    }
+    if (options.status && options.status !== 'all') {
+        if (options.status === 'failed_or_pending') {
+            docsToDelete = docsToDelete.filter(doc => {
+                const status = doc.data().status;
+                return status === 'failed' || status === 'pending';
+            });
+        } else {
+            docsToDelete = docsToDelete.filter(doc => doc.data().status === options.status);
+        }
+    }
+
+    // Delete in batches to avoid Firestore limits
+    const batchSize = 500;
+    let deletedCount = 0;
+
+    for (let i = 0; i < docsToDelete.length; i += batchSize) {
+        const batch = docsToDelete.slice(i, i + batchSize);
+        await Promise.all(batch.map(doc => deleteDoc(doc.ref)));
+        deletedCount += batch.length;
+    }
+
+    return deletedCount;
+};
