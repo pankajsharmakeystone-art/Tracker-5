@@ -4341,8 +4341,10 @@ app.whenReady().then(() => {
       log('[away] Failed to set Away status:', e?.message || e);
     }
 
-    // Add break entry with cause 'away' to the active worklog for activity logs
+    // Add system event entry for screen lock to the active worklog for activity logs
+    // This is marked as isSystemEvent so it appears in Time Entries but doesn't count as break time
     try {
+      log('[away] Looking for active worklog for user:', currentUid);
       const worklogsSnap = await db.collection('worklogs')
         .where('userId', '==', currentUid)
         .where('status', 'in', ['working', 'on_break', 'break'])
@@ -4354,21 +4356,28 @@ app.whenReady().then(() => {
         const worklogData = worklogDoc.data() || {};
         const existingBreaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
 
-        // Add new break entry with cause 'away'
-        const newBreak = {
-          startTime: FieldValue.serverTimestamp(),
+        log('[away] Found worklog:', worklogDoc.id, 'with', existingBreaks.length, 'existing breaks');
+
+        // Add new system event entry for screen lock
+        // Note: Use Timestamp.now() instead of FieldValue.serverTimestamp() because
+        // Firestore doesn't support serverTimestamp inside arrays
+        const newEntry = {
+          startTime: Timestamp.now(),
           endTime: null,
-          cause: 'away'
+          cause: 'screen_lock',
+          isSystemEvent: true  // Flag to distinguish from actual breaks
         };
 
         await worklogDoc.ref.update({
-          breaks: [...existingBreaks, newBreak],
+          breaks: [...existingBreaks, newEntry],
           lastEventTimestamp: FieldValue.serverTimestamp()
         });
-        log('[away] Added away break entry to worklog');
+        log('[away] Added screen_lock system event to worklog');
+      } else {
+        log('[away] No active worklog found for user - cannot add screen_lock event');
       }
     } catch (e) {
-      log('[away] Failed to add away break entry to worklog:', e?.message || e);
+      log('[away] Failed to add screen_lock system event to worklog:', e?.message || e);
     }
   };
 
@@ -4391,7 +4400,7 @@ app.whenReady().then(() => {
       log('[away] Failed to clear Away status:', e?.message || e);
     }
 
-    // Close the open away break entry in the worklog
+    // Close the open screen_lock system event entry in the worklog
     try {
       const worklogsSnap = await db.collection('worklogs')
         .where('userId', '==', currentUid)
@@ -4404,11 +4413,13 @@ app.whenReady().then(() => {
         const worklogData = worklogDoc.data() || {};
         const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
 
-        // Find the last open break entry with cause 'away' and close it
+        // Find the last open entry with cause 'screen_lock' and close it
+        // Note: Use Timestamp.now() instead of FieldValue.serverTimestamp() because
+        // Firestore doesn't support serverTimestamp inside arrays
         let updated = false;
         for (let i = breaks.length - 1; i >= 0; i--) {
-          if (breaks[i].cause === 'away' && !breaks[i].endTime) {
-            breaks[i] = { ...breaks[i], endTime: FieldValue.serverTimestamp() };
+          if (breaks[i].cause === 'screen_lock' && !breaks[i].endTime) {
+            breaks[i] = { ...breaks[i], endTime: Timestamp.now() };
             updated = true;
             break;
           }
@@ -4419,11 +4430,11 @@ app.whenReady().then(() => {
             breaks,
             lastEventTimestamp: FieldValue.serverTimestamp()
           });
-          log('[away] Closed away break entry in worklog');
+          log('[away] Closed screen_lock system event in worklog');
         }
       }
     } catch (e) {
-      log('[away] Failed to close away break entry in worklog:', e?.message || e);
+      log('[away] Failed to close screen_lock system event in worklog:', e?.message || e);
     }
 
     // Resume recording if needed after unlock

@@ -1,10 +1,11 @@
 // Utility to transform Firestore worklog doc with breaks array to ActivitySheet format
 export function transformFirestoreWorklog(docData: any): Array<{
-    type: 'Working' | 'On Break';
+    type: 'Working' | 'On Break' | 'System Event';
     startTime: Date;
     endTime: Date | null;
     durationSeconds: number;
-    cause?: 'manual' | 'idle' | 'away';
+    cause?: 'manual' | 'idle' | 'away' | 'screen_lock';
+    isSystemEvent?: boolean;
 }> {
     const toDate = (ts: any): Date | null => {
         if (!ts) return null;
@@ -64,11 +65,12 @@ export function transformFirestoreWorklog(docData: any): Array<{
     // If it has a breaks array, use that structure
     if (Array.isArray(docData.breaks)) {
         const segments: Array<{
-            type: 'Working' | 'On Break';
+            type: 'Working' | 'On Break' | 'System Event';
             startTime: Date;
             endTime: Date | null;
             durationSeconds: number;
-            cause?: 'manual' | 'idle' | 'away';
+            cause?: 'manual' | 'idle' | 'away' | 'screen_lock';
+            isSystemEvent?: boolean;
         }> = [];
 
         const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
@@ -119,11 +121,12 @@ export function transformFirestoreWorklog(docData: any): Array<{
             }
 
             segments.push({
-                type: 'On Break',
+                type: breakEntry?.isSystemEvent ? 'System Event' : 'On Break',
                 startTime: breakStart,
                 endTime: breakEnd ?? null,
                 durationSeconds,
                 cause: breakEntry?.cause,
+                isSystemEvent: breakEntry?.isSystemEvent || false,
             });
 
             cursor = breakEnd ?? null;
@@ -259,6 +262,13 @@ const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog,
                             <td className="py-4 px-6 font-medium whitespace-nowrap">
                                 {seg.type === 'Working' ? (
                                     <span className="text-green-800 dark:text-green-300 font-bold">Working</span>
+                                ) : seg.type === 'System Event' || seg.isSystemEvent ? (
+                                    <span className="text-purple-700 dark:text-purple-300 font-bold flex items-center">
+                                        <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                        </svg>
+                                        System Event: Screen Locked
+                                    </span>
                                 ) : (
                                     <span className="text-yellow-800 dark:text-yellow-300 font-bold">
                                         {seg.cause ? `On Break (${seg.cause === 'idle' ? 'Idle' : seg.cause === 'away' ? 'Away' : 'Manual'})` : 'On Break'}
