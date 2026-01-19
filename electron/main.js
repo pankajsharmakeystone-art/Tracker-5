@@ -254,9 +254,14 @@ function setTargetUploadResult(fileName, target, result = {}) {
 function isTargetUploaded(fileName, target) {
   const entry = getManifestEntry(fileName);
   if (!entry) return false;
-  if (entry.completed === true) return true;
+  // Check individual target status - don't rely on completed flag alone
+  // because 'completed' was set prematurely when only some targets succeeded
   const uploadedTargets = entry.uploadedTargets || {};
-  return uploadedTargets[target] === true;
+  if (uploadedTargets[target] === true) return true;
+  // Fallback: if completed is true AND we have no explicit false for this target,
+  // assume it was uploaded before we started tracking per-target status
+  if (entry.completed === true && uploadedTargets[target] !== false) return true;
+  return false;
 }
 
 function markRecordingCompleted(fileName) {
@@ -665,6 +670,10 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
         continue;
       }
 
+      // Log which targets need retry
+      const needsRetry = enabledTargets.filter((t) => !isTargetUploaded(fileName, t));
+      log('[uploads] retry needed for file:', fileName, 'targets:', needsRetry.join(', '));
+
       const entry = getManifestEntry(fileName) || {};
       const ownerUid = entry.ownerUid || null;
       const ownerName = entry.ownerName || null;
@@ -713,8 +722,21 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
       }
 
       if (enabledTargets.includes('http') && !isTargetUploaded(fileName, 'http')) {
+        log('[uploads] retrying HTTP upload:', filePath);
         const httpResult = await uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTime });
+        log('[uploads] HTTP upload result:', httpResult.success ? 'success' : (httpResult.error || 'failed'));
         setTargetUploadResult(fileName, 'http', { success: !!httpResult?.success, error: httpResult?.error || httpResult?.reason || null });
+
+        // Log to recordingLogs collection so failed retries appear in Recording Logs panel
+        await logRecordingEvent({
+          userId: ownerUid || currentUid,
+          userName: ownerName || cachedDisplayName,
+          fileName,
+          status: httpResult.success ? 'success' : 'failed',
+          uploadTarget: 'http',
+          fileSize: stat?.size || null,
+          error: httpResult.success ? null : (httpResult.error || httpResult.reason || 'http-upload-failed')
+        });
       }
 
       const allSucceededAfter = enabledTargets.every((t) => isTargetUploaded(fileName, t));
