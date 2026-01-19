@@ -1411,6 +1411,38 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   // Use flush to ensure current recording segment is saved before upload
   await stopBackgroundRecordingAndFlush({ payload: { stopReason: 'signed_out' } });
 
+  // Update worklog status to clocked_out
+  try {
+    const worklogsSnap = await db.collection('worklogs')
+      .where('userId', '==', uid)
+      .where('status', 'in', ['working', 'on_break', 'break'])
+      .limit(1)
+      .get();
+
+    if (!worklogsSnap.empty) {
+      const worklogDoc = worklogsSnap.docs[0];
+      const worklogData = worklogDoc.data() || {};
+      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+      // Close any open break entries
+      for (let i = breaks.length - 1; i >= 0; i--) {
+        if (!breaks[i].endTime) {
+          breaks[i] = { ...breaks[i], endTime: FieldValue.serverTimestamp() };
+        }
+      }
+
+      await worklogDoc.ref.update({
+        status: 'clocked_out',
+        clockOutTime: FieldValue.serverTimestamp(),
+        lastEventTimestamp: FieldValue.serverTimestamp(),
+        breaks
+      });
+      log('[clockOutAndSignOutDesktop] Worklog updated to clocked_out');
+    }
+  } catch (e) {
+    log('[clockOutAndSignOutDesktop] Failed to update worklog:', e?.message || e);
+  }
+
   // Best-effort: flush any pending uploads before losing auth / returning to login.
   // This is especially important for mid-shift handoffs where the old machine must upload.
   try {
@@ -1422,6 +1454,8 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   await db.collection('agentStatus').doc(uid).set({
     status: 'offline',
     isIdle: false,
+    isAway: false,
+    manualBreak: false,
     idleReason: FieldValue.delete(),
     lockedBySystem: false,
     lastUpdate: FieldValue.serverTimestamp()
@@ -1489,6 +1523,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   stopAutoClockConfigWatch();
   pendingAgentStatuses.length = 0;
   manualBreakActive = false;
+  isAway = false;
   lastIdleState = false;
   closeManualBreakReminderWindow();
 
@@ -3652,91 +3687,6 @@ ipcMain.handle("request-sign-out", async () => {
     return { success: false, error: e.message };
   }
 });
-
-// Clock out and sign out desktop helper function
-const clockOutAndSignOutDesktop = async (reason, options = {}) => {
-  const { notifyRenderer = true } = options;
-  const uid = currentUid;
-
-  if (!uid) {
-    log('[clockOutAndSignOutDesktop] No current UID, skipping...');
-    return;
-  }
-
-  log(`[clockOutAndSignOutDesktop] Clocking out user ${uid}, reason: ${reason}`);
-
-  try {
-    // Stop recording if active
-    if (isRecordingActive) {
-      await stopBackgroundRecordingAndFlush({ timeoutMs: 3000, payload: { stopReason: reason } });
-    }
-
-    // Update worklog status to clocked_out
-    const worklogsSnap = await db.collection('worklogs')
-      .where('userId', '==', uid)
-      .where('status', 'in', ['working', 'on_break', 'break'])
-      .limit(1)
-      .get();
-
-    if (!worklogsSnap.empty) {
-      const worklogDoc = worklogsSnap.docs[0];
-      const worklogData = worklogDoc.data() || {};
-      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
-
-      // Close any open break entries
-      for (let i = breaks.length - 1; i >= 0; i--) {
-        if (!breaks[i].endTime) {
-          breaks[i] = { ...breaks[i], endTime: FieldValue.serverTimestamp() };
-        }
-      }
-
-      await worklogDoc.ref.update({
-        status: 'clocked_out',
-        clockOutTime: FieldValue.serverTimestamp(),
-        lastEventTimestamp: FieldValue.serverTimestamp(),
-        breaks
-      });
-      log('[clockOutAndSignOutDesktop] Worklog updated to clocked_out');
-    }
-
-    // Update agent status to offline
-    await db.collection('agentStatus').doc(uid).set({
-      status: 'offline',
-      isRecording: false,
-      isIdle: false,
-      isAway: false,
-      manualBreak: false,
-      lastUpdate: FieldValue.serverTimestamp()
-    }, { merge: true });
-
-    // Clear user session fields to allow re-login
-    await db.collection('users').doc(uid).update({
-      isLoggedIn: false,
-      activeDesktopSessionId: FieldValue.delete(),
-      activeDesktopDeviceId: FieldValue.delete(),
-      activeDesktopMachineName: FieldValue.delete(),
-      activeDesktopSessionStartedAt: FieldValue.delete(),
-      lastClockOut: FieldValue.serverTimestamp(),
-      sessionClearedAt: FieldValue.serverTimestamp()
-    });
-
-    // Stop status loop
-    stopAgentStatusLoop();
-    agentClockedIn = false;
-    isAway = false;
-    manualBreakActive = false;
-
-    // Notify renderer if needed
-    if (notifyRenderer && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('signed-out', { reason });
-    }
-
-    log('[clockOutAndSignOutDesktop] Clock out complete');
-  } catch (e) {
-    log('[clockOutAndSignOutDesktop] Error:', e?.message || e);
-    throw e;
-  }
-};
 
 // Clock out and then unregister (used when web chooses "Clock Out & Sign Out")
 ipcMain.handle("clock-out-and-sign-out", async () => {
