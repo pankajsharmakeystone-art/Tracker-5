@@ -1,6 +1,6 @@
 // Utility to transform Firestore worklog doc with breaks array to ActivitySheet format
 export function transformFirestoreWorklog(docData: any): Array<{
-    type: 'Working' | 'On Break' | 'System Event';
+    type: 'Working' | 'On Break' | 'System Event' | 'Clock Out';
     startTime: Date;
     endTime: Date | null;
     durationSeconds: number;
@@ -40,54 +40,129 @@ export function transformFirestoreWorklog(docData: any): Array<{
     if (Array.isArray(docData.activities) && docData.activities.length > 0) {
         console.log('[ActivitySheet] Using ACTIVITIES path. activities:', docData.activities.length, 'breaks:', docData.breaks?.length || 0);
         const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
-        const segments = docData.activities
-            .filter((entry: any) => entry && entry.startTime)
-            .map((entry: any) => {
-                const start = toDate(entry.startTime);
-                if (!start) return null;
-                const end = toDate(entry.endTime);
-                const effectiveEnd = end ?? nowDate;
-                const durationSeconds = Math.max(0, (effectiveEnd.getTime() - start.getTime()) / 1000);
-                const normalizedType = (entry.type || '').toLowerCase() === 'on_break' ? 'On Break' : 'Working';
-                const cause = entry.cause === 'idle' ? 'idle' : entry.cause === 'away' ? 'away' : entry.cause === 'manual' ? 'manual' : entry.cause === 'screen_lock' ? 'screen_lock' : undefined;
-                return {
-                    type: entry.isSystemEvent ? 'System Event' : normalizedType as 'Working' | 'On Break' | 'System Event',
-                    startTime: start,
-                    endTime: end ?? null,
-                    durationSeconds,
-                    cause,
-                    isSystemEvent: entry.isSystemEvent || false,
-                };
-            })
-            .filter(Boolean) as Array<{ type: 'Working' | 'On Break' | 'System Event'; startTime: Date; endTime: Date | null; durationSeconds: number; cause?: 'manual' | 'idle' | 'away' | 'screen_lock'; isSystemEvent?: boolean; }>;
+        const nowMs = nowDate.getTime();
 
-        // Also include system events from breaks array (screen_lock entries)
+        // Collect all system events from breaks array
+        const systemEvents: Array<{ startTime: Date; endTime: Date | null; cause?: string; }> = [];
         if (Array.isArray(docData.breaks)) {
-            const systemEvents = docData.breaks
+            docData.breaks
                 .filter((b: any) => b && b.startTime && b.isSystemEvent)
-                .map((b: any) => {
+                .forEach((b: any) => {
                     const start = toDate(b.startTime);
-                    if (!start) return null;
-                    const end = toDate(b.endTime);
-                    const effectiveEnd = end ?? nowDate;
-                    const durationSeconds = Math.max(0, (effectiveEnd.getTime() - start.getTime()) / 1000);
-                    return {
-                        type: 'System Event' as const,
-                        startTime: start,
-                        endTime: end ?? null,
-                        durationSeconds,
-                        cause: b.cause as 'screen_lock' | undefined,
-                        isSystemEvent: true,
-                    };
-                })
-                .filter(Boolean);
+                    if (start) {
+                        systemEvents.push({
+                            startTime: start,
+                            endTime: toDate(b.endTime),
+                            cause: b.cause,
+                        });
+                    }
+                });
+        }
 
-            if (systemEvents.length > 0) {
-                console.log('[ActivitySheet] Adding', systemEvents.length, 'system events from breaks array');
-                segments.push(...systemEvents);
+        // Sort system events by start time
+        systemEvents.sort((a, b) => a.startTime.getTime() - b.startTime.getTime());
+
+        // Build timeline by processing activities and splitting around system events
+        const segments: Array<{
+            type: 'Working' | 'On Break' | 'System Event' | 'Clock Out';
+            startTime: Date;
+            endTime: Date | null;
+            durationSeconds: number;
+            cause?: 'manual' | 'idle' | 'away' | 'screen_lock';
+            isSystemEvent?: boolean;
+        }> = [];
+
+        // Process each activity entry
+        docData.activities
+            .filter((entry: any) => entry && entry.startTime)
+            .forEach((entry: any) => {
+                const activityStart = toDate(entry.startTime);
+                if (!activityStart) return;
+                const activityEnd = toDate(entry.endTime) ?? nowDate;
+                const normalizedType = (entry.type || '').toLowerCase() === 'on_break' ? 'On Break' : 'Working';
+                const isBreak = normalizedType === 'On Break';
+
+                // If it's a break or already a system event, add directly
+                if (isBreak || entry.isSystemEvent) {
+                    const durationSeconds = Math.max(0, (activityEnd.getTime() - activityStart.getTime()) / 1000);
+                    const cause = entry.cause === 'idle' ? 'idle' : entry.cause === 'away' ? 'away' : entry.cause === 'manual' ? 'manual' : entry.cause === 'screen_lock' ? 'screen_lock' : undefined;
+                    segments.push({
+                        type: entry.isSystemEvent ? 'System Event' : 'On Break',
+                        startTime: activityStart,
+                        endTime: toDate(entry.endTime) ?? null,
+                        durationSeconds,
+                        cause,
+                        isSystemEvent: entry.isSystemEvent || false,
+                    });
+                    return;
+                }
+
+                // For Working entries, split around system events
+                let cursor = activityStart;
+                const activityEndMs = activityEnd.getTime();
+
+                // Find system events that overlap with this activity
+                for (const sysEvent of systemEvents) {
+                    const sysStartMs = sysEvent.startTime.getTime();
+                    const sysEndMs = sysEvent.endTime?.getTime() ?? nowMs;
+
+                    // If system event is before this activity, skip
+                    if (sysEndMs <= cursor.getTime()) continue;
+                    // If system event is after this activity ends, stop
+                    if (sysStartMs >= activityEndMs) break;
+
+                    // Add working segment from cursor to system event start
+                    if (sysStartMs > cursor.getTime()) {
+                        const workDuration = (sysStartMs - cursor.getTime()) / 1000;
+                        segments.push({
+                            type: 'Working',
+                            startTime: cursor,
+                            endTime: sysEvent.startTime,
+                            durationSeconds: Math.max(0, workDuration),
+                        });
+                    }
+
+                    // Add the system event
+                    const sysDuration = (sysEndMs - sysStartMs) / 1000;
+                    segments.push({
+                        type: 'System Event',
+                        startTime: sysEvent.startTime,
+                        endTime: sysEvent.endTime,
+                        durationSeconds: Math.max(0, sysDuration),
+                        cause: sysEvent.cause as 'screen_lock' | undefined,
+                        isSystemEvent: true,
+                    });
+
+                    // Move cursor past the system event
+                    cursor = sysEvent.endTime ?? nowDate;
+                }
+
+                // Add remaining working time after all system events
+                if (cursor.getTime() < activityEndMs) {
+                    const remainingDuration = (activityEndMs - cursor.getTime()) / 1000;
+                    segments.push({
+                        type: 'Working',
+                        startTime: cursor,
+                        endTime: toDate(entry.endTime) ?? null,
+                        durationSeconds: Math.max(0, remainingDuration),
+                    });
+                }
+            });
+
+        // Add Clock Out entry if session has ended
+        if (docData.status === 'clocked_out' && docData.clockOutTime) {
+            const clockOutDate = toDate(normalizeClockOutTime(docData.clockOutTime, docData.clockInTime));
+            if (clockOutDate) {
+                segments.push({
+                    type: 'Clock Out' as any,
+                    startTime: clockOutDate,
+                    endTime: null,
+                    durationSeconds: 0,
+                });
             }
         }
 
+        // Sort by start time
         return segments.sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0));
     }
 
@@ -304,6 +379,13 @@ const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog,
                             <td className="py-4 px-6 font-medium whitespace-nowrap">
                                 {seg.type === 'Working' ? (
                                     <span className="text-green-800 dark:text-green-300 font-bold">Working</span>
+                                ) : seg.type === 'Clock Out' ? (
+                                    <span className="text-red-700 dark:text-red-400 font-bold flex items-center">
+                                        <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                                        </svg>
+                                        Clock Out
+                                    </span>
                                 ) : seg.type === 'System Event' || seg.isSystemEvent ? (
                                     <span className="text-purple-700 dark:text-purple-300 font-bold flex items-center">
                                         <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -318,12 +400,19 @@ const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog,
                                 )}
                             </td>
 
-                            {/* Start time */}
-                            <td className="py-4 px-6">{formatTime(seg.startTime, timezone)}</td>
+                            {/* Start time / Clock Out time */}
+                            <td className="py-4 px-6">
+                                {seg.type === 'Clock Out'
+                                    ? formatTime(seg.startTime, timezone)
+                                    : formatTime(seg.startTime, timezone)
+                                }
+                            </td>
 
                             {/* End time */}
                             <td className="py-4 px-6">
-                                {seg.endTime ? (
+                                {seg.type === 'Clock Out' ? (
+                                    <span className="text-gray-400">--</span>
+                                ) : seg.endTime ? (
                                     formatTime(seg.endTime, timezone)
                                 ) : (
                                     <span className="text-blue-600 dark:text-blue-400 font-semibold animate-pulse">
@@ -334,7 +423,11 @@ const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog,
 
                             {/* Duration */}
                             <td className="py-4 px-6 font-mono">
-                                {formatDuration(seg.durationSeconds)}
+                                {seg.type === 'Clock Out' ? (
+                                    <span className="text-gray-400">--</span>
+                                ) : (
+                                    formatDuration(seg.durationSeconds)
+                                )}
                             </td>
                         </tr>
                     ))}
