@@ -38,6 +38,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
     };
 
     if (Array.isArray(docData.activities) && docData.activities.length > 0) {
+        console.log('[ActivitySheet] Using ACTIVITIES path. activities:', docData.activities.length, 'breaks:', docData.breaks?.length || 0);
         const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
         const segments = docData.activities
             .filter((entry: any) => entry && entry.startTime)
@@ -48,22 +49,58 @@ export function transformFirestoreWorklog(docData: any): Array<{
                 const effectiveEnd = end ?? nowDate;
                 const durationSeconds = Math.max(0, (effectiveEnd.getTime() - start.getTime()) / 1000);
                 const normalizedType = (entry.type || '').toLowerCase() === 'on_break' ? 'On Break' : 'Working';
-                const cause = entry.cause === 'idle' ? 'idle' : entry.cause === 'away' ? 'away' : entry.cause === 'manual' ? 'manual' : undefined;
+                const cause = entry.cause === 'idle' ? 'idle' : entry.cause === 'away' ? 'away' : entry.cause === 'manual' ? 'manual' : entry.cause === 'screen_lock' ? 'screen_lock' : undefined;
                 return {
-                    type: normalizedType as 'Working' | 'On Break',
+                    type: entry.isSystemEvent ? 'System Event' : normalizedType as 'Working' | 'On Break' | 'System Event',
                     startTime: start,
                     endTime: end ?? null,
                     durationSeconds,
                     cause,
+                    isSystemEvent: entry.isSystemEvent || false,
                 };
             })
-            .filter(Boolean) as Array<{ type: 'Working' | 'On Break'; startTime: Date; endTime: Date | null; durationSeconds: number; cause?: 'manual' | 'idle' | 'away'; }>;
+            .filter(Boolean) as Array<{ type: 'Working' | 'On Break' | 'System Event'; startTime: Date; endTime: Date | null; durationSeconds: number; cause?: 'manual' | 'idle' | 'away' | 'screen_lock'; isSystemEvent?: boolean; }>;
+
+        // Also include system events from breaks array (screen_lock entries)
+        if (Array.isArray(docData.breaks)) {
+            const systemEvents = docData.breaks
+                .filter((b: any) => b && b.startTime && b.isSystemEvent)
+                .map((b: any) => {
+                    const start = toDate(b.startTime);
+                    if (!start) return null;
+                    const end = toDate(b.endTime);
+                    const effectiveEnd = end ?? nowDate;
+                    const durationSeconds = Math.max(0, (effectiveEnd.getTime() - start.getTime()) / 1000);
+                    return {
+                        type: 'System Event' as const,
+                        startTime: start,
+                        endTime: end ?? null,
+                        durationSeconds,
+                        cause: b.cause as 'screen_lock' | undefined,
+                        isSystemEvent: true,
+                    };
+                })
+                .filter(Boolean);
+
+            if (systemEvents.length > 0) {
+                console.log('[ActivitySheet] Adding', systemEvents.length, 'system events from breaks array');
+                segments.push(...systemEvents);
+            }
+        }
 
         return segments.sort((a, b) => (a.startTime?.getTime() || 0) - (b.startTime?.getTime() || 0));
     }
 
     // If it has a breaks array, use that structure
     if (Array.isArray(docData.breaks)) {
+        // Debug: Log all breaks with screen_lock cause
+        const screenLockEntries = docData.breaks.filter((b: any) => b?.cause === 'screen_lock');
+        if (screenLockEntries.length > 0) {
+            console.log('[ActivitySheet] Breaks with screen_lock cause:', screenLockEntries);
+        } else {
+            console.log('[ActivitySheet] No screen_lock entries found. Total breaks:', docData.breaks.length);
+        }
+
         const segments: Array<{
             type: 'Working' | 'On Break' | 'System Event';
             startTime: Date;
@@ -105,6 +142,11 @@ export function transformFirestoreWorklog(docData: any): Array<{
         sortedBreaks.forEach((breakEntry: any) => {
             const breakStart = toDate(breakEntry.startTime);
             if (!breakStart) return;
+
+            // Debug: Log system events
+            if (breakEntry?.isSystemEvent) {
+                console.log('[ActivitySheet] Found system event:', breakEntry);
+            }
 
             if (cursor && breakStart.getTime() > cursor.getTime()) {
                 pushWorkingSegment(cursor, breakStart);

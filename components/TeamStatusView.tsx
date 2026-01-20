@@ -218,11 +218,25 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
                                 </div>
                                 <div className="divide-y divide-gray-200 dark:divide-gray-700">
                                     {(displayLogs.length > 0) ? displayLogs.map(log => {
-                                        const duration = (log.status === 'working' || log.status === 'on_break' || (log.status as any) === 'break') && log.lastEventTimestamp
-                                            ? formatDuration(Math.max(0, Math.floor((now - (log.lastEventTimestamp as Timestamp).toDate().getTime()) / 1000)))
-                                            : null;
-
                                         const agentStatus = agentStatuses[log.userId];
+
+                                        // Calculate duration based on current state
+                                        // If away (screen locked), show how long they've been away
+                                        // Otherwise show how long in current activity
+                                        let duration: string | null = null;
+                                        if (agentStatus?.isAway && agentStatus?.awayStartedAt) {
+                                            // Away duration from awayStartedAt
+                                            const awayStartMs = agentStatus.awayStartedAt?.toMillis?.()
+                                                || agentStatus.awayStartedAt?.toDate?.()?.getTime?.()
+                                                || (agentStatus.awayStartedAt?.seconds ? agentStatus.awayStartedAt.seconds * 1000 : 0);
+                                            if (awayStartMs > 0) {
+                                                duration = formatDuration(Math.max(0, Math.floor((now - awayStartMs) / 1000)));
+                                            }
+                                        } else if ((log.status === 'working' || log.status === 'on_break' || (log.status as any) === 'break') && log.lastEventTimestamp) {
+                                            // Normal activity duration from lastEventTimestamp
+                                            duration = formatDuration(Math.max(0, Math.floor((now - (log.lastEventTimestamp as Timestamp).toDate().getTime()) / 1000)));
+                                        }
+
                                         const presenceEntry = presence?.[log.userId];
 
                                         // Strict "Desktop connected": RTDB presence only.
