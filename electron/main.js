@@ -14,6 +14,7 @@ const electronLog = require("electron-log");
 const { DateTime } = require("luxon");
 const { google } = require("googleapis");
 const fixWebmDuration = require("fix-webm-duration");
+const crypto = require("crypto");
 
 // auto-updater
 const { autoUpdater } = require("electron-updater");
@@ -1899,43 +1900,115 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
   const config = getHttpUploadConfig();
   if (!config?.url) return { success: false, reason: 'http-not-configured' };
 
-  const headers = {
-    'Content-Type': 'application/octet-stream',
-    'x-file-name': fileName,
-    'x-agent-name': safeName,
-    'x-iso-date': isoDate,
-    'x-iso-time': isoTime
-  };
-
-  if (config.token) {
-    headers.Authorization = `Bearer ${config.token}`;
-  }
-
   try {
-    const response = await fetch(config.url, {
-      method: 'POST',
-      headers,
-      body: fs.createReadStream(filePath)
-    });
-
-    const text = await response.text();
-    let parsed = null;
+    // 1. Pre-flight Ping: Verify server is reachable
     try {
-      parsed = text ? JSON.parse(text) : null;
-    } catch (_) {
-      parsed = text;
+      const pingRes = await fetch(config.url, { method: 'GET', timeout: 5000 });
+      if (!pingRes.ok && pingRes.status !== 405) { // 405 is fine since we support GET as health check
+        throw new Error(`Server returned ${pingRes.status}`);
+      }
+    } catch (pingErr) {
+      log(`[http-upload] Pre-flight ping failed:`, pingErr.message);
+      return { success: false, error: 'server-unreachable', detail: pingErr.message };
     }
 
-    if (!response.ok) {
-      return {
-        success: false,
-        status: response.status,
-        error: parsed?.error || parsed?.message || text || 'http-upload-failed'
+    const stat = await fs.promises.stat(filePath);
+    const totalSize = stat.size;
+    const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks
+    const totalChunks = Math.ceil(totalSize / CHUNK_SIZE) || 1;
+
+    // 2. Resumable tracking: check manifest to see if we already have progress
+    const manifest = getManifestEntry(fileName) || {};
+    let startChunk = manifest.lastUploadedChunk !== undefined ? manifest.lastUploadedChunk + 1 : 0;
+
+    // If we've already finished all chunks, skip (shouldn't really happen here but good for safety)
+    if (startChunk >= totalChunks) {
+      log(`[http-upload] ${fileName} already fully uploaded per manifest.`);
+      return { success: true, message: 'already-uploaded' };
+    }
+
+    log(`[http-upload] starting reliability-enhanced upload for ${fileName} (${totalSize} bytes, ${totalChunks} chunks, starting at ${startChunk})`);
+
+    for (let chunkIndex = startChunk; chunkIndex < totalChunks; chunkIndex++) {
+      const start = chunkIndex * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, totalSize);
+
+      // Read chunk into buffer for hashing
+      const chunkBuffer = await new Promise((resolve, reject) => {
+        const stream = fs.createReadStream(filePath, { start, end: end - 1 });
+        const chunks = [];
+        stream.on('data', c => chunks.push(c));
+        stream.on('error', reject);
+        stream.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+
+      const hash = crypto.createHash('md5').update(chunkBuffer).digest('hex');
+
+      const headers = {
+        'Content-Type': 'application/octet-stream',
+        'x-file-name': fileName,
+        'x-agent-name': safeName,
+        'x-iso-date': isoDate,
+        'x-iso-time': isoTime,
+        'x-chunk-index': chunkIndex.toString(),
+        'x-total-chunks': totalChunks.toString(),
+        'x-file-size': totalSize.toString(),
+        'x-chunk-hash': hash
       };
+
+      if (config.token) {
+        headers.Authorization = `Bearer ${config.token}`;
+      }
+
+      // 3. Exponential Backoff Retries
+      let attempt = 0;
+      const MAX_ATTEMPTS = 5;
+      let success = false;
+      let lastError = null;
+
+      while (attempt < MAX_ATTEMPTS && !success) {
+        try {
+          if (attempt > 0) {
+            const delay = Math.pow(2, attempt) * 1000;
+            log(`[http-upload] Retrying chunk ${chunkIndex} (attempt ${attempt + 1}/${MAX_ATTEMPTS}) after ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+          }
+
+          const response = await fetch(config.url, {
+            method: 'POST',
+            headers,
+            body: chunkBuffer
+          });
+
+          if (response.ok) {
+            success = true;
+          } else {
+            const text = await response.text();
+            lastError = `HTTP ${response.status}: ${text}`;
+            // If it's an auth error, don't retry, just fail
+            if (response.status === 401) {
+              return { success: false, status: 401, error: 'unauthorized' };
+            }
+          }
+        } catch (err) {
+          lastError = err.message;
+        }
+        attempt++;
+      }
+
+      if (!success) {
+        log(`[http-upload] Failed to upload chunk ${chunkIndex} after ${MAX_ATTEMPTS} attempts: ${lastError}`);
+        return { success: false, error: 'chunk-upload-failed', detail: lastError, chunkIndex };
+      }
+
+      // 4. Update manifest after successful chunk
+      upsertManifestEntry(fileName, { lastUploadedChunk: chunkIndex });
+      log(`[http-upload] successfully sent chunk ${chunkIndex + 1}/${totalChunks}`);
     }
 
-    return { success: true, status: response.status, response: parsed };
+    return { success: true, message: 'upload-complete' };
   } catch (error) {
+    log(`[http-upload] fatal error:`, error?.message || error);
     return { success: false, error: error?.message || 'http-upload-failed' };
   }
 }
