@@ -13,6 +13,16 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
     const [clearing, setClearing] = useState(false);
     const [retryingLogId, setRetryingLogId] = useState<string | null>(null);
     const [retryError, setRetryError] = useState<string | null>(null);
+    const [expandedErrorIds, setExpandedErrorIds] = useState<Set<string>>(new Set());
+
+    const toggleErrorExpansion = (id: string) => {
+        setExpandedErrorIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
 
     // Date range filter - default to last 7 days
     const getDefaultStartDate = () => {
@@ -283,7 +293,11 @@ const RecordingLogsPanel: React.FC<RecordingLogsPanelProps> = ({ teamId }) => {
                                         <td className="px-4 py-3 whitespace-nowrap">
                                             {getStatusBadge(log.status)}
                                             {log.error && log.status !== 'success' && (
-                                                <div className="text-xs text-red-500 mt-1 max-w-[150px] truncate" title={log.error}>
+                                                <div
+                                                    className={`text-xs text-red-500 mt-1 cursor-pointer hover:text-red-600 transition-colors ${expandedErrorIds.has(log.id) ? 'whitespace-normal' : 'max-w-[150px] truncate'}`}
+                                                    title={expandedErrorIds.has(log.id) ? 'Click to collapse' : log.error}
+                                                    onClick={() => toggleErrorExpansion(log.id)}
+                                                >
                                                     {log.error}
                                                 </div>
                                             )}
