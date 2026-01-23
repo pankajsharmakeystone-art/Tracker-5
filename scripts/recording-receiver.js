@@ -136,14 +136,22 @@ const server = http.createServer(async (req, res) => {
     console.error(`[recording-receiver] Error processing ${fileName}:`, error);
     sendJson(res, 500, { success: false, error: error?.message || 'write-failed' });
   }
-});
+  // Disable timeouts to support large/slow uploads
+  const server = http.createServer(async (req, res) => {
+    // ... (existing code inside createServer)
+  });
 
-// Disable timeouts to support large/slow uploads
-server.headersTimeout = 0;
-server.requestTimeout = 0;
+  // Configure server for extreme stability
+  server.timeout = 0;
+  server.headersTimeout = 0;
+  server.requestTimeout = 0;
+  server.keepAliveTimeout = 0;
 
-server.listen(PORT, () => {
-  console.log(`[recording-receiver] Listening on port ${PORT}`);
-  console.log(`[recording-receiver] Saving to ${BASE_DIR}`);
-  console.log(`[recording-receiver] Timeouts disabled (infinite)`);
-});
+  // Enable persistent connections
+  server.keepAlive = true;
+
+  server.listen(PORT, () => {
+    console.log(`[recording-receiver] Listening on port ${PORT}`);
+    console.log(`[recording-receiver] Saving to ${BASE_DIR}`);
+    console.log(`[recording-receiver] Timeouts disabled (infinite)`);
+  });

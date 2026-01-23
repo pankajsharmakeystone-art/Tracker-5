@@ -341,6 +341,12 @@ async function updateRecordingLog(logId, updates = {}) {
 async function retrySpecificRecordingUpload(fileName, logId = null) {
   if (!fileName) return { success: false, error: 'missing-filename' };
 
+  if (activeUploads.has(fileName)) {
+    log(`[retry] Skip manual retry for ${fileName} - upload already in progress`);
+    return { success: false, error: 'already-uploading' };
+  }
+  activeUploads.add(fileName);
+
   const filePath = path.join(RECORDINGS_DIR, fileName);
 
   // Check if file exists
@@ -435,6 +441,8 @@ async function retrySpecificRecordingUpload(fileName, logId = null) {
       });
     }
     return { success: false, error: err?.message || 'retry-failed' };
+  } finally {
+    activeUploads.delete(fileName);
   }
 }
 
@@ -463,6 +471,7 @@ const DESKTOP_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
 // RTDB presence (preferred for realtime "connected" state; supports onDisconnect)
 let desktopSessionId = null;
+let activeUploads = new Set(); // Concurrency lock to prevent parallel processing of the same file
 let rtdbConnectedCallback = null;
 let rtdbConnectedRef = null;
 let rtdbPresenceRef = null;
@@ -641,6 +650,11 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
 
     for (const fileName of entries) {
       if (!currentUid) return;
+      if (activeUploads.has(fileName)) {
+        log(`[uploads] skipping retry for ${fileName} - currently active`);
+        continue;
+      }
+
       const filePath = path.join(RECORDINGS_DIR, fileName);
       let stat;
       try {
@@ -1594,6 +1608,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   agentClockedIn = false;
   stopAgentStatusLoop();
+  stopRecordingRetryCommandsListener();
   // Best-effort: explicitly mark desktop offline in RTDB so the console/UI doesn't
   // show a stuck `online` state if onDisconnect doesn't fire for any reason.
   // Guarded by sessionId match to avoid clobbering a newer desktop session.
@@ -1992,6 +2007,9 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
           }
         } catch (err) {
           lastError = err.message;
+          if (err.code === 'ECONNRESET' || err.message.includes('ECONNRESET')) {
+            log(`[http-upload] Connection reset (ECONNRESET) on chunk ${chunkIndex}. Will retry...`);
+          }
         }
         attempt++;
       }
@@ -3364,6 +3382,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
     startAgentStatusWatch(uid);
     startAutoClockConfigWatch(uid);
     startStatusHealthCheck();
+    startRecordingRetryCommandsListener();
     await flushPendingAgentStatuses();
 
     await reconcileRecordingAfterRegister(uid);
@@ -3404,8 +3423,9 @@ ipcMain.handle("register-uid", async (_, payload) => {
 
     setTimeout(() => {
       // best-effort: only retry after the app is fully up and admin settings likely synced.
+      // 15s delay helps avoid racing with active recordings starting up.
       retryPendingRecordingUploadsOnLogin().catch(() => { });
-    }, 10 * 1000);
+    }, 15 * 1000);
 
     // Upload the latest locally persisted health event (if any) so crashes that couldn't
     // write to Firestore still become visible after the next successful login.
@@ -3816,13 +3836,12 @@ ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
 
 const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
   const shouldEvaluateAutoResume = Boolean(meta?.isLastSession && !meta?.suppressAutoResume);
-  try {
-    const ownerUid = currentUid || meta?.ownerUid || null;
-    const ownerName = cachedDisplayName || meta?.ownerName || null;
-    let buffer = Buffer.from(arrayBuffer);
-    const filePath = path.join(RECORDINGS_DIR, fileName);
+  const filePath = path.join(RECORDINGS_DIR, fileName);
 
-    // Fix WebM duration metadata for proper playback
+  try {
+    // 1. ALWAYS write the file to disk first. 
+    // This prevents ENOENT if an upload is deferred or retried.
+    let buffer = Buffer.from(arrayBuffer);
     const recordingDurationMs = meta?.durationMs || null;
     if (recordingDurationMs && recordingDurationMs > 0) {
       try {
@@ -3835,9 +3854,18 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
         log("[recorder] WebM duration fix failed (using original):", fixErr?.message || fixErr);
       }
     }
-
     await fs.promises.writeFile(filePath, buffer);
     log("Saved recording to:", filePath);
+
+    // 2. NOW check for concurrency. 
+    // If another task is already uploading this file, we stop here.
+    if (activeUploads.has(fileName)) {
+      log(`[recorder] Skip upload for ${fileName} - activity already in progress`);
+      return { success: true, skipped: true, reason: 'concurrency-lock' };
+    }
+    activeUploads.add(fileName);
+
+    const ownerUid = currentUid || meta?.ownerUid || null;
 
     // File meta for manifest / retry logic.
     try {
@@ -3955,6 +3983,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     console.error("[notify-recording-saved] error", e);
     return { success: false, error: e.message };
   } finally {
+    activeUploads.delete(fileName);
     if (shouldEvaluateAutoResume) {
       scheduleAutoResumeRecording();
     }
