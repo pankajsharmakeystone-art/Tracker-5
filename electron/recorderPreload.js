@@ -1,7 +1,7 @@
 const { ipcRenderer, desktopCapturer } = require('electron');
 
-// Minimal recorder that lives in a hidden window. It records all screen sources and sends
-// finished blobs back to the main process for saving/uploading.
+// Minimal recorder that lives in a hidden window. It records all screen sources and
+// streams chunks directly to disk to support 2GB+ files without memory issues.
 
 const sessions = new Map();
 let nextSaveMeta = null;
@@ -47,16 +47,68 @@ async function startRecorderForSource(source, resolution, fps) {
     mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm'
   };
 
-  const recordedChunks = [];
   const mediaRecorder = new MediaRecorder(stream, options);
   let finalizeResolve;
   const finalizePromise = new Promise((resolve) => { finalizeResolve = resolve; });
   const startTime = Date.now();
 
-  sessions.set(id, { mediaRecorder, recordedChunks, stream, sourceName: name, finalizePromise, startTime });
+  // Create temp file for incremental writes (streaming to disk)
+  let tempFileReady = false;
+  let pendingChunks = []; // Buffer chunks until temp file is ready
 
-  mediaRecorder.ondataavailable = (event) => {
-    if (event.data && event.data.size > 0) recordedChunks.push(event.data);
+  try {
+    const createRes = await ipcRenderer.invoke('recorder-create-temp-file', id, name);
+    if (createRes?.success) {
+      tempFileReady = true;
+      console.log('[recorder] Temp file created for', id);
+
+      // Flush any chunks that arrived before temp file was ready
+      for (const pendingChunk of pendingChunks) {
+        try {
+          const arrayBuffer = await pendingChunk.arrayBuffer();
+          await ipcRenderer.invoke('recorder-append-chunk', id, arrayBuffer);
+        } catch (e) {
+          console.warn('[recorder] Failed to flush pending chunk', e);
+        }
+      }
+      pendingChunks = [];
+    } else {
+      console.warn('[recorder] Failed to create temp file, falling back to memory mode');
+    }
+  } catch (err) {
+    console.warn('[recorder] Temp file creation failed, falling back to memory mode', err);
+  }
+
+  // Store session data (no more recordedChunks array for memory mode)
+  sessions.set(id, {
+    mediaRecorder,
+    stream,
+    sourceName: name,
+    finalizePromise,
+    startTime,
+    tempFileReady,
+    pendingChunks: tempFileReady ? null : [],  // Only use if temp file failed
+    finalizeResolve
+  });
+
+  mediaRecorder.ondataavailable = async (event) => {
+    if (!event.data || event.data.size === 0) return;
+
+    const session = sessions.get(id);
+    if (!session) return;
+
+    if (session.tempFileReady) {
+      // Stream directly to disk via IPC
+      try {
+        const arrayBuffer = await event.data.arrayBuffer();
+        await ipcRenderer.invoke('recorder-append-chunk', id, arrayBuffer);
+      } catch (err) {
+        console.warn('[recorder] Failed to append chunk to disk', err);
+      }
+    } else if (session.pendingChunks) {
+      // Fallback: buffer in memory (for legacy support or if temp file creation fails)
+      session.pendingChunks.push(event.data);
+    }
   };
 
   mediaRecorder.onerror = (event) => {
@@ -67,28 +119,40 @@ async function startRecorderForSource(source, resolution, fps) {
     const session = sessions.get(id);
     try {
       if (!session) return;
-      const blob = new Blob(session.recordedChunks, { type: 'video/webm' });
-      const arrayBuffer = await blob.arrayBuffer();
-      const safeName = sanitizeName(session.sourceName || 'screen');
-      const fileName = `recording-${safeName}-${Date.now()}.webm`;
+
       const isLastSession = sessions.size === 1;
       const durationMs = session.startTime ? (Date.now() - session.startTime) : null;
       const saveMeta = { isLastSession, durationMs, ...(nextSaveMeta || {}) };
-      ipcRenderer.invoke('recorder-save', fileName, arrayBuffer, saveMeta)
-        .catch((err) => console.error('[recorder] failed to send recording', err));
+
+      if (session.tempFileReady) {
+        // Finalize: close file, move to recordings, trigger upload
+        console.log('[recorder] Finalizing incremental recording for', id);
+        ipcRenderer.invoke('recorder-finalize', id, saveMeta)
+          .catch((err) => console.error('[recorder] finalize failed', err));
+      } else if (session.pendingChunks && session.pendingChunks.length > 0) {
+        // Fallback: use old memory-based approach (for small recordings or failures)
+        console.log('[recorder] Using fallback memory-based save for', id);
+        const blob = new Blob(session.pendingChunks, { type: 'video/webm' });
+        const arrayBuffer = await blob.arrayBuffer();
+        const safeName = sanitizeName(session.sourceName || 'screen');
+        const fileName = `recording-${safeName}-${Date.now()}.webm`;
+        ipcRenderer.invoke('recorder-save', fileName, arrayBuffer, saveMeta)
+          .catch((err) => console.error('[recorder] failed to send recording', err));
+      }
     } catch (err) {
-      console.error('[recorder] failed to prepare recording', err);
+      console.error('[recorder] failed to finalize recording', err);
     } finally {
       try {
         session?.stream?.getTracks()?.forEach((t) => t.stop());
       } catch (e) { }
       sessions.delete(id);
-      finalizeResolve?.();
+      session?.finalizeResolve?.();
     }
   };
 
+  // Start with 1 second timeslice for frequent chunk writes
   mediaRecorder.start(1000);
-  console.log('[recorder] started', name, id);
+  console.log('[recorder] started', name, id, 'incremental:', tempFileReady);
 }
 
 async function stopAllRecorders() {

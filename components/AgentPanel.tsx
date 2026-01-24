@@ -32,8 +32,9 @@ const TabButton = ({ tabName, title, activeTab, setActiveTab }: { tabName: strin
 
 const deriveBreakCause = (entry: any): 'manual' | 'idle' => {
     const raw = (entry?.cause || entry?.reason || entry?.type || entry?.source || '').toString().toLowerCase();
-    if (raw.includes('idle')) return 'idle';
-    if (entry?.auto === true || entry?.isIdle === true) return 'idle';
+    // Screen lock is a system event, not a manual break - categorize with idle/system
+    if (raw.includes('idle') || raw.includes('screen_lock') || raw.includes('lock')) return 'idle';
+    if (entry?.auto === true || entry?.isIdle === true || entry?.isSystemEvent === true) return 'idle';
     return 'manual';
 };
 
@@ -228,12 +229,13 @@ const AgentPanel: React.FC = () => {
         const updateDisplays = () => {
             const now = Date.now();
             const lastEventTime = workLog.lastEventTimestamp ? getMillis(workLog.lastEventTimestamp) : null;
-            // Only count work time when status is 'working' AND not idle/on manual break
+            // Only count work time when status is 'working' AND not idle/on manual break/away
             // This ensures mutual exclusivity between work/idle/break counters
             const shouldCountWork = lastEventTime
                 && workLog.status === 'working'
                 && !isIdleRef.current
-                && !manualBreakRef.current;
+                && !manualBreakRef.current
+                && !isAway;
             if (shouldCountWork) {
                 const elapsed = Math.max(0, (now - lastEventTime) / 1000);
                 setDisplayWorkSeconds(workLog.totalWorkSeconds + elapsed);
@@ -290,8 +292,19 @@ const AgentPanel: React.FC = () => {
                     if (data.isIdle === true && currentLog.status === 'working') {
                         idleBreakActiveRef.current = true;
                         const wDur = getDuration(currentLog.lastEventTimestamp);
-                        const newBreaks = [...(currentLog.breaks || [])];
+                        const newBreaks = [...(currentLog.breaks || [])] as any[];
                         const idleStartTs = Timestamp.now();
+
+                        // ROBUSTNESS: Ensure any open screen_lock entry is closed locally before pushing idle break
+                        // This prevents React from overwriting Electron's parallel update with stale open-lock data
+                        if (newBreaks.length > 0) {
+                            const lastIdx = newBreaks.length - 1;
+                            const lastEntry = newBreaks[lastIdx];
+                            if (lastEntry.cause === 'screen_lock' && !lastEntry.endTime) {
+                                newBreaks[lastIdx] = { ...lastEntry, endTime: idleStartTs };
+                            }
+                        }
+
                         newBreaks.push({ startTime: idleStartTs, endTime: null, cause: 'idle' });
                         const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, idleStartTs, {
                             type: 'on_break',

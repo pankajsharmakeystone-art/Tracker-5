@@ -1,6 +1,6 @@
 {
   "name": "electron-app",
-  "version": "0.5.74",
+  "version": "0.5.75",
   "description": "",
   "main": "main.js",
   "scripts": {
@@ -17,7 +17,8 @@
     "fix-webm-duration": "^1.0.6",
     "googleapis": "^166.0.0",
     "luxon": "^3.5.0",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "ts-ebml": "^3.0.2"
   },
   "devDependencies": {
     "electron": "^30.0.9"

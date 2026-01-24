@@ -347,7 +347,10 @@ const formatDuration = (seconds: number): string => {
 // Usage: Instead of passing workLog.activities/breaks, use transformFirestoreWorklog(workLog)
 const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog, timezone }) => {
     // If workLog is already in the expected format, skip transform
-    const timeline = (Array.isArray(workLog) ? workLog : transformFirestoreWorklog(workLog)).slice().reverse();
+    // Filter out 0-duration Working entries (these can occur during screen_lock → idle transitions)
+    const timeline = (Array.isArray(workLog) ? workLog : transformFirestoreWorklog(workLog))
+        .filter(seg => !(seg.type === 'Working' && seg.durationSeconds < 1))
+        .slice().reverse();
 
     if (timeline.length === 0) {
         return (

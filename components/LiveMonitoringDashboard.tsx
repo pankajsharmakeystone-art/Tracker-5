@@ -69,29 +69,83 @@ const getMillis = (value: any): number | null => {
 
 const normalizeBreakCause = (entry: any): 'manual' | 'idle' => {
     const raw = (entry?.cause || entry?.reason || entry?.type || entry?.source || '').toString().toLowerCase();
-    if (raw.includes('idle')) return 'idle';
-    if (entry?.auto === true || entry?.isIdle === true) return 'idle';
+    // Screen lock is a system event, not a manual break - categorize with idle/system
+    if (raw.includes('idle') || raw.includes('screen_lock') || raw.includes('lock')) return 'idle';
+    if (entry?.auto === true || entry?.isIdle === true || entry?.isSystemEvent === true) return 'idle';
     return 'manual';
 };
 
+// Sum actual working time from activities array (only counts tracked work, not gaps)
+const sumWorkingFromActivities = (activities: any[], cutoffMs?: number): number | null => {
+    if (!Array.isArray(activities) || activities.length === 0) return null;
+    let totalSeconds = 0;
+    for (const entry of activities) {
+        const type = (entry.type || 'working').toLowerCase();
+        // Only count 'working' type entries (skip breaks, system events)
+        if (type !== 'working') continue;
+        if (entry.isSystemEvent || entry.cause) continue;
+        const startMs = getMillis(entry.startTime);
+        const endMs = entry.endTime ? getMillis(entry.endTime) : cutoffMs;
+        if (startMs && endMs && endMs > startMs) {
+            totalSeconds += (endMs - startMs) / 1000;
+        }
+    }
+    return totalSeconds;
+};
+
+// Sum idle and manual breaks from activities array (more reliable than breaks array)
+const sumBreaksFromActivities = (activities: any[], cutoffMs?: number): { manualSeconds: number; idleSeconds: number } | null => {
+    if (!Array.isArray(activities) || activities.length === 0) return null;
+    let manualSeconds = 0;
+    let idleSeconds = 0;
+    for (const entry of activities) {
+        const type = (entry.type || '').toLowerCase();
+        // Only count 'on_break' type entries
+        if (type !== 'on_break') continue;
+        const startMs = getMillis(entry.startTime);
+        const endMs = entry.endTime ? getMillis(entry.endTime) : cutoffMs;
+        if (startMs && endMs && endMs > startMs) {
+            const duration = (endMs - startMs) / 1000;
+            const cause = (entry.cause || '').toLowerCase();
+            if (cause === 'idle' || cause === 'screen_lock' || entry.isSystemEvent) {
+                idleSeconds += duration;
+            } else {
+                manualSeconds += duration;
+            }
+        }
+    }
+    return { manualSeconds, idleSeconds };
+};
+
+
+
 const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
+    const isClockedOut = log.status === 'clocked_out';
+    const cutoffMs = isClockedOut
+        ? (getMillis(log.lastEventTimestamp as any) ?? nowMs)
+        : nowMs;
+
+    // For closed sessions, prefer activities array (more reliable than breaks array)
+    if (isClockedOut) {
+        const fromActivities = sumBreaksFromActivities(
+            (log as any).activities,
+            cutoffMs
+        );
+        if (fromActivities !== null) {
+            return fromActivities;
+        }
+    }
+
+    // Fallback: use breaks array (for active sessions or when activities not available)
     const breaks = Array.isArray((log as any)?.breaks) ? (log as any).breaks : [];
     let manualSeconds = 0;
     let idleSeconds = 0;
     let accounted = false;
 
-    // When session is clocked out, don't add any live elapsed time
-    const isClockedOut = log.status === 'clocked_out';
-    // Use lastEventTimestamp as the cutoff for clocked out sessions
-    const cutoffMs = isClockedOut
-        ? (getMillis(log.lastEventTimestamp as any) ?? nowMs)
-        : nowMs;
-
     breaks.forEach((entry: any) => {
         const startMs = getMillis(entry?.startTime);
         if (startMs == null) return;
         const endMs = entry?.endTime ? getMillis(entry.endTime) : null;
-        // For open breaks, use cutoff (lastEvent for clocked out, now for active)
         const effectiveEnd = endMs ?? cutoffMs;
         if (effectiveEnd <= startMs) return;
         accounted = true;
@@ -104,7 +158,6 @@ const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
         manualSeconds = typeof log.totalBreakSeconds === 'number' ? log.totalBreakSeconds : 0;
         const isOnBreak = log.status === 'on_break' || (log.status as any) === 'break';
         const lastEventMs = getMillis(log.lastEventTimestamp as any);
-        // Only add live elapsed if actively on break (not clocked out)
         if (isOnBreak && !isClockedOut && lastEventMs != null && nowMs > lastEventMs) {
             manualSeconds += (nowMs - lastEventMs) / 1000;
         }
@@ -112,6 +165,7 @@ const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
 
     return { manualSeconds, idleSeconds };
 };
+
 
 const OVERNIGHT_THRESHOLD_MINUTES = 12 * 60;
 
@@ -436,15 +490,18 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
             let totalWork = log.totalWorkSeconds;
 
-            // For closed sessions, always calculate from server timestamps to avoid
-            // issues with incorrect client clocks. clockInTime and clockOutTime are
-            // server timestamps and thus always accurate.
+            // For closed sessions, sum actual working time from activities array
+            // This ensures untracked gaps (e.g. desktop app not running) don't count as work
             if (!isActive) {
-                const clockInMs = getMillis(log.clockInTime);
-                const clockOutMs = getMillis(log.clockOutTime);
-                if (clockInMs && clockOutMs && clockOutMs > clockInMs) {
-                    const totalSessionSeconds = (clockOutMs - clockInMs) / 1000;
-                    totalWork = Math.max(0, totalSessionSeconds - totalBreak);
+                const activitiesWork = sumWorkingFromActivities(
+                    (log as any).activities,
+                    getMillis(log.clockOutTime) ?? undefined
+                );
+                if (activitiesWork !== null && activitiesWork > 0) {
+                    totalWork = activitiesWork;
+                } else {
+                    // Fallback to stored value if no activities
+                    totalWork = log.totalWorkSeconds || 0;
                 }
             } else if (!isZombie && log.lastEventTimestamp) {
                 // For active sessions, add live elapsed time (real-time display)
@@ -458,7 +515,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 // This ensures mutual exclusivity between work/idle/break counters
                 const isAgentIdle = desktopStatus?.isIdle === true;
                 const isAgentOnManualBreak = desktopStatus?.manualBreak === true;
-                if (log.status === 'working' && !isAgentIdle && !isAgentOnManualBreak) {
+                const isAgentAway = desktopStatus?.isAway === true;
+                if (log.status === 'working' && !isAgentIdle && !isAgentOnManualBreak && !isAgentAway) {
                     totalWork += elapsed;
                 }
             }

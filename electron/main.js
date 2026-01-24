@@ -15,6 +15,70 @@ const { DateTime } = require("luxon");
 const { google } = require("googleapis");
 const fixWebmDuration = require("fix-webm-duration");
 const crypto = require("crypto");
+// ts-ebml for lightweight WebM duration fix
+const { Decoder, Encoder, Reader, tools } = require("ts-ebml");
+
+// FFmpeg for robust video repair (fallback)
+const ffmpegStatic = require("ffmpeg-static");
+const ffmpeg = require("fluent-ffmpeg");
+if (ffmpegStatic) ffmpeg.setFfmpegPath(ffmpegStatic);
+
+// Fix WebM duration using ts-ebml (lightweight, pure JavaScript)
+// This is the PRIMARY method - fast and doesn't require external processes
+async function fixWebmDurationWithTsEbml(inputBuffer) {
+  try {
+    if (!inputBuffer || inputBuffer.length === 0) {
+      return { buffer: inputBuffer, fixed: false, method: 'none' };
+    }
+
+    const decoder = new Decoder();
+    const reader = new Reader();
+
+    // Connect decoder output to reader
+    reader.logging = false;
+    reader.drop_default_duration = false;
+
+    // Convert Buffer to ArrayBuffer for ts-ebml
+    const arrayBuffer = inputBuffer.buffer.slice(
+      inputBuffer.byteOffset,
+      inputBuffer.byteOffset + inputBuffer.byteLength
+    );
+
+    // Decode the EBML elements and feed to reader
+    const elms = decoder.decode(arrayBuffer);
+    elms.forEach((elm) => reader.read(elm));
+    reader.stop();
+
+    // Check if we have the necessary data
+    if (!reader.metadatas || reader.metadatas.length === 0) {
+      log('[ts-ebml] No metadata found in WebM file');
+      return { buffer: inputBuffer, fixed: false, method: 'no-metadata' };
+    }
+
+    // Get the refined metadata with duration
+    const refinedMetadataBuf = tools.makeMetadataSeekable(
+      reader.metadatas,
+      reader.duration,
+      reader.cues
+    );
+
+    // Get the body (video data after the header)
+    const body = arrayBuffer.slice(reader.metadataSize);
+
+    // Combine refined metadata with body
+    const result = new Uint8Array(refinedMetadataBuf.byteLength + body.byteLength);
+    result.set(new Uint8Array(refinedMetadataBuf), 0);
+    result.set(new Uint8Array(body), refinedMetadataBuf.byteLength);
+
+    const fixedBuffer = Buffer.from(result);
+    log('[ts-ebml] Duration fix success. Original:', inputBuffer.length, 'Fixed:', fixedBuffer.length, 'Duration:', reader.duration);
+
+    return { buffer: fixedBuffer, fixed: true, method: 'ts-ebml' };
+  } catch (err) {
+    log('[ts-ebml] Duration fix failed:', err?.message || err);
+    return { buffer: inputBuffer, fixed: false, method: 'failed', error: err?.message };
+  }
+}
 
 // auto-updater
 const { autoUpdater } = require("electron-updater");
@@ -32,6 +96,22 @@ if (electronLog?.transports?.file) {
 autoUpdater.logger = electronLog;
 autoUpdater.autoDownload = true;
 app.setAppUserModelId(APP_USER_MODEL_ID);
+
+// SINGLE INSTANCE LOCK
+// Prevent multiple instances from running to avoid duplicate logs and recording conflicts
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  log("Another instance is already running. Quitting...");
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    // Focus existing window if user tries to run a second instance
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
 
 // ---------- HELPER FUNCTIONS ----------
 function log(...args) { console.log("[electron]", ...args); }
@@ -99,6 +179,92 @@ const envOr = (...keys) => {
   return "";
 };
 
+// Robust WebM repair using FFmpeg
+// MediaRecorder WebM files lack duration in header - this fixes that by remuxing
+// Returns: { buffer: Buffer, repaired: boolean }
+async function repairWebmWithFfmpeg(inputBuffer) {
+  return new Promise((resolve, reject) => {
+    try {
+      if (!inputBuffer || inputBuffer.length === 0) {
+        return resolve({ buffer: inputBuffer, repaired: false });
+      }
+
+      const tempId = crypto.randomBytes(8).toString('hex');
+      const inputPath = path.join(os.tmpdir(), `temp_fix_${tempId}.webm`);
+      const mkvPath = path.join(os.tmpdir(), `temp_mkv_${tempId}.mkv`);
+      const outputPath = path.join(os.tmpdir(), `temp_fixed_${tempId}.webm`);
+
+      fs.writeFileSync(inputPath, inputBuffer);
+
+      // Step 1: Remux to MKV (Matroska properly calculates duration during muxing)
+      ffmpeg(inputPath)
+        .inputOptions(['-fflags +genpts+igndts', '-err_detect ignore_err'])
+        .outputOptions([
+          '-c copy',
+          '-avoid_negative_ts make_zero'
+        ])
+        .output(mkvPath)
+        .on('stderr', (stderrLine) => {
+          if (stderrLine && (stderrLine.includes('Error') || stderrLine.includes('Duration'))) {
+            log('[ffmpeg] step1:', stderrLine);
+          }
+        })
+        .on('end', () => {
+          // Step 2: Remux back to WebM (now with proper duration)
+          ffmpeg(mkvPath)
+            .outputOptions([
+              '-c copy',
+              '-f webm'
+            ])
+            .output(outputPath)
+            .on('stderr', (stderrLine) => {
+              if (stderrLine && (stderrLine.includes('Error') || stderrLine.includes('Duration'))) {
+                log('[ffmpeg] step2:', stderrLine);
+              }
+            })
+            .on('end', () => {
+              try {
+                if (fs.existsSync(outputPath)) {
+                  const fixedBuf = fs.readFileSync(outputPath);
+                  try { fs.unlinkSync(inputPath); } catch (_) { }
+                  try { fs.unlinkSync(mkvPath); } catch (_) { }
+                  try { fs.unlinkSync(outputPath); } catch (_) { }
+                  log('[ffmpeg] repair complete - fixed size:', fixedBuf.length);
+                  resolve({ buffer: fixedBuf, repaired: true });
+                } else {
+                  try { fs.unlinkSync(inputPath); } catch (_) { }
+                  try { fs.unlinkSync(mkvPath); } catch (_) { }
+                  log('[ffmpeg] output missing, using original');
+                  resolve({ buffer: inputBuffer, repaired: false });
+                }
+              } catch (e) {
+                reject(e);
+              }
+            })
+            .on('error', (err) => {
+              log('[ffmpeg] step2 error:', err.message);
+              try { fs.unlinkSync(inputPath); } catch (_) { }
+              try { fs.unlinkSync(mkvPath); } catch (_) { }
+              try { fs.unlinkSync(outputPath); } catch (_) { }
+              // Return original buffer on step2 failure
+              resolve({ buffer: inputBuffer, repaired: false });
+            })
+            .run();
+        })
+        .on('error', (err) => {
+          log('[ffmpeg] step1 error:', err.message);
+          try { fs.unlinkSync(inputPath); } catch (_) { }
+          try { fs.unlinkSync(mkvPath); } catch (_) { }
+          // Return original buffer on step1 failure
+          resolve({ buffer: inputBuffer, repaired: false });
+        })
+        .run();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 const firebaseConfig = {
   apiKey: envOr("FIREBASE_API_KEY", "VITE_FIREBASE_API_KEY"),
   authDomain: envOr("FIREBASE_AUTH_DOMAIN", "VITE_FIREBASE_AUTH_DOMAIN"),
@@ -141,6 +307,10 @@ const DEFAULT_ORGANIZATION_TIMEZONE = "Asia/Kolkata";
 // ---------- CONFIG ----------
 const RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings");
 if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+
+// Temp folder for in-progress recordings (incremental disk writes)
+const TEMP_RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings_temp");
+if (!fs.existsSync(TEMP_RECORDINGS_DIR)) fs.mkdirSync(TEMP_RECORDINGS_DIR, { recursive: true });
 
 // Purge stale recordings early during startup to avoid uploading old files from prior sessions
 purgeOldRecordings();
@@ -1668,6 +1838,35 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     // ignore
   }
 
+  // Auto-merge recording segments (same as performClockOut)
+  try {
+    let agentName = 'Unknown';
+    try {
+      const userDoc = await db.collection('users').doc(uid).get();
+      if (userDoc.exists) {
+        const data = userDoc.data();
+        agentName = (data.displayName || data.name || data.email || 'Unknown')
+          .replace(/[^a-zA-Z0-9_\-\s]/g, '_')
+          .trim();
+      }
+    } catch (e) {
+      log('[merge] Failed to fetch user name:', e?.message);
+    }
+
+    const now = new Date();
+    const isoDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    // Fire and forget - don't wait for merge to complete
+    requestSegmentMerge(agentName, isoDate, true)
+      .then(result => {
+        if (result.success) log(`[merge] Segments merged for ${agentName} on ${isoDate}`);
+        else log(`[merge] Merge skipped/failed:`, result.reason || result.error);
+      })
+      .catch(err => log('[merge] Merge error:', err?.message || err));
+  } catch (mergeErr) {
+    log('[merge] Error during auto-merge:', mergeErr?.message || mergeErr);
+  }
+
   await db.collection('agentStatus').doc(uid).set({
     status: 'offline',
     isIdle: false,
@@ -1919,7 +2118,7 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
     // 1. Pre-flight Ping: Verify server is reachable
     try {
       const pingRes = await fetch(config.url, { method: 'GET', timeout: 5000 });
-      if (!pingRes.ok && pingRes.status !== 405) { // 405 is fine since we support GET as health check
+      if (!pingRes.ok && pingRes.status !== 405 && pingRes.status !== 404) {
         throw new Error(`Server returned ${pingRes.status}`);
       }
     } catch (pingErr) {
@@ -1927,109 +2126,119 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
       return { success: false, error: 'server-unreachable', detail: pingErr.message };
     }
 
-    const stat = await fs.promises.stat(filePath);
-    const totalSize = stat.size;
-    const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks
-    const totalChunks = Math.ceil(totalSize / CHUNK_SIZE) || 1;
+    // 2. Read entire file into buffer
+    const fileBuffer = await fs.promises.readFile(filePath);
+    const fileSize = fileBuffer.length;
+    const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
 
-    // 2. Resumable tracking: check manifest to see if we already have progress
-    const manifest = getManifestEntry(fileName) || {};
-    let startChunk = manifest.lastUploadedChunk !== undefined ? manifest.lastUploadedChunk + 1 : 0;
+    log(`[http-upload] Uploading ${fileName}: ${fileSize} bytes (hash: ${fileHash})`);
 
-    // If we've already finished all chunks, skip (shouldn't really happen here but good for safety)
-    if (startChunk >= totalChunks) {
-      log(`[http-upload] ${fileName} already fully uploaded per manifest.`);
-      return { success: true, message: 'already-uploaded' };
+    // 3. Build headers
+    const headers = {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': fileSize.toString(),
+      'x-file-name': fileName,
+      'x-agent-name': safeName,
+      'x-iso-date': isoDate,
+      'x-iso-time': isoTime,
+      'x-file-size': fileSize.toString(),
+      'x-file-hash': fileHash
+    };
+
+    if (config.token) {
+      headers.Authorization = `Bearer ${config.token}`;
     }
 
-    log(`[http-upload] starting reliability-enhanced upload for ${fileName} (${totalSize} bytes, ${totalChunks} chunks, starting at ${startChunk})`);
+    // 4. Upload with retries
+    let attempt = 0;
+    const MAX_ATTEMPTS = 3;
+    let lastError = null;
 
-    for (let chunkIndex = startChunk; chunkIndex < totalChunks; chunkIndex++) {
-      const start = chunkIndex * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, totalSize);
+    while (attempt < MAX_ATTEMPTS) {
+      try {
+        if (attempt > 0) {
+          const delay = Math.pow(2, attempt) * 1000;
+          log(`[http-upload] Retrying ${fileName} (attempt ${attempt + 1}/${MAX_ATTEMPTS}) after ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+        }
 
-      // Read chunk into buffer for hashing
-      const chunkBuffer = await new Promise((resolve, reject) => {
-        const stream = fs.createReadStream(filePath, { start, end: end - 1 });
-        const chunks = [];
-        stream.on('data', c => chunks.push(c));
-        stream.on('error', reject);
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
-      });
+        const response = await fetch(config.url, {
+          method: 'POST',
+          headers,
+          body: fileBuffer,
+          timeout: 300000 // 5 minutes timeout for large files
+        });
 
-      const hash = crypto.createHash('md5').update(chunkBuffer).digest('hex');
-
-      const headers = {
-        'Content-Type': 'application/octet-stream',
-        'x-file-name': fileName,
-        'x-agent-name': safeName,
-        'x-iso-date': isoDate,
-        'x-iso-time': isoTime,
-        'x-chunk-index': chunkIndex.toString(),
-        'x-total-chunks': totalChunks.toString(),
-        'x-file-size': totalSize.toString(),
-        'x-chunk-hash': hash
-      };
-
-      if (config.token) {
-        headers.Authorization = `Bearer ${config.token}`;
-      }
-
-      // 3. Exponential Backoff Retries
-      let attempt = 0;
-      const MAX_ATTEMPTS = 5;
-      let success = false;
-      let lastError = null;
-
-      while (attempt < MAX_ATTEMPTS && !success) {
-        try {
-          if (attempt > 0) {
-            const delay = Math.pow(2, attempt) * 1000;
-            log(`[http-upload] Retrying chunk ${chunkIndex} (attempt ${attempt + 1}/${MAX_ATTEMPTS}) after ${delay}ms...`);
-            await new Promise(r => setTimeout(r, delay));
-          }
-
-          const response = await fetch(config.url, {
-            method: 'POST',
-            headers,
-            body: chunkBuffer
-          });
-
-          if (response.ok) {
-            success = true;
-          } else {
-            const text = await response.text();
-            lastError = `HTTP ${response.status}: ${text}`;
-            // If it's an auth error, don't retry, just fail
-            if (response.status === 401) {
-              return { success: false, status: 401, error: 'unauthorized' };
-            }
-          }
-        } catch (err) {
-          lastError = err.message;
-          if (err.code === 'ECONNRESET' || err.message.includes('ECONNRESET')) {
-            log(`[http-upload] Connection reset (ECONNRESET) on chunk ${chunkIndex}. Will retry...`);
+        if (response.ok) {
+          const result = await response.json().catch(() => ({}));
+          log(`[http-upload] Successfully uploaded ${fileName} (${fileSize} bytes)`);
+          return { success: true, message: 'upload-complete', size: fileSize, ...result };
+        } else {
+          const text = await response.text();
+          lastError = `HTTP ${response.status}: ${text}`;
+          if (response.status === 401) {
+            return { success: false, status: 401, error: 'unauthorized' };
           }
         }
-        attempt++;
+      } catch (err) {
+        lastError = err.message;
+        log(`[http-upload] Upload error:`, err.message);
       }
-
-      if (!success) {
-        log(`[http-upload] Failed to upload chunk ${chunkIndex} after ${MAX_ATTEMPTS} attempts: ${lastError}`);
-        return { success: false, error: 'chunk-upload-failed', detail: lastError, chunkIndex };
-      }
-
-      // 4. Update manifest after successful chunk
-      upsertManifestEntry(fileName, { lastUploadedChunk: chunkIndex });
-      log(`[http-upload] successfully sent chunk ${chunkIndex + 1}/${totalChunks}`);
+      attempt++;
     }
 
-    return { success: true, message: 'upload-complete' };
+    log(`[http-upload] Failed to upload ${fileName} after ${MAX_ATTEMPTS} attempts: ${lastError}`);
+    return { success: false, error: 'upload-failed', detail: lastError };
   } catch (error) {
-    log(`[http-upload] fatal error:`, error?.message || error);
+    log(`[http-upload] Fatal error:`, error?.message || error);
     return { success: false, error: error?.message || 'http-upload-failed' };
   }
 }
+
+/**
+ * Request the recording server to merge all segments for the current user and date.
+ * Called automatically when user clocks out.
+ */
+async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
+  const config = getHttpUploadConfig();
+  if (!config?.url) {
+    log('[merge] No HTTP upload URL configured, skipping merge');
+    return { success: false, reason: 'http-not-configured' };
+  }
+
+  try {
+    // Build merge URL from the upload URL (replace /upload with /merge)
+    const baseUrl = config.url.replace(/\/upload\/?$/, '');
+    const mergeUrl = new URL('/merge', baseUrl);
+    mergeUrl.searchParams.set('agent', agentName);
+    mergeUrl.searchParams.set('date', date);
+    if (deleteOriginals) {
+      mergeUrl.searchParams.set('delete', 'true');
+    }
+
+    log(`[merge] Requesting merge for ${agentName} on ${date}: ${mergeUrl.toString()}`);
+
+    const response = await fetch(mergeUrl.toString(), {
+      method: 'GET',
+      headers: config.token ? { Authorization: `Bearer ${config.token}` } : {},
+      timeout: 120000 // 2 minutes for merge operation
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      log(`[merge] Merge successful:`, result);
+      return { success: true, result };
+    } else {
+      const errorText = await response.text().catch(() => '');
+      log(`[merge] Merge failed: ${response.status} ${errorText}`);
+      return { success: false, status: response.status, error: errorText };
+    }
+  } catch (error) {
+    log(`[merge] Merge request error:`, error?.message || error);
+    return { success: false, error: error?.message || 'merge-request-failed' };
+  }
+}
+
 
 function getGoogleSheetTabName() {
   const raw = (cachedAdminSettings?.googleSpreadsheetTabName || "Uploads").trim();
@@ -2255,7 +2464,8 @@ function stopBackgroundRecording() {
 function stopBackgroundRecordingAndFlush(options = {}) {
   if (!recorderWindow || recorderWindow.isDestroyed()) return Promise.resolve();
   if (recorderFlushWait) return recorderFlushWait;
-  const timeoutMs = Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 7000;
+  // Default to 60s (was 7s) to handle large 12hr+ recordings roughly 2-5GB
+  const timeoutMs = Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 60000;
   const payload = options?.payload || {};
   recorderFlushWait = new Promise((resolve) => {
     let settled = false;
@@ -2881,6 +3091,189 @@ function startCommandsWatch(uid) {
   });
 }
 
+// Helper to close open screen_lock entries in worklog (used by startAgentStatusLoop and handleScreenUnlock)
+async function closeOpenScreenLockEntry(uid) {
+  try {
+    const worklogsSnap = await db.collection('worklogs')
+      .where('userId', '==', uid)
+      .where('status', 'in', ['working', 'on_break', 'break'])
+      .limit(1)
+      .get();
+
+    if (!worklogsSnap.empty) {
+      const worklogDoc = worklogsSnap.docs[0];
+      const worklogData = worklogDoc.data() || {};
+      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+      log('[worklog] closeOpenScreenLockEntry found worklog:', worklogDoc.id, 'breaks:', breaks.length);
+      let updated = false;
+      // Close the last open 'screen_lock' entry
+      for (let i = breaks.length - 1; i >= 0; i--) {
+        if (breaks[i].cause === 'screen_lock' && !breaks[i].endTime) {
+          log('[worklog] Closing open screen_lock entry at index:', i);
+          breaks[i] = { ...breaks[i], endTime: Timestamp.now() };
+          updated = true;
+          // Continued to ensure ALL open duplicate entries are closed
+        }
+      }
+
+      if (updated) {
+        log('[worklog] Committing closed store for screen_lock...');
+        await worklogDoc.ref.update({
+          breaks,
+          lastEventTimestamp: FieldValue.serverTimestamp()
+        });
+        log('[worklog] Closed open screen_lock entry successfully');
+      } else {
+        log('[worklog] No open screen_lock entries found to close');
+      }
+    } else {
+      log('[worklog] closeOpenScreenLockEntry: No active worklog found for user:', uid);
+    }
+  } catch (e) {
+    log('[worklog] Failed to close screen_lock entry:', e?.message || e);
+  }
+}
+
+// Helper to add an idle break entry to the worklog breaks array
+async function addIdleBreakEntry(uid) {
+  try {
+    const worklogsSnap = await db.collection('worklogs')
+      .where('userId', '==', uid)
+      .where('status', 'in', ['working', 'on_break', 'break'])
+      .limit(1)
+      .get();
+
+    if (!worklogsSnap.empty) {
+      const worklogDoc = worklogsSnap.docs[0];
+      const worklogData = worklogDoc.data() || {};
+      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+      // Check if there's already an open idle entry to prevent duplicates
+      const hasOpenIdleEntry = breaks.some(b => b.cause === 'idle' && !b.endTime);
+      if (hasOpenIdleEntry) {
+        log('[worklog] addIdleBreakEntry: Open idle entry already exists, skipping');
+        return;
+      }
+
+      log('[worklog] addIdleBreakEntry: Adding idle break entry');
+
+      const idleEntry = {
+        startTime: Timestamp.now(),
+        endTime: null,
+        cause: 'idle',
+        isSystemEvent: false  // Idle is a break, not a system event like screen_lock
+      };
+
+      await worklogDoc.ref.update({
+        breaks: [...breaks, idleEntry],
+        lastEventTimestamp: FieldValue.serverTimestamp()
+      });
+
+      log('[worklog] addIdleBreakEntry: Added idle break entry successfully');
+    } else {
+      log('[worklog] addIdleBreakEntry: No active worklog found for user:', uid);
+    }
+  } catch (e) {
+    log('[worklog] Failed to add idle break entry:', e?.message || e);
+  }
+}
+
+// Helper to close open idle break entry when user becomes active
+async function closeOpenIdleEntry(uid) {
+  try {
+    const worklogsSnap = await db.collection('worklogs')
+      .where('userId', '==', uid)
+      .where('status', 'in', ['working', 'on_break', 'break'])
+      .limit(1)
+      .get();
+
+    if (!worklogsSnap.empty) {
+      const worklogDoc = worklogsSnap.docs[0];
+      const worklogData = worklogDoc.data() || {};
+      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+      let updated = false;
+      for (let i = breaks.length - 1; i >= 0; i--) {
+        if (breaks[i].cause === 'idle' && !breaks[i].endTime) {
+          log('[worklog] Closing open idle entry at index:', i);
+          breaks[i] = { ...breaks[i], endTime: Timestamp.now() };
+          updated = true;
+        }
+      }
+
+      if (updated) {
+        await worklogDoc.ref.update({
+          breaks,
+          lastEventTimestamp: FieldValue.serverTimestamp()
+        });
+        log('[worklog] Closed open idle entry successfully');
+      }
+    }
+  } catch (e) {
+    log('[worklog] Failed to close idle entry:', e?.message || e);
+  }
+}
+
+// Atomically transition from screen_lock to idle (close screen_lock and add idle with SAME timestamp)
+// This prevents 0-duration working gaps between the two entries
+async function transitionScreenLockToIdle(uid) {
+  try {
+    const worklogsSnap = await db.collection('worklogs')
+      .where('userId', '==', uid)
+      .where('status', 'in', ['working', 'on_break', 'break'])
+      .limit(1)
+      .get();
+
+    if (!worklogsSnap.empty) {
+      const worklogDoc = worklogsSnap.docs[0];
+      const worklogData = worklogDoc.data() || {};
+      let breaks = Array.isArray(worklogData.breaks) ? [...worklogData.breaks] : [];
+
+      // Use a single timestamp for both operations to prevent gaps
+      const transitionTime = Timestamp.now();
+      let closedScreenLock = false;
+
+      // Close any open screen_lock entries
+      for (let i = breaks.length - 1; i >= 0; i--) {
+        if (breaks[i].cause === 'screen_lock' && !breaks[i].endTime) {
+          log('[worklog] transitionScreenLockToIdle: Closing screen_lock at index:', i);
+          breaks[i] = { ...breaks[i], endTime: transitionTime };
+          closedScreenLock = true;
+        }
+      }
+
+      // Check if idle entry already exists
+      const hasOpenIdleEntry = breaks.some(b => b.cause === 'idle' && !b.endTime);
+
+      if (!hasOpenIdleEntry) {
+        // Add idle entry with the SAME timestamp as screen_lock close
+        const idleEntry = {
+          startTime: transitionTime,
+          endTime: null,
+          cause: 'idle',
+          isSystemEvent: false
+        };
+        breaks.push(idleEntry);
+        log('[worklog] transitionScreenLockToIdle: Added idle entry with same timestamp');
+      }
+
+      if (closedScreenLock || !hasOpenIdleEntry) {
+        await worklogDoc.ref.update({
+          breaks,
+          lastEventTimestamp: FieldValue.serverTimestamp()
+        });
+        log('[worklog] transitionScreenLockToIdle: Committed atomic transition');
+      }
+    } else {
+      // No screen_lock was open, just add idle entry
+      await addIdleBreakEntry(uid);
+    }
+  } catch (e) {
+    log('[worklog] transitionScreenLockToIdle failed:', e?.message || e);
+  }
+}
+
 // ---------- STATUS LOOP ----------
 function startAgentStatusLoop(uid) {
   if (statusInterval) clearInterval(statusInterval);
@@ -2912,13 +3305,8 @@ function startAgentStatusLoop(uid) {
       const shouldForceIdle = timedOutIdle;
       const idleReason = timedOutIdle ? 'auto_idle' : null;
 
-      // Debug log (helps distinguish system-lock vs inactivity)
-      console.log(
-        "⏱ Idle check → secs:", idleSecs,
-        "limit:", idleLimit,
-        "timedOutIdle:", timedOutIdle,
-        "lastIdleState:", lastIdleState
-      );
+      // Debug log disabled to reduce console noise
+      // console.log("⏱ Idle check → secs:", idleSecs, "limit:", idleLimit, "timedOutIdle:", timedOutIdle, "lastIdleState:", lastIdleState);
 
       // --------------------------------------------
       // Respect manualBreak flag in Firestore — if manualBreak is true, DO NOT perform idle transitions
@@ -2971,6 +3359,11 @@ function startAgentStatusLoop(uid) {
       // Idle detected (idleLimit>0)
       // --------------------------
       if (shouldForceIdle && !lastIdleState) {
+        // Atomically close screen_lock and add idle entry with same timestamp
+        // This prevents 0-duration working gaps when transitioning from screen_lock to idle
+        log("Idle detected - transitioning from screen_lock to idle...");
+        await transitionScreenLockToIdle(uid);
+
         lastIdleState = true;
         log("User idle detected — setting status to break");
         await pushIdleStatus(uid, { idleSecs, reason: idleReason });
@@ -2980,6 +3373,10 @@ function startAgentStatusLoop(uid) {
       if (!shouldForceIdle && lastIdleState) {
         lastIdleState = false;
         log("Idle cleared — setting status to online");
+
+        // Close open idle break entry
+        await closeOpenIdleEntry(uid);
+
         await pushActiveStatus(uid, { idleSecs });
         return;
       }
@@ -3518,7 +3915,8 @@ async function applyAgentStatus(status) {
     allowRecording: cachedAdminSettings?.allowRecording,
     recordingMode: cachedAdminSettings?.recordingMode,
     isRecordingActive,
-    agentClockedIn
+    agentClockedIn,
+    autoUpload: cachedAdminSettings?.autoUpload
   });
 
   const writeAgentStatusOrThrow = async (payload, label = "agentStatus_write") => {
@@ -3589,6 +3987,41 @@ async function applyAgentStatus(status) {
       await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
     } catch (_) { }
 
+    // Auto-merge recording segments on clock-out
+    try {
+      // Small delay to ensure all uploads have completed
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Fetch user display name from Firestore
+      let agentName = 'Unknown';
+      try {
+        const userDoc = await db.collection('users').doc(currentUid).get();
+        if (userDoc.exists) {
+          const data = userDoc.data();
+          agentName = (data.displayName || data.name || data.email || 'Unknown')
+            .replace(/[^a-zA-Z0-9_\-\s]/g, '_')
+            .trim();
+        }
+      } catch (e) {
+        log('[merge] Failed to fetch user name:', e?.message);
+      }
+
+      // Get today's date in ISO format
+      const now = new Date();
+      const isoDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+      // Request merge from recording server
+      const mergeResult = await requestSegmentMerge(agentName, isoDate, true);
+      if (mergeResult.success) {
+        log(`[merge] Segments merged successfully for ${agentName} on ${isoDate}`);
+      } else {
+        log(`[merge] Segment merge skipped or failed:`, mergeResult.reason || mergeResult.error);
+      }
+    } catch (mergeErr) {
+      log('[merge] Error during auto-merge:', mergeErr?.message || mergeErr);
+    }
+
+
     await writeAgentStatusOrThrow({
       status: 'offline',
       isIdle: false,
@@ -3622,6 +4055,13 @@ async function applyAgentStatus(status) {
         showRecordingPopup('Recording started');
         startBackgroundRecording();
         willRecord = true;
+        // Immediately set isRecording in Firestore to prevent race conditions with stale statuses
+        if (currentUid) {
+          db.collection('agentStatus').doc(currentUid).set({
+            isRecording: true,
+            lastUpdate: FieldValue.serverTimestamp()
+          }, { merge: true }).catch(() => { });
+        }
       } else {
         log('Online signal received, but recording is already active (ignoring)');
         willRecord = true;
@@ -3843,19 +4283,35 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     // This prevents ENOENT if an upload is deferred or retried.
     let buffer = Buffer.from(arrayBuffer);
     const recordingDurationMs = meta?.durationMs || null;
-    if (recordingDurationMs && recordingDurationMs > 0) {
-      try {
-        const blob = new Blob([buffer], { type: 'video/webm' });
-        const fixedBlob = await fixWebmDuration(blob, recordingDurationMs, { logger: false });
-        const fixedArrayBuffer = await fixedBlob.arrayBuffer();
-        buffer = Buffer.from(fixedArrayBuffer);
-        log("[recorder] Fixed WebM duration:", recordingDurationMs, "ms");
-      } catch (fixErr) {
-        log("[recorder] WebM duration fix failed (using original):", fixErr?.message || fixErr);
+
+    log("[recorder] Processing save for:", fileName,
+      "Size:", buffer.length,
+      "DurationMs:", recordingDurationMs,
+      "StopReason:", meta?.stopReason || 'unknown'
+    );
+
+    // DURATION FIX DISABLED - ts-ebml can't parse incrementally-written WebM files
+    // Videos upload correctly and play fine, just show 0:00 duration in some players
+    // If duration is critical, fix on the server with FFmpeg after upload
+    /*
+    try {
+      log("[recorder] Fixing WebM duration with ts-ebml...");
+      const result = await fixWebmDurationWithTsEbml(buffer);
+      buffer = result.buffer;
+      if (result.fixed) {
+        log("[recorder] ts-ebml duration fix success. Size:", buffer.length);
+      } else {
+        log("[recorder] ts-ebml duration fix skipped:", result.method, result.error || '');
       }
+    } catch (fixErr) {
+      log("[recorder] ts-ebml duration fix failed (using original):", fixErr?.message || fixErr);
     }
+    */
+
     await fs.promises.writeFile(filePath, buffer);
-    log("Saved recording to:", filePath);
+    const savedStat = await fs.promises.stat(filePath);
+    log("Saved recording to:", filePath, "Final on-disk size:", savedStat.size);
+
 
     // 2. NOW check for concurrency. 
     // If another task is already uploading this file, we stop here.
@@ -3866,6 +4322,7 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     activeUploads.add(fileName);
 
     const ownerUid = currentUid || meta?.ownerUid || null;
+    const ownerName = cachedDisplayName || meta?.ownerName || null;
 
     // File meta for manifest / retry logic.
     try {
@@ -3896,6 +4353,13 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
     if (shouldUploadToDropbox()) enabledTargets.push('dropbox');
     if (shouldUploadToGoogleSheets()) enabledTargets.push('googleSheets');
     if (shouldUploadToHttp()) enabledTargets.push('http');
+
+    log(`[recorder] Upload targets determined for ${fileName}:`, enabledTargets, {
+      autoUpload: cachedAdminSettings?.autoUpload,
+      dropbox: shouldUploadToDropbox(),
+      google: shouldUploadToGoogleSheets(),
+      http: shouldUploadToHttp()
+    });
 
     if (enabledTargets.includes('dropbox') && !isTargetUploaded(fileName, 'dropbox')) {
       const dropboxPath = `/recordings/${safeName}/${isoDate}/${isoTime}-${fileName}`;
@@ -3992,6 +4456,255 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
 
 ipcMain.handle("notify-recording-saved", async (_, fileName, arrayBuffer, meta = {}) => handleRecordingSaved(fileName, arrayBuffer, meta));
 ipcMain.handle("recorder-save", async (_event, fileName, arrayBuffer, meta = {}) => handleRecordingSaved(fileName, arrayBuffer, meta));
+
+// ---------- INCREMENTAL RECORDING IPC HANDLERS (for 2GB+ files) ----------
+// These handlers support streaming recording chunks directly to disk instead of
+// buffering everything in memory. This prevents OOM errors and timeout issues
+// for long recordings.
+
+// Active file handles for incremental writes
+const activeRecordingHandles = new Map(); // sourceId -> { fd: number, tempPath: string, bytesWritten: number }
+
+// Create a temp file for a recording source and return its path
+ipcMain.handle("recorder-create-temp-file", async (_event, sourceId, sourceName) => {
+  try {
+    const safeName = String(sourceName || 'screen').replace(/[^a-z0-9_\-]/gi, '_');
+    const tempFileName = `temp-${safeName}-${Date.now()}.webm`;
+    const tempPath = path.join(TEMP_RECORDINGS_DIR, tempFileName);
+
+    // Open file for writing (create if doesn't exist, truncate if exists)
+    const fd = fs.openSync(tempPath, 'w');
+
+    activeRecordingHandles.set(sourceId, { fd, tempPath, bytesWritten: 0, sourceName: safeName });
+    log(`[recorder] Created temp file for ${sourceId}: ${tempPath}`);
+
+    return { success: true, tempPath };
+  } catch (err) {
+    log(`[recorder] Failed to create temp file for ${sourceId}:`, err?.message || err);
+    return { success: false, error: err?.message || 'create-temp-failed' };
+  }
+});
+
+// Append a chunk buffer to the temp file (called frequently during recording)
+ipcMain.handle("recorder-append-chunk", async (_event, sourceId, chunkBuffer) => {
+  try {
+    const handle = activeRecordingHandles.get(sourceId);
+    if (!handle) {
+      // No active handle - might be a stale call, ignore
+      return { success: false, error: 'no-active-handle' };
+    }
+
+    const buffer = Buffer.from(chunkBuffer);
+    fs.writeSync(handle.fd, buffer);
+    handle.bytesWritten += buffer.length;
+
+    // Log progress every 10MB
+    if (handle.bytesWritten % (10 * 1024 * 1024) < buffer.length) {
+      log(`[recorder] ${handle.sourceName}: ${(handle.bytesWritten / (1024 * 1024)).toFixed(1)} MB written`);
+    }
+
+    return { success: true, bytesWritten: handle.bytesWritten };
+  } catch (err) {
+    log(`[recorder] Failed to append chunk for ${sourceId}:`, err?.message || err);
+    return { success: false, error: err?.message || 'append-failed' };
+  }
+});
+
+// Finalize: close file handle, move to recordings folder, trigger upload
+ipcMain.handle("recorder-finalize", async (_event, sourceId, meta = {}) => {
+  const handle = activeRecordingHandles.get(sourceId);
+  if (!handle) {
+    log(`[recorder] recorder-finalize: no handle for ${sourceId}`);
+    return { success: false, error: 'no-active-handle' };
+  }
+
+  try {
+    // Close the file descriptor
+    fs.closeSync(handle.fd);
+    log(`[recorder] Closed temp file for ${sourceId}: ${handle.bytesWritten} bytes`);
+
+    // Generate final filename
+    const finalFileName = `recording-${handle.sourceName}-${Date.now()}.webm`;
+    const finalPath = path.join(RECORDINGS_DIR, finalFileName);
+
+    // ADD TO ACTIVE UPLOADS IMMEDIATELY to prevent retry mechanism from uploading unfixed file
+    // This must happen BEFORE moving the file to the recordings folder
+    activeUploads.add(finalFileName);
+    log(`[recorder] Reserved upload slot for: ${finalFileName}`);
+
+    // Move from temp to final recordings folder
+    await fs.promises.rename(handle.tempPath, finalPath);
+    log(`[recorder] Moved recording to: ${finalPath}`);
+
+    // Clean up handle
+    activeRecordingHandles.delete(sourceId);
+
+    // Read file stats
+    const stat = await fs.promises.stat(finalPath);
+    const fileSizeBytes = stat.size;
+
+    // Check if file is valid (not empty)
+    if (fileSizeBytes < 1000) {
+      log(`[recorder] Warning: Recording file is very small (${fileSizeBytes} bytes)`);
+    }
+
+    // Trigger the upload flow (similar to handleRecordingSaved but without the arrayBuffer)
+    const shouldEvaluateAutoResume = Boolean(meta?.isLastSession && !meta?.suppressAutoResume);
+
+    try {
+      // FFmpeg repair DISABLED - causes delays and errors with incremental WebM files
+      /*
+      if (durationMs && durationMs > 0) {
+        try {
+          log("[recorder] Attempting FFmpeg repair on finalized file...");
+          const buffer = await fs.promises.readFile(finalPath);
+          const result = await repairWebmWithFfmpeg(buffer);
+          await fs.promises.writeFile(finalPath, result.buffer);
+          if (result.repaired) {
+            log("[recorder] FFmpeg repair success. New size:", result.buffer.length);
+          } else {
+            log("[recorder] FFmpeg repair skipped (file unchanged). Size:", result.buffer.length);
+          }
+        } catch (fixErr) {
+          log("[recorder] FFmpeg repair failed:", fixErr?.message || fixErr);
+        }
+      }
+      */
+
+      // DURATION FIX DISABLED - ts-ebml can't parse incrementally-written WebM files
+      // Videos upload correctly and play fine, just show 0:00 duration
+      // If duration is critical, fix on the server with FFmpeg after upload
+      /*
+      try {
+        log("[recorder] Fixing incremental WebM duration with ts-ebml...");
+        const buffer = await fs.promises.readFile(finalPath);
+        const result = await fixWebmDurationWithTsEbml(buffer);
+        if (result.fixed) {
+          await fs.promises.writeFile(finalPath, result.buffer);
+          log("[recorder] ts-ebml duration fix success. Size:", result.buffer.length);
+        } else {
+          log("[recorder] ts-ebml duration fix skipped:", result.method, result.error || '');
+        }
+      } catch (fixErr) {
+        log("[recorder] ts-ebml duration fix failed (using original):", fixErr?.message || fixErr);
+      }
+      */
+
+      // NOTE: activeUploads.add(finalFileName) was called earlier, before moving the file
+      // This prevents the retry mechanism from picking up the unfixed file
+
+      const ownerUid = currentUid || meta?.ownerUid || null;
+      const ownerName = cachedDisplayName || meta?.ownerName || null;
+
+      // Update manifest
+      try {
+        upsertManifestEntry(finalFileName, { size: fileSizeBytes, mtimeMs: stat.mtimeMs, ownerUid, ownerName });
+      } catch (_) { }
+
+      // Check if already completed
+      if (isRecordingCompleted(finalFileName)) {
+        try { await fs.promises.unlink(finalPath); } catch (_) { }
+        activeUploads.delete(finalFileName);
+        return { success: true, skipped: true, reason: 'already-completed' };
+      }
+
+      // Build upload path
+      const safeNameSource = ownerName || ownerUid || cachedDisplayName || currentUid || 'unknown';
+      const safeName = String(safeNameSource).replace(/[\/:*?"<>|]/g, '-');
+      let isoDate = getIsoDateFromMs(stat.mtimeMs);
+      let isoTime = getIsoTimeFromMs(stat.mtimeMs);
+      const googleDriveFileName = `${safeName}-${isoDate}-${isoTime}-${finalFileName}`.replace(/[\/:*?"<>|]/g, '-');
+      const uploadResults = [];
+
+      // Perform uploads
+      const enabledTargets = [];
+      if (shouldUploadToDropbox()) enabledTargets.push('dropbox');
+      if (shouldUploadToGoogleSheets()) enabledTargets.push('googleSheets');
+      if (shouldUploadToHttp()) enabledTargets.push('http');
+
+      log("[recorder] Upload targets:", enabledTargets.length ? enabledTargets.join(', ') : 'none');
+
+      // HTTP upload
+      if (shouldUploadToHttp()) {
+        try {
+          const httpRes = await uploadToHttpTarget({ filePath: finalPath, fileName: finalFileName, safeName, isoDate, isoTime });
+          uploadResults.push({ target: 'http', ...(httpRes || {}) });
+        } catch (e) {
+          uploadResults.push({ target: 'http', success: false, error: e?.message });
+        }
+      }
+
+      // Dropbox upload
+      if (shouldUploadToDropbox()) {
+        const dropboxFolder = cachedAdminSettings?.dropboxFolder || "/Recordings";
+        const dropboxPath = `${dropboxFolder}/${googleDriveFileName}`;
+        try {
+          const dbxRes = await uploadToDropboxWithPath(finalPath, dropboxPath);
+          uploadResults.push({ target: 'dropbox', ...(dbxRes || {}) });
+        } catch (e) {
+          uploadResults.push({ target: 'dropbox', success: false, error: e?.message });
+        }
+      }
+
+      // Google Sheets upload
+      if (shouldUploadToGoogleSheets()) {
+        try {
+          const gsRes = await uploadToGoogleSheets(finalPath, googleDriveFileName, fileSizeBytes);
+          uploadResults.push({ target: 'googleSheets', ...(gsRes || {}) });
+        } catch (e) {
+          uploadResults.push({ target: 'googleSheets', success: false, error: e?.message });
+        }
+      }
+
+      // If all uploads succeeded, cleanup
+      const allSuccess = uploadResults.length === 0 || uploadResults.every(r => r.success);
+      if (allSuccess) {
+        markRecordingCompleted(finalFileName);
+        try { await fs.promises.unlink(finalPath); } catch (_) { }
+        log("[recorder] All uploads successful, file deleted:", finalFileName);
+      }
+
+      activeUploads.delete(finalFileName);
+      if (shouldEvaluateAutoResume) {
+        scheduleAutoResumeRecording();
+      }
+
+      return { success: true, filePath: finalPath, uploads: uploadResults };
+
+    } catch (uploadErr) {
+      log("[recorder] Upload error:", uploadErr?.message || uploadErr);
+      activeUploads.delete(finalFileName);
+      if (shouldEvaluateAutoResume) {
+        scheduleAutoResumeRecording();
+      }
+      return { success: false, error: uploadErr?.message, filePath: finalPath };
+    }
+
+  } catch (err) {
+    log(`[recorder] Failed to finalize ${sourceId}:`, err?.message || err);
+    activeRecordingHandles.delete(sourceId);
+    return { success: false, error: err?.message || 'finalize-failed' };
+  }
+});
+
+// Cleanup any orphaned temp files on startup
+function cleanupOrphanedTempRecordings() {
+  try {
+    if (!fs.existsSync(TEMP_RECORDINGS_DIR)) return;
+    const entries = fs.readdirSync(TEMP_RECORDINGS_DIR);
+    for (const name of entries) {
+      try {
+        const fullPath = path.join(TEMP_RECORDINGS_DIR, name);
+        fs.unlinkSync(fullPath);
+        log(`[recorder] Cleaned up orphaned temp file: ${name}`);
+      } catch (_) { }
+    }
+  } catch (err) {
+    log("[recorder] Failed to cleanup temp recordings:", err?.message || err);
+  }
+}
+cleanupOrphanedTempRecordings();
+
 
 ipcMain.handle("get-idle-time", () => {
   let idleLimit = Number(cachedAdminSettings?.idleTimeout);
@@ -4411,7 +5124,7 @@ app.whenReady().then(() => {
     log(`[system] ${reason} detected; stopping recorder for flush`);
     try {
       await stopBackgroundRecordingAndFlush({
-        timeoutMs: 3000,
+        timeoutMs: 45000, // 45s (was 3s) - ample time for large file save before lock/suspend limits
         payload: { suppressAutoResume: true, stopReason: reason }
       });
       isRecordingActive = false; // Ensure flag is reset so it can resume on unlock
@@ -4421,65 +5134,112 @@ app.whenReady().then(() => {
     } catch (_) { }
   };
 
+  // Guard to prevent concurrent handleScreenLock executions (Windows can fire lock event multiple times)
+  let screenLockInFlight = false;
+
   // Handle Away status when screen is locked/unlocked
   const handleScreenLock = async () => {
-    handleSystemRecordingFlush('lock-screen');
-
-    // Only set Away status if user is clocked in and working
-    if (!currentUid || !agentClockedIn || manualBreakActive) return;
-
-    isAway = true;
-    log('[away] Screen locked - setting Away status');
-
-    try {
-      await db.collection('agentStatus').doc(currentUid).set({
-        status: 'away',
-        isAway: true,
-        awayReason: 'screen_lock',
-        awayStartedAt: FieldValue.serverTimestamp(),
-        lastUpdate: FieldValue.serverTimestamp()
-      }, { merge: true });
-    } catch (e) {
-      log('[away] Failed to set Away status:', e?.message || e);
+    if (isAway) return; // Prevent duplicate lock events
+    if (screenLockInFlight) {
+      log('[away] handleScreenLock already in flight, skipping duplicate event');
+      return;
     }
+    screenLockInFlight = true;
 
-    // Add system event entry for screen lock to the active worklog for activity logs
-    // This is marked as isSystemEvent so it appears in Time Entries but doesn't count as break time
     try {
-      log('[away] Looking for active worklog for user:', currentUid);
-      const worklogsSnap = await db.collection('worklogs')
-        .where('userId', '==', currentUid)
-        .where('status', 'in', ['working', 'on_break', 'break'])
-        .limit(1)
-        .get();
+      isAway = true;
 
-      if (!worklogsSnap.empty) {
-        const worklogDoc = worklogsSnap.docs[0];
-        const worklogData = worklogDoc.data() || {};
-        const existingBreaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+      handleSystemRecordingFlush('lock-screen');
 
-        log('[away] Found worklog:', worklogDoc.id, 'with', existingBreaks.length, 'existing breaks');
+      // Only set Away status if user is clocked in and working
+      if (!currentUid || !agentClockedIn || manualBreakActive) return;
 
-        // Add new system event entry for screen lock
-        // Note: Use Timestamp.now() instead of FieldValue.serverTimestamp() because
-        // Firestore doesn't support serverTimestamp inside arrays
-        const newEntry = {
-          startTime: Timestamp.now(),
-          endTime: null,
-          cause: 'screen_lock',
-          isSystemEvent: true  // Flag to distinguish from actual breaks
-        };
+      log('[away] Screen locked - setting Away status');
 
-        await worklogDoc.ref.update({
-          breaks: [...existingBreaks, newEntry],
-          lastEventTimestamp: FieldValue.serverTimestamp()
-        });
-        log('[away] Added screen_lock system event to worklog');
-      } else {
-        log('[away] No active worklog found for user - cannot add screen_lock event');
+      try {
+        await db.collection('agentStatus').doc(currentUid).set({
+          status: 'away',
+          isAway: true,
+          awayReason: 'screen_lock',
+          awayStartedAt: FieldValue.serverTimestamp(),
+          lastUpdate: FieldValue.serverTimestamp()
+        }, { merge: true });
+      } catch (e) {
+        log('[away] Failed to set Away status:', e?.message || e);
       }
-    } catch (e) {
-      log('[away] Failed to add screen_lock system event to worklog:', e?.message || e);
+
+      // Add system event entry for screen lock to the active worklog for activity logs
+      // Uses TRANSACTION to prevent race conditions and duplicate entries
+      try {
+        log('[away] Attempting transactional screen_lock write...');
+
+        // 1. Find the active worklog (Query outside transaction first)
+        // Client SDK transactions cannot run queries, only get(docRef).
+        const worklogsRef = db.collection('worklogs');
+        const q = worklogsRef
+          .where('userId', '==', currentUid)
+          .where('status', 'in', ['working', 'on_break', 'break'])
+          .limit(1);
+
+        const worklogsSnap = await q.get();
+
+        if (worklogsSnap.empty) {
+          log('[away] No active worklog found to add screen_lock');
+          return;
+        }
+
+        const activeDocRef = worklogsSnap.docs[0].ref;
+
+        await db.runTransaction(async (transaction) => {
+          // 2. Re-read the doc inside the transaction for consistency
+          const worklogDoc = await transaction.get(activeDocRef);
+
+          if (!worklogDoc.exists) {
+            throw "Worklog document disappeared";
+          }
+
+          const worklogData = worklogDoc.data() || {};
+
+          // Ensure it's still active (in case it closed since the query)
+          const currentStatus = worklogData.status;
+          if (!['working', 'on_break', 'break'].includes(currentStatus)) {
+            log('[away] Worklog no longer active inside transaction. Aborting.');
+            return;
+          }
+
+          const existingBreaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+          // 3. SAFETY: Strict Deduplication inside Transaction
+          if (existingBreaks.length > 0) {
+            const last = existingBreaks[existingBreaks.length - 1];
+            if (last.isSystemEvent && last.cause === 'screen_lock' && !last.endTime) {
+              log('[away] Transaction aborted: screen_lock event already exists');
+              return;
+            }
+          }
+
+          log('[away] Transaction: Found worklog', worklogDoc.id, 'adding screen_lock');
+
+          // 4. Add new system event entry
+          const newEntry = {
+            startTime: Timestamp.now(),
+            endTime: null,
+            cause: 'screen_lock',
+            isSystemEvent: true
+          };
+
+          transaction.update(activeDocRef, {
+            breaks: [...existingBreaks, newEntry],
+            lastEventTimestamp: FieldValue.serverTimestamp()
+          });
+        });
+
+        log('[away] Transaction committed successfully');
+      } catch (e) {
+        log('[away] Failed to add screen_lock system event (transaction failed):', e?.message || e);
+      }
+    } finally {
+      screenLockInFlight = false;
     }
   };
 
@@ -4503,41 +5263,7 @@ app.whenReady().then(() => {
     }
 
     // Close the open screen_lock system event entry in the worklog
-    try {
-      const worklogsSnap = await db.collection('worklogs')
-        .where('userId', '==', currentUid)
-        .where('status', 'in', ['working', 'on_break', 'break'])
-        .limit(1)
-        .get();
-
-      if (!worklogsSnap.empty) {
-        const worklogDoc = worklogsSnap.docs[0];
-        const worklogData = worklogDoc.data() || {};
-        const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
-
-        // Find the last open entry with cause 'screen_lock' and close it
-        // Note: Use Timestamp.now() instead of FieldValue.serverTimestamp() because
-        // Firestore doesn't support serverTimestamp inside arrays
-        let updated = false;
-        for (let i = breaks.length - 1; i >= 0; i--) {
-          if (breaks[i].cause === 'screen_lock' && !breaks[i].endTime) {
-            breaks[i] = { ...breaks[i], endTime: Timestamp.now() };
-            updated = true;
-            break;
-          }
-        }
-
-        if (updated) {
-          await worklogDoc.ref.update({
-            breaks,
-            lastEventTimestamp: FieldValue.serverTimestamp()
-          });
-          log('[away] Closed screen_lock system event in worklog');
-        }
-      }
-    } catch (e) {
-      log('[away] Failed to close screen_lock system event in worklog:', e?.message || e);
-    }
+    await closeOpenScreenLockEntry(currentUid);
 
     // Resume recording if needed after unlock
     if (agentClockedIn && !manualBreakActive) {

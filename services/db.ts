@@ -521,6 +521,17 @@ export const performClockOut = async (uid: string) => {
         activitiesUpdate = closeLatestActivityEntry(activeLog.activities, nowTs);
     }
 
+    // Close any open break entries
+    let breaksUpdate: any[] | undefined;
+    if (Array.isArray(activeLog.breaks) && activeLog.breaks.length > 0) {
+        breaksUpdate = activeLog.breaks.map((b: any, idx: number) => {
+            if (idx === activeLog.breaks!.length - 1 && !b.endTime) {
+                return { ...b, endTime: nowTs };
+            }
+            return b;
+        });
+    }
+
     const updatePayload: Record<string, any> = {
         status: 'clocked_out',
         clockOutTime: serverTimestamp(),
@@ -531,6 +542,10 @@ export const performClockOut = async (uid: string) => {
 
     if (activitiesUpdate) {
         updatePayload.activities = activitiesUpdate;
+    }
+
+    if (breaksUpdate) {
+        updatePayload.breaks = breaksUpdate;
     }
 
     await updateDoc(logDocRef, updatePayload);
@@ -967,6 +982,17 @@ export const forceLogoutAgent = async (uid: string) => {
 
     const forceLogoutRequestId = createForceLogoutRequestId();
 
+    // IMPORTANT: Read targetDesktopSessionId BEFORE performClockOut clears it!
+    // Otherwise the session targeting will fail and Electron will ignore the command.
+    let targetDesktopSessionId: string | null = null;
+    try {
+        const userSnap = await getDoc(doc(db, 'users', uid));
+        const data = userSnap.exists() ? (userSnap.data() as any) : null;
+        targetDesktopSessionId = data?.activeDesktopSessionId ? String(data.activeDesktopSessionId) : null;
+    } catch (_) {
+        // ignore
+    }
+
     try {
         await setDoc(doc(db, 'agentStatus', uid), {
             forceLogoutRequestId,
@@ -977,6 +1003,10 @@ export const forceLogoutAgent = async (uid: string) => {
         console.error('[forceLogoutAgent] Failed to persist force logout request metadata', error);
     }
 
+    // Note: performClockOut is called here from admin panel.
+    // The Electron app ALSO calls clock-out when it receives the forceLogout command.
+    // This is intentional: if Electron is offline, admin panel ensures clock-out happens.
+    // If Electron is online, its clock-out will find no active log (already clocked out).
     try {
         await performClockOut(uid);
     } catch (error) {
@@ -999,15 +1029,6 @@ export const forceLogoutAgent = async (uid: string) => {
     }
 
     try {
-        // Prefer session-targeted forceLogout (prevents clobbering a newly logged-in desktop).
-        let targetDesktopSessionId: string | null = null;
-        try {
-            const userSnap = await getDoc(doc(db, 'users', uid));
-            const data = userSnap.exists() ? (userSnap.data() as any) : null;
-            targetDesktopSessionId = data?.activeDesktopSessionId ? String(data.activeDesktopSessionId) : null;
-        } catch (_) {
-            // ignore
-        }
         await sendCommandToDesktop(uid, 'forceLogout', targetDesktopSessionId ? { targetDesktopSessionId } : {});
     } catch (error) {
         console.error('[forceLogoutAgent] Failed to dispatch force logout command to desktop', error);
