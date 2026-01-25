@@ -646,6 +646,7 @@ let rtdbConnectedCallback = null;
 let rtdbConnectedRef = null;
 let rtdbPresenceRef = null;
 let rtdbPresenceHeartbeatInterval = null;
+let sessionStartIsoDate = null;  // Tracks clock-in date for merge operations
 
 const ensureDesktopSessionId = () => {
   if (!desktopSessionId) {
@@ -1854,7 +1855,8 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     }
 
     const now = new Date();
-    const isoDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    // Use session start date if available (for night shifts), otherwise fallback to current date
+    const isoDate = sessionStartIsoDate || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
     // Fire and forget - don't wait for merge to complete
     requestSegmentMerge(agentName, isoDate, true)
@@ -1945,6 +1947,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   currentUid = null;
   currentShiftDate = null;
+  sessionStartIsoDate = null;
   lastAutoClockOutTargetKey = null;
   desktopSessionId = null;
 
@@ -4008,7 +4011,8 @@ async function applyAgentStatus(status) {
 
       // Get today's date in ISO format
       const now = new Date();
-      const isoDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      // Use session start date if available (for night shifts), otherwise fallback to current date
+      const isoDate = sessionStartIsoDate || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
       // Request merge from recording server
       const mergeResult = await requestSegmentMerge(agentName, isoDate, true);
@@ -4047,6 +4051,11 @@ async function applyAgentStatus(status) {
     const allowRecording = safeSettings.allowRecording !== false;
     const recordingMode = safeSettings.recordingMode || 'auto';
     log('[applyAgentStatus] working/online branch', { allowRecording, recordingMode, isRecordingActive });
+
+    // When user clocks in, capture the date for merge operations
+    if (!sessionStartIsoDate) {
+      sessionStartIsoDate = getIsoDateFromMs(Date.now());
+    }
 
     let willRecord = false;
     if (recordingMode === 'auto' && allowRecording) {
