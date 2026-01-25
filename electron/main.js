@@ -642,6 +642,7 @@ const DESKTOP_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 // RTDB presence (preferred for realtime "connected" state; supports onDisconnect)
 let desktopSessionId = null;
 let activeUploads = new Set(); // Concurrency lock to prevent parallel processing of the same file
+let activeMergeRequests = new Set(); // Concurrency lock to prevent parallel merge requests
 let rtdbConnectedCallback = null;
 let rtdbConnectedRef = null;
 let rtdbPresenceRef = null;
@@ -2203,6 +2204,13 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
  * Called automatically when user clocks out.
  */
 async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
+  const mergeKey = `${agentName}|${date}`;
+  if (activeMergeRequests.has(mergeKey)) {
+    log(`[merge] Skipping duplicate merge request for ${agentName} on ${date}`);
+    return { success: false, reason: 'merge-already-in-progress' };
+  }
+  activeMergeRequests.add(mergeKey);
+
   const config = getHttpUploadConfig();
   if (!config?.url) {
     log('[merge] No HTTP upload URL configured, skipping merge');
@@ -2236,9 +2244,10 @@ async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
       log(`[merge] Merge failed: ${response.status} ${errorText}`);
       return { success: false, status: response.status, error: errorText };
     }
-  } catch (error) {
     log(`[merge] Merge request error:`, error?.message || error);
     return { success: false, error: error?.message || 'merge-request-failed' };
+  } finally {
+    activeMergeRequests.delete(mergeKey);
   }
 }
 
