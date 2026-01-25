@@ -72,7 +72,7 @@ const DashboardPage: React.FC = () => {
             const targetUid = currentUidRef.current;
             if (!targetUid) return;
             try {
-                await performClockOut(targetUid);
+                await performClockOutAllActiveLogs(targetUid);
             } catch (error) {
                 console.error("[DashboardPage] Failed to sync auto clock-out", error);
                 setAutoClockOutMessage("Auto clock-out triggered, but we could not update your timesheet. Please review manually.");
