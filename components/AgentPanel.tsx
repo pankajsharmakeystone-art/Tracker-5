@@ -7,7 +7,7 @@ import { serverTimestamp, increment, Timestamp, doc, onSnapshot, deleteField } f
 import { db } from '../services/firebase';
 import type { WorkLog, Team, AdminSettingsType, ActivityEntry } from '../types';
 import Spinner from './Spinner';
-import ActivitySheet from './ActivitySheet';
+import ActivitySheet, { transformFirestoreWorklog } from './ActivitySheet';
 import AgentScheduleView from './AgentScheduleView';
 import TeamStatusView from './TeamStatusView';
 
@@ -30,50 +30,7 @@ const TabButton = ({ tabName, title, activeTab, setActiveTab }: { tabName: strin
     </button>
 );
 
-const deriveBreakCause = (entry: any): 'manual' | 'idle' => {
-    const raw = (entry?.cause || entry?.reason || entry?.type || entry?.source || '').toString().toLowerCase();
-    // Screen lock is a system event, not a manual break - categorize with idle/system
-    if (raw.includes('idle') || raw.includes('screen_lock') || raw.includes('lock')) return 'idle';
-    if (entry?.auto === true || entry?.isIdle === true || entry?.isSystemEvent === true) return 'idle';
-    return 'manual';
-};
-
-const deriveBreakDurations = (log: WorkLog, nowMs: number, getMillis: (ts: any) => number) => {
-    const breaks = Array.isArray((log as any)?.breaks) ? (log as any).breaks : [];
-    let manualSeconds = 0;
-    let idleSeconds = 0;
-    let accounted = false;
-
-    // When session is clocked out, don't add any live elapsed time
-    const isClockedOut = log.status === 'clocked_out';
-    // Use lastEventTimestamp as the cutoff for clocked out sessions
-    const lastEventMs = log.lastEventTimestamp ? getMillis(log.lastEventTimestamp) : nowMs;
-    const cutoffMs = isClockedOut ? lastEventMs : nowMs;
-
-    breaks.forEach((entry: any) => {
-        const startMs = entry?.startTime ? getMillis(entry.startTime) : null;
-        if (startMs == null) return;
-        const endMs = entry?.endTime ? getMillis(entry.endTime) : null;
-        // For open breaks, use cutoff (lastEvent for clocked out, now for active)
-        const effectiveEnd = endMs ?? cutoffMs;
-        if (effectiveEnd <= startMs) return;
-        accounted = true;
-        const duration = (effectiveEnd - startMs) / 1000;
-        if (deriveBreakCause(entry) === 'idle') idleSeconds += duration;
-        else manualSeconds += duration;
-    });
-
-    if (!accounted) {
-        manualSeconds = typeof log.totalBreakSeconds === 'number' ? log.totalBreakSeconds : 0;
-        const isOnBreak = log.status === 'on_break' || (log.status as any) === 'break';
-        // Only add live elapsed if actively on break (not clocked out)
-        if (isOnBreak && !isClockedOut && lastEventMs && nowMs > lastEventMs) {
-            manualSeconds += (nowMs - lastEventMs) / 1000;
-        }
-    }
-
-    return { manualSeconds, idleSeconds };
-};
+// Helper functions removed - using transformFirestoreWorklog for consistent calculation
 
 type SerializedActivity = ActivityEntry & Record<string, any>;
 
@@ -102,6 +59,14 @@ const transitionActivities = (
     closed.push(nextEntry);
     return closed;
 };
+
+const closeOpenBreaks = (entries: any[] = [], endTs: Timestamp) => (
+    entries.map((b: any) => (b && !b.endTime ? { ...b, endTime: endTs } : b))
+);
+
+const hasOpenBreak = (entries: any[] = [], causes?: Array<string>) => (
+    entries.some((b: any) => b && !b.endTime && (!causes || causes.includes(b.cause)))
+);
 
 const AgentPanel: React.FC = () => {
     const { userData } = useAuth();
@@ -171,6 +136,12 @@ const AgentPanel: React.FC = () => {
         if (ts instanceof Timestamp) return ts.toDate().getTime();
         if (typeof ts.toMillis === 'function') return ts.toMillis();
         if (typeof ts.toDate === 'function') return ts.toDate().getTime();
+        if (typeof ts === 'number') return ts;
+        if (typeof ts?.seconds === 'number') return ts.seconds * 1000;
+        if (typeof ts === 'string') {
+            const parsed = Date.parse(ts);
+            if (!Number.isNaN(parsed)) return parsed;
+        }
         return Date.now();
     }, []);
 
@@ -227,24 +198,22 @@ const AgentPanel: React.FC = () => {
         }
 
         const updateDisplays = () => {
-            const now = Date.now();
-            const lastEventTime = workLog.lastEventTimestamp ? getMillis(workLog.lastEventTimestamp) : null;
-            // Only count work time when status is 'working' AND not idle/on manual break/away
-            // This ensures mutual exclusivity between work/idle/break counters
-            const shouldCountWork = lastEventTime
-                && workLog.status === 'working'
-                && !isIdleRef.current
-                && !manualBreakRef.current
-                && !isAway;
-            if (shouldCountWork) {
-                const elapsed = Math.max(0, (now - lastEventTime) / 1000);
-                setDisplayWorkSeconds(workLog.totalWorkSeconds + elapsed);
-            } else {
-                setDisplayWorkSeconds(workLog.totalWorkSeconds);
+            // Use the same segment logic as Activity Sheet
+            const segments = transformFirestoreWorklog(workLog);
+
+            let totalWork = 0;
+            let totalBreak = 0;
+
+            for (const s of segments) {
+                if (s.type === 'Working') {
+                    totalWork += s.durationSeconds;
+                } else if (s.type === 'On Break' || s.type === 'System Event') {
+                    totalBreak += s.durationSeconds;
+                }
             }
 
-            const { manualSeconds, idleSeconds } = deriveBreakDurations(workLog, now, getMillis);
-            setDisplayBreakSeconds(manualSeconds + idleSeconds);
+            setDisplayWorkSeconds(totalWork);
+            setDisplayBreakSeconds(totalBreak);
         };
 
         updateDisplays();
@@ -275,35 +244,18 @@ const AgentPanel: React.FC = () => {
                 if (currentLog && !data.manualBreak) {
                     const getDuration = (ts: any) => (Date.now() - getMillis(ts)) / 1000;
 
-                    const getLastBreak = () => {
-                        const breaks = (currentLog as any)?.breaks;
-                        if (!Array.isArray(breaks) || breaks.length === 0) return null;
-                        return breaks[breaks.length - 1];
-                    };
-
-                    const lastBreak = getLastBreak();
-                    const hasOpenIdleBreak = Boolean(
-                        lastBreak &&
-                        !lastBreak?.endTime &&
-                        deriveBreakCause(lastBreak) === 'idle'
-                    );
+                    const hasOpenIdleBreak = hasOpenBreak(currentLog.breaks || [], ['idle', 'screen_lock']);
 
                     // Auto-Break on Idle
                     if (data.isIdle === true && currentLog.status === 'working') {
+                        if (hasOpenIdleBreak) return;
                         idleBreakActiveRef.current = true;
                         const wDur = getDuration(currentLog.lastEventTimestamp);
-                        const newBreaks = [...(currentLog.breaks || [])] as any[];
+                        let newBreaks = [...(currentLog.breaks || [])] as any[];
                         const idleStartTs = Timestamp.now();
 
-                        // ROBUSTNESS: Ensure any open screen_lock entry is closed locally before pushing idle break
-                        // This prevents React from overwriting Electron's parallel update with stale open-lock data
-                        if (newBreaks.length > 0) {
-                            const lastIdx = newBreaks.length - 1;
-                            const lastEntry = newBreaks[lastIdx];
-                            if (lastEntry.cause === 'screen_lock' && !lastEntry.endTime) {
-                                newBreaks[lastIdx] = { ...lastEntry, endTime: idleStartTs };
-                            }
-                        }
+                        // Close any open break to prevent overlap
+                        newBreaks = closeOpenBreaks(newBreaks, idleStartTs);
 
                         newBreaks.push({ startTime: idleStartTs, endTime: null, cause: 'idle' });
                         const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, idleStartTs, {
@@ -328,11 +280,9 @@ const AgentPanel: React.FC = () => {
                         idleBreakActiveRef.current = false;
                         // Don't auto-resume if it was a manual break (handled by manualBreak check above generally, but good to be safe)
                         const bDur = getDuration(currentLog.lastEventTimestamp);
-                        const newBreaks = [...(currentLog.breaks || [])];
+                        let newBreaks = [...(currentLog.breaks || [])];
                         const resumeTs = Timestamp.now();
-                        if (newBreaks.length > 0) {
-                            newBreaks[newBreaks.length - 1].endTime = resumeTs;
-                        }
+                        newBreaks = closeOpenBreaks(newBreaks, resumeTs);
                         const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, resumeTs, {
                             type: 'working',
                             startTime: resumeTs,
@@ -395,8 +345,8 @@ const AgentPanel: React.FC = () => {
         setLoading(true);
         try {
             const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
-            const newBreaks = [...(workLog.breaks || [])];
             const breakStartTs = Timestamp.now();
+            let newBreaks = closeOpenBreaks([...(workLog.breaks || [])], breakStartTs);
             newBreaks.push({ startTime: breakStartTs, endTime: null, cause: 'manual' });
 
             const activities = transitionActivities(workLog.activities as SerializedActivity[] | undefined, breakStartTs, {
@@ -429,9 +379,8 @@ const AgentPanel: React.FC = () => {
         setLoading(true);
         try {
             const dur = (Date.now() - getMillis(workLog.lastEventTimestamp)) / 1000;
-            const newBreaks = [...(workLog.breaks || [])];
             const breakEndTs = Timestamp.now();
-            if (newBreaks.length > 0) newBreaks[newBreaks.length - 1].endTime = breakEndTs;
+            let newBreaks = closeOpenBreaks([...(workLog.breaks || [])], breakEndTs);
 
             const activities = transitionActivities(workLog.activities as SerializedActivity[] | undefined, breakEndTs, {
                 type: 'working',

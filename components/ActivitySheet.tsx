@@ -23,6 +23,59 @@ export function transformFirestoreWorklog(docData: any): Array<{
         return new Date(ts).getTime();
     };
 
+    const normalizeBreaks = (rawBreaks: any[] = []) => {
+        const items = rawBreaks
+            .filter((b: any) => b && b.startTime)
+            .map((b: any) => {
+                const start = toDate(b.startTime);
+                const end = toDate(b.endTime);
+                if (!start) return null;
+                let endTime = end ?? null;
+                if (endTime && endTime.getTime() < start.getTime()) {
+                    endTime = new Date(start.getTime());
+                }
+                return {
+                    ...b,
+                    startTime: start,
+                    endTime
+                };
+            })
+            .filter(Boolean) as Array<{ startTime: Date; endTime: Date | null; cause?: any; isSystemEvent?: boolean }>;
+
+        items.sort((a, b) => a.startTime.getTime() - b.startTime.getTime());
+
+        const merged: Array<{ startTime: Date; endTime: Date | null; cause?: any; isSystemEvent?: boolean }> = [];
+        for (const item of items) {
+            if (!merged.length) {
+                merged.push({ ...item });
+                continue;
+            }
+
+            const last = merged[merged.length - 1];
+            const lastEndMs = last.endTime ? last.endTime.getTime() : null;
+            const itemStartMs = item.startTime.getTime();
+            const itemEndMs = item.endTime ? item.endTime.getTime() : null;
+
+            const overlaps = lastEndMs === null || itemStartMs <= lastEndMs;
+            if (overlaps) {
+                let newEndMs: number | null = lastEndMs;
+                if (lastEndMs === null) {
+                    newEndMs = itemEndMs ?? null;
+                } else if (itemEndMs !== null) {
+                    newEndMs = Math.max(lastEndMs, itemEndMs);
+                }
+                last.endTime = newEndMs !== null ? new Date(newEndMs) : null;
+                last.isSystemEvent = last.isSystemEvent || item.isSystemEvent;
+                if (!last.cause && item.cause) last.cause = item.cause;
+                continue;
+            }
+
+            merged.push({ ...item });
+        }
+
+        return merged;
+    };
+
     const normalizeClockOutTime = (clockOut: any, clockIn: any) => {
         if (!clockOut) return null;
         const startMs = getMillis(clockIn);
@@ -45,17 +98,15 @@ export function transformFirestoreWorklog(docData: any): Array<{
         // Collect all system events from breaks array
         const systemEvents: Array<{ startTime: Date; endTime: Date | null; cause?: string; }> = [];
         if (Array.isArray(docData.breaks)) {
-            docData.breaks
+            const normalizedBreaks = normalizeBreaks(docData.breaks);
+            normalizedBreaks
                 .filter((b: any) => b && b.startTime && b.isSystemEvent)
                 .forEach((b: any) => {
-                    const start = toDate(b.startTime);
-                    if (start) {
-                        systemEvents.push({
-                            startTime: start,
-                            endTime: toDate(b.endTime),
-                            cause: b.cause,
-                        });
-                    }
+                    systemEvents.push({
+                        startTime: b.startTime,
+                        endTime: b.endTime,
+                        cause: b.cause,
+                    });
                 });
         }
 
@@ -205,7 +256,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
 
         type BreakWithIndex = { entry: any; index: number };
 
-        const sortedBreaks = (docData.breaks || [])
+        const sortedBreaks = normalizeBreaks(docData.breaks || [])
             .map((entry: any, index: number): BreakWithIndex => ({ entry, index }))
             .filter(({ entry }: BreakWithIndex) => entry && entry.startTime)
             .sort((a: BreakWithIndex, b: BreakWithIndex) => {
@@ -215,8 +266,12 @@ export function transformFirestoreWorklog(docData: any): Array<{
             .map(({ entry }: BreakWithIndex) => entry);
 
         sortedBreaks.forEach((breakEntry: any) => {
-            const breakStart = toDate(breakEntry.startTime);
+            let breakStart = toDate(breakEntry.startTime);
             if (!breakStart) return;
+
+            if (cursor && breakStart.getTime() < cursor.getTime()) {
+                breakStart = new Date(cursor.getTime());
+            }
 
             // Debug: Log system events
             if (breakEntry?.isSystemEvent) {
@@ -227,7 +282,10 @@ export function transformFirestoreWorklog(docData: any): Array<{
                 pushWorkingSegment(cursor, breakStart);
             }
 
-            const breakEnd = toDate(breakEntry.endTime);
+            let breakEnd = toDate(breakEntry.endTime);
+            if (breakEnd && breakEnd.getTime() < breakStart.getTime()) {
+                breakEnd = new Date(breakStart.getTime());
+            }
             let durationSeconds = 0;
 
             if (breakEnd) {

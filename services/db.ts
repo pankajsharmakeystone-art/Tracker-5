@@ -568,6 +568,95 @@ export const performClockOut = async (uid: string) => {
     });
 };
 
+/**
+ * CLOCK OUT (ALL ACTIVE LOGS):
+ * Used for sign-out to ensure every active log for the user is closed.
+ */
+export const performClockOutAllActiveLogs = async (uid: string) => {
+    if (!uid) return;
+    const logsRef = collection(db, 'worklogs');
+    const q = query(
+        logsRef,
+        where("userId", "==", uid),
+        where("status", "in", ["working", "on_break", "break"])
+    );
+
+    const snapshot = await getDocs(q);
+    if (snapshot.empty) {
+        console.warn("No active logs found to clock out.");
+        return;
+    }
+
+    const nowTs = Timestamp.now();
+    const nowMillis = nowTs.toMillis();
+    const getMillis = (ts: any) => (ts?.toMillis ? ts.toMillis() : (ts?.toDate ? ts.toDate().getTime() : nowMillis));
+
+    const updatePromises = snapshot.docs.map(async (docSnap) => {
+        const data = docSnap.data() as any;
+
+        let workDuration = 0;
+        let breakDuration = 0;
+
+        if (data.lastEventTimestamp) {
+            const lastTime = getMillis(data.lastEventTimestamp);
+            const elapsed = Math.max(0, (nowMillis - lastTime) / 1000);
+
+            if (data.status === 'working') {
+                workDuration = elapsed;
+            } else if (data.status === 'on_break' || data.status === 'break') {
+                breakDuration = elapsed;
+            }
+        }
+
+        let activitiesUpdate: RawActivityEntry[] | undefined;
+        if (Array.isArray(data.activities)) {
+            activitiesUpdate = closeLatestActivityEntry(data.activities, nowTs);
+        }
+
+        let breaksUpdate: any[] | undefined;
+        if (Array.isArray(data.breaks) && data.breaks.length > 0) {
+            breaksUpdate = data.breaks.map((b: any, idx: number) => {
+                if (idx === data.breaks.length - 1 && !b.endTime) {
+                    return { ...b, endTime: nowTs };
+                }
+                return b;
+            });
+        }
+
+        const updatePayload: Record<string, any> = {
+            status: 'clocked_out',
+            clockOutTime: serverTimestamp(),
+            totalWorkSeconds: increment(workDuration),
+            totalBreakSeconds: increment(breakDuration),
+            lastEventTimestamp: serverTimestamp(),
+        };
+
+        if (activitiesUpdate) updatePayload.activities = activitiesUpdate;
+        if (breaksUpdate) updatePayload.breaks = breaksUpdate;
+
+        await updateDoc(docSnap.ref, updatePayload);
+    });
+
+    await Promise.all(updatePromises);
+
+    await updateAgentStatus(uid, 'offline', {
+        manualBreak: false,
+        breakStartedAt: deleteField()
+    });
+
+    const userDocRef = doc(db, 'users', uid);
+    await updateDoc(userDocRef, {
+        isLoggedIn: false,
+        activeSession: deleteField(),
+        activeDesktopSessionId: deleteField(),
+        activeDesktopDeviceId: deleteField(),
+        activeDesktopMachineName: deleteField(),
+        activeDesktopSessionStartedAt: deleteField(),
+        lastClockOut: serverTimestamp(),
+        sessionClearedAt: serverTimestamp()
+    });
+};
+
 export const updateWorkLog = async (logId: string, data: object) => {
     const logDocRef = doc(db, 'worklogs', logId);
     await updateDoc(logDocRef, data);

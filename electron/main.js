@@ -2024,6 +2024,29 @@ async function pushActiveStatus(uid, { idleSecs } = {}) {
   await resumeRecordingIfNeeded(uid);
 }
 
+async function pushAwayStatus(uid, { idleSecs } = {}) {
+  if (!uid) return;
+  const authed = await ensureDesktopAuth();
+  if (!authed) {
+    log('[pushAwayStatus] auth missing, skipping write');
+    return;
+  }
+  try {
+    await db.collection("agentStatus").doc(uid)
+      .set({
+        status: "away",
+        isIdle: false,
+        isAway: true,
+        awayReason: 'screen_lock',
+        idleSecs,
+        idleReason: FieldValue.delete(),
+        lockedBySystem: true,
+        lastUpdate: FieldValue.serverTimestamp()
+      }, { merge: true });
+    recordStatusWriteSuccess();
+  } catch (_) { }
+}
+
 autoUpdater.on("checking-for-update", () => emitAutoUpdateStatus("checking"));
 autoUpdater.on("update-available", (info) => emitAutoUpdateStatus("available", { version: info?.version }));
 autoUpdater.on("update-not-available", () => emitAutoUpdateStatus("up-to-date"));
@@ -2228,16 +2251,16 @@ async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
   }
 
   try {
-    // Build merge URL from the upload URL (replace /upload with /merge)
+    // Build merge URL from the upload URL (replace /upload with /merge-all)
     const baseUrl = config.url.replace(/\/upload\/?$/, '');
-    const mergeUrl = new URL('/merge', baseUrl);
+    const mergeUrl = new URL('/merge-all', baseUrl);
     mergeUrl.searchParams.set('agent', agentName);
     mergeUrl.searchParams.set('date', date);
     if (deleteOriginals) {
       mergeUrl.searchParams.set('delete', 'true');
     }
 
-    log(`[merge] Requesting merge for ${agentName} on ${date}: ${mergeUrl.toString()}`);
+    log(`[merge] Requesting per-screen merge for ${agentName} on ${date}: ${mergeUrl.toString()}`);
 
     const response = await fetch(mergeUrl.toString(), {
       method: 'GET',
@@ -3398,6 +3421,12 @@ function startAgentStatusLoop(uid) {
 
         // Close open idle break entry
         await closeOpenIdleEntry(uid);
+
+        if (isAway) {
+          log("Idle cleared while locked — setting status to away");
+          await pushAwayStatus(uid, { idleSecs });
+          return;
+        }
 
         await pushActiveStatus(uid, { idleSecs });
         return;

@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { logout } from '../services/auth';
 import { useAuth } from '../hooks/useAuth';
-import { updateAgentStatus, performClockOut } from '../services/db';
+import { updateAgentStatus, performClockOutAllActiveLogs } from '../services/db';
 import Spinner from '../components/Spinner';
 import AdminPanel from '../components/AdminPanel';
 import AgentPanel from '../components/AgentPanel';
@@ -106,6 +106,15 @@ const DashboardPage: React.FC = () => {
         if (signingOut) return;
         setSigningOut(true);
         try {
+            // Web-side clock out first (while auth is still valid)
+            if (currentUid) {
+                try {
+                    await withTimeout(performClockOutAllActiveLogs(currentUid), 3000);
+                } catch (e) {
+                    console.error("Error performing DB clock out:", e);
+                }
+            }
+
             if (window.desktopAPI && window.desktopAPI.requestSignOut) {
                 try {
                     await window.desktopAPI.requestSignOut();
@@ -124,15 +133,6 @@ const DashboardPage: React.FC = () => {
                 }
             })();
             await Promise.race([desktopClockOut, new Promise((resolve) => setTimeout(resolve, 5000))]);
-
-            // Web-side clock out + logout
-            if (currentUid) {
-                 try {
-                     await withTimeout(performClockOut(currentUid), 2500);
-                 } catch (e) {
-                     console.error("Error performing DB clock out:", e);
-                 }
-            }
             await performLogout();
         } finally {
             setSigningOut(false);
