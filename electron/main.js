@@ -1824,7 +1824,17 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
         status: 'clocked_out',
         clockOutTime: FieldValue.serverTimestamp(),
         lastEventTimestamp: FieldValue.serverTimestamp(),
-        breaks
+        breaks,
+        activities: (() => {
+          const activities = Array.isArray(worklogData.activities) ? worklogData.activities : [];
+          if (activities.length > 0) {
+            const last = activities[activities.length - 1];
+            if (!last.endTime) {
+              activities[activities.length - 1] = { ...last, endTime: FieldValue.serverTimestamp() };
+            }
+          }
+          return activities;
+        })()
       });
       log('[clockOutAndSignOutDesktop] Worklog updated to clocked_out');
     }

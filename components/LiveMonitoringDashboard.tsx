@@ -8,7 +8,7 @@ import { useAuth } from '../hooks/useAuth';
 import type { WorkLog } from '../types';
 import Spinner from './Spinner';
 import LiveStreamModal from './LiveStreamModal';
-import ActivitySheet from './ActivitySheet';
+import ActivitySheet, { transformFirestoreWorklog } from './ActivitySheet';
 
 interface Props {
     teamId?: string;
@@ -53,118 +53,7 @@ const toDatetimeLocal = (timestamp: Timestamp | null | undefined) => {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
 
-const getMillis = (value: any): number | null => {
-    if (!value) return null;
-    try {
-        if (value instanceof Timestamp) return value.toMillis();
-        if (typeof value.toMillis === 'function') return value.toMillis();
-        if (typeof value.toDate === 'function') return value.toDate().getTime();
-        if (value instanceof Date) return value.getTime();
-        if (typeof value === 'number') return value;
-    } catch (error) {
-        console.warn('[LiveMonitoringDashboard] Failed to normalize timestamp', error);
-    }
-    return null;
-};
-
-const normalizeBreakCause = (entry: any): 'manual' | 'idle' => {
-    const raw = (entry?.cause || entry?.reason || entry?.type || entry?.source || '').toString().toLowerCase();
-    // Screen lock is a system event, not a manual break - categorize with idle/system
-    if (raw.includes('idle') || raw.includes('screen_lock') || raw.includes('lock')) return 'idle';
-    if (entry?.auto === true || entry?.isIdle === true || entry?.isSystemEvent === true) return 'idle';
-    return 'manual';
-};
-
-// Sum actual working time from activities array (only counts tracked work, not gaps)
-const sumWorkingFromActivities = (activities: any[], cutoffMs?: number): number | null => {
-    if (!Array.isArray(activities) || activities.length === 0) return null;
-    let totalSeconds = 0;
-    for (const entry of activities) {
-        const type = (entry.type || 'working').toLowerCase();
-        // Only count 'working' type entries (skip breaks, system events)
-        if (type !== 'working') continue;
-        if (entry.isSystemEvent || entry.cause) continue;
-        const startMs = getMillis(entry.startTime);
-        const endMs = entry.endTime ? getMillis(entry.endTime) : cutoffMs;
-        if (startMs && endMs && endMs > startMs) {
-            totalSeconds += (endMs - startMs) / 1000;
-        }
-    }
-    return totalSeconds;
-};
-
-// Sum idle and manual breaks from activities array (more reliable than breaks array)
-const sumBreaksFromActivities = (activities: any[], cutoffMs?: number): { manualSeconds: number; idleSeconds: number } | null => {
-    if (!Array.isArray(activities) || activities.length === 0) return null;
-    let manualSeconds = 0;
-    let idleSeconds = 0;
-    for (const entry of activities) {
-        const type = (entry.type || '').toLowerCase();
-        // Only count 'on_break' type entries
-        if (type !== 'on_break') continue;
-        const startMs = getMillis(entry.startTime);
-        const endMs = entry.endTime ? getMillis(entry.endTime) : cutoffMs;
-        if (startMs && endMs && endMs > startMs) {
-            const duration = (endMs - startMs) / 1000;
-            const cause = (entry.cause || '').toLowerCase();
-            if (cause === 'idle' || cause === 'screen_lock' || entry.isSystemEvent) {
-                idleSeconds += duration;
-            } else {
-                manualSeconds += duration;
-            }
-        }
-    }
-    return { manualSeconds, idleSeconds };
-};
-
-
-
-const aggregateBreakSeconds = (log: WorkLog, nowMs: number) => {
-    const isClockedOut = log.status === 'clocked_out';
-    const cutoffMs = isClockedOut
-        ? (getMillis(log.lastEventTimestamp as any) ?? nowMs)
-        : nowMs;
-
-    // For closed sessions, prefer activities array (more reliable than breaks array)
-    if (isClockedOut) {
-        const fromActivities = sumBreaksFromActivities(
-            (log as any).activities,
-            cutoffMs
-        );
-        if (fromActivities !== null) {
-            return fromActivities;
-        }
-    }
-
-    // Fallback: use breaks array (for active sessions or when activities not available)
-    const breaks = Array.isArray((log as any)?.breaks) ? (log as any).breaks : [];
-    let manualSeconds = 0;
-    let idleSeconds = 0;
-    let accounted = false;
-
-    breaks.forEach((entry: any) => {
-        const startMs = getMillis(entry?.startTime);
-        if (startMs == null) return;
-        const endMs = entry?.endTime ? getMillis(entry.endTime) : null;
-        const effectiveEnd = endMs ?? cutoffMs;
-        if (effectiveEnd <= startMs) return;
-        accounted = true;
-        const duration = (effectiveEnd - startMs) / 1000;
-        if (normalizeBreakCause(entry) === 'idle') idleSeconds += duration;
-        else manualSeconds += duration;
-    });
-
-    if (!accounted) {
-        manualSeconds = typeof log.totalBreakSeconds === 'number' ? log.totalBreakSeconds : 0;
-        const isOnBreak = log.status === 'on_break' || (log.status as any) === 'break';
-        const lastEventMs = getMillis(log.lastEventTimestamp as any);
-        if (isOnBreak && !isClockedOut && lastEventMs != null && nowMs > lastEventMs) {
-            manualSeconds += (nowMs - lastEventMs) / 1000;
-        }
-    }
-
-    return { manualSeconds, idleSeconds };
-};
+// Helper functions removed as we now use transformFirestoreWorklog for consistent calculation
 
 
 const OVERNIGHT_THRESHOLD_MINUTES = 12 * 60;
@@ -485,41 +374,30 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             const isActive = log.status !== 'clocked_out';
             const isZombie = isSessionStale(log) && isActive;
 
-            const { manualSeconds, idleSeconds } = aggregateBreakSeconds(log, now);
-            const totalBreak = manualSeconds + idleSeconds;
+            // Use the shared transformer to calculate durations exactly like the Activity Sheet
+            const segments = transformFirestoreWorklog(log);
 
-            let totalWork = log.totalWorkSeconds;
+            let totalWork = 0;
+            let manualSeconds = 0;
+            let idleSeconds = 0;
 
-            // For closed sessions, sum actual working time from activities array
-            // This ensures untracked gaps (e.g. desktop app not running) don't count as work
-            if (!isActive) {
-                const activitiesWork = sumWorkingFromActivities(
-                    (log as any).activities,
-                    getMillis(log.clockOutTime) ?? undefined
-                );
-                if (activitiesWork !== null && activitiesWork > 0) {
-                    totalWork = activitiesWork;
-                } else {
-                    // Fallback to stored value if no activities
-                    totalWork = log.totalWorkSeconds || 0;
-                }
-            } else if (!isZombie && log.lastEventTimestamp) {
-                // For active sessions, add live elapsed time (real-time display)
-                const lastTime = (log.lastEventTimestamp as any).toMillis
-                    ? (log.lastEventTimestamp as any).toMillis()
-                    : (log.lastEventTimestamp as any).toDate().getTime();
-
-                const elapsed = Math.max(0, (now - lastTime) / 1000);
-
-                // Only count work time if status is 'working' AND not idle/on manual break
-                // This ensures mutual exclusivity between work/idle/break counters
-                const isAgentIdle = desktopStatus?.isIdle === true;
-                const isAgentOnManualBreak = desktopStatus?.manualBreak === true;
-                const isAgentAway = desktopStatus?.isAway === true;
-                if (log.status === 'working' && !isAgentIdle && !isAgentOnManualBreak && !isAgentAway) {
-                    totalWork += elapsed;
+            for (const s of segments) {
+                if (s.type === 'Working') {
+                    totalWork += s.durationSeconds;
+                } else if (s.type === 'System Event') {
+                    idleSeconds += s.durationSeconds;
+                } else if (s.type === 'On Break') {
+                    // Match ActivitySheet cause logic
+                    if (s.cause === 'idle' || s.cause === 'screen_lock' || s.cause === 'away') {
+                        idleSeconds += s.durationSeconds;
+                    } else {
+                        // assume manual if not explicitly idle-like
+                        manualSeconds += s.durationSeconds;
+                    }
                 }
             }
+
+            const totalBreak = manualSeconds + idleSeconds;
 
             // Check if this log started on a previous day
             let isOvernight = false;
