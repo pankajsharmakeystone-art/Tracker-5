@@ -523,6 +523,8 @@ const server = http.createServer(async (req, res) => {
   const agentName = req.headers['x-agent-name'];
   const fileName = req.headers['x-file-name'];
   const isoDate = normalizeIsoDate(req.headers['x-iso-date']) || new Date().toISOString().slice(0, 10);
+  const repairHeader = String(req.headers['x-ffmpeg-repair'] ?? 'true').toLowerCase();
+  const shouldRepairWithFfmpeg = repairHeader !== 'false';
   const expectedSize = parseInt(req.headers['x-file-size'], 10);
   const expectedHash = req.headers['x-file-hash'];
 
@@ -569,9 +571,13 @@ const server = http.createServer(async (req, res) => {
     console.log(`[recording-receiver] Saved ${fileName} (${receivedSize} bytes) to ${targetPath}`);
 
     // Fix WebM duration metadata (runs async, doesn't block response)
-    fixWebmDurationWithFfmpeg(targetPath).catch(err => {
-      console.error(`[recording-receiver] FFmpeg fix failed for ${fileName}:`, err);
-    });
+    if (shouldRepairWithFfmpeg) {
+      fixWebmDurationWithFfmpeg(targetPath).catch(err => {
+        console.error(`[recording-receiver] FFmpeg fix failed for ${fileName}:`, err);
+      });
+    } else {
+      console.log(`[recording-receiver] FFmpeg repair disabled for ${fileName}`);
+    }
 
     sendJson(res, 200, {
       success: true,

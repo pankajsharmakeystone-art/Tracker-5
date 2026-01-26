@@ -113,6 +113,7 @@ export interface AdminSettingsType {
     uploadToHttp?: boolean;
     httpUploadUrl?: string;
     httpUploadToken?: string;
+    httpUploadFfmpegRepairEnabled?: boolean;
     googleServiceAccountJson?: string;
     googleSpreadsheetId?: string;
     googleSpreadsheetTabName?: string;

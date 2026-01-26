@@ -74,6 +74,7 @@ const AdminSettings: React.FC = () => {
         dropboxAppSecret: '',
         httpUploadUrl: '',
         httpUploadToken: '',
+        httpUploadFfmpegRepairEnabled: true,
         googleServiceAccountJson: '',
         googleSpreadsheetId: '',
         googleSpreadsheetTabName: 'Uploads',
@@ -508,6 +509,14 @@ const AdminSettings: React.FC = () => {
                                 onChange={handleInputChange}
                                 className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
                                 placeholder="Optional token"
+                            />
+                        </FormField>
+
+                        <FormField label="FFmpeg Repair After Upload" description="Run server-side FFmpeg remux to fix WebM duration metadata after HTTP uploads.">
+                            <ToggleSwitch
+                                id="httpUploadFfmpegRepairEnabled"
+                                checked={settings.httpUploadFfmpegRepairEnabled ?? true}
+                                onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, httpUploadFfmpegRepairEnabled: e.target.checked }))}
                             />
                         </FormField>
                     </>

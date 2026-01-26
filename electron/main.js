@@ -2154,6 +2154,7 @@ function shouldUploadToHttp() {
 async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTime }) {
   const config = getHttpUploadConfig();
   if (!config?.url) return { success: false, reason: 'http-not-configured' };
+  const shouldRepair = cachedAdminSettings?.httpUploadFfmpegRepairEnabled ?? true;
 
   try {
     // 1. Pre-flight Ping: Verify server is reachable
@@ -2183,7 +2184,8 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
       'x-iso-date': isoDate,
       'x-iso-time': isoTime,
       'x-file-size': fileSize.toString(),
-      'x-file-hash': fileHash
+      'x-file-hash': fileHash,
+      'x-ffmpeg-repair': shouldRepair ? 'true' : 'false'
     };
 
     if (config.token) {
