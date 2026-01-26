@@ -44,6 +44,10 @@ const sendJson = (res, status, payload) => {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body)
+    ,
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization,Content-Type'
   });
   res.end(body);
 };
@@ -137,7 +141,10 @@ async function mergeSegments(segmentPaths, outputPath) {
 
     // Create concat list file
     const listPath = outputPath + '.concat.txt';
-    const listContent = segmentPaths.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join('\n');
+    const listContent = segmentPaths
+      .map(p => p.replace(/\\/g, '/'))
+      .map(p => `file '${p.replace(/'/g, "'\\''")}'`)
+      .join('\n');
 
     try {
       await fs.promises.writeFile(listPath, listContent, 'utf8');
@@ -193,9 +200,45 @@ function extractTimestamp(filename) {
 
 // Extract screen identifier from filename
 function extractScreenId(filename) {
+  const base = filename
+    .replace(/\.webm$/i, '')
+    .replace(/-\d{13}$/i, '')
+    .replace(/^recording-?/i, '');
+
   const screenPattern = /(?:screen|display|monitor)[-_]?(\d+)/i;
-  const match = filename.match(screenPattern);
-  return match ? `screen${match[1]}` : 'default';
+  const match = base.match(screenPattern);
+  if (match) return `screen${match[1]}`;
+
+  // If name indicates a screen but no numeric suffix, group as screen0
+  if (/(screen|display|monitor)/i.test(base)) return 'screen0';
+
+  return 'default';
+}
+
+async function isValidWebmHeader(filePath) {
+  try {
+    const fh = await fs.promises.open(filePath, 'r');
+    const buffer = Buffer.alloc(4);
+    await fh.read(buffer, 0, 4, 0);
+    await fh.close();
+    return buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function filterValidSegments(segments) {
+  const valid = [];
+  const invalid = [];
+  for (const seg of segments) {
+    const ok = await isValidWebmHeader(seg.path);
+    if (ok) valid.push(seg);
+    else invalid.push(seg);
+  }
+  if (invalid.length) {
+    console.warn(`[recording-receiver] Skipping ${invalid.length} invalid WebM segment(s):`, invalid.map(s => s.name));
+  }
+  return { valid, invalid };
 }
 
 // Find all segment files for a given agent/date, optionally filtered by pattern
@@ -261,6 +304,10 @@ function groupSegmentsByScreen(segments) {
 
 
 const server = http.createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
 
@@ -294,6 +341,7 @@ const server = http.createServer(async (req, res) => {
       const date = url.searchParams.get('date') || new Date().toISOString().slice(0, 10);
       const pattern = url.searchParams.get('pattern');
       const deleteAfter = url.searchParams.get('delete') === 'true';
+      const cleanupInvalid = url.searchParams.get('cleanupInvalid') === 'true';
 
       if (!agent) {
         sendJson(res, 400, { success: false, error: 'missing-agent-param' });
@@ -306,7 +354,23 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const segmentPaths = found.segments.map(s => s.path);
+      const { valid: validSegments, invalid: invalidSegments } = await filterValidSegments(found.segments);
+      if (!validSegments.length) {
+        if (cleanupInvalid && invalidSegments.length) {
+          for (const seg of invalidSegments) {
+            try { await fs.promises.unlink(seg.path); } catch (_) { }
+          }
+        }
+        sendJson(res, 400, {
+          success: false,
+          error: 'no-valid-segments',
+          invalidSegments: invalidSegments.map(s => s.name),
+          cleanedInvalid: cleanupInvalid ? invalidSegments.length : 0
+        });
+        return;
+      }
+
+      const segmentPaths = validSegments.map(s => s.path);
       const outputName = `merged-${sanitizeSegment(agent)}-${date}-${Date.now()}.webm`;
       const outputPath = path.join(found.folder, outputName);
 
@@ -320,9 +384,17 @@ const server = http.createServer(async (req, res) => {
         console.log(`[recording-receiver] Deleted ${segmentPaths.length} segments after merge`);
       }
 
+      if (cleanupInvalid && invalidSegments.length) {
+        for (const seg of invalidSegments) {
+          try { await fs.promises.unlink(seg.path); } catch (_) { }
+        }
+      }
+
       sendJson(res, mergeResult.success ? 200 : 500, {
         ...mergeResult,
-        segmentNames: found.segments.map(s => s.name),
+        segmentNames: validSegments.map(s => s.name),
+        invalidSegments: invalidSegments.map(s => s.name),
+        cleanedInvalid: cleanupInvalid ? invalidSegments.length : 0,
         deletedSegments: deleteAfter && mergeResult.success
       });
       return;
@@ -335,6 +407,7 @@ const server = http.createServer(async (req, res) => {
       const agent = url.searchParams.get('agent');
       const date = url.searchParams.get('date') || new Date().toISOString().slice(0, 10);
       const deleteAfter = url.searchParams.get('delete') === 'true';
+      const cleanupInvalid = url.searchParams.get('cleanupInvalid') === 'true';
 
       if (!agent) {
         sendJson(res, 400, { success: false, error: 'missing-agent-param' });
@@ -355,7 +428,26 @@ const server = http.createServer(async (req, res) => {
       console.log(`[recording-receiver] Found ${screenGroups.size} screen group(s): ${[...screenGroups.keys()].join(', ')}`);
 
       for (const [screenId, segments] of screenGroups) {
-        const segmentPaths = segments.map(s => s.path);
+        const { valid: validSegments, invalid: invalidSegments } = await filterValidSegments(segments);
+        if (!validSegments.length) {
+          if (cleanupInvalid && invalidSegments.length) {
+            for (const seg of invalidSegments) {
+              try { await fs.promises.unlink(seg.path); } catch (_) { }
+            }
+          }
+          results.push({
+            screenId,
+            success: false,
+            error: 'no-valid-segments',
+            segmentCount: 0,
+            segmentNames: [],
+            invalidSegments: invalidSegments.map(s => s.name),
+            cleanedInvalid: cleanupInvalid ? invalidSegments.length : 0
+          });
+          continue;
+        }
+
+        const segmentPaths = validSegments.map(s => s.path);
         const outputName = `merged-${sanitizeSegment(agent)}-${screenId}-${date}-${Date.now()}.webm`;
         const outputPath = path.join(found.folder, outputName);
 
@@ -364,8 +456,9 @@ const server = http.createServer(async (req, res) => {
         results.push({
           screenId,
           ...mergeResult,
-          segmentCount: segments.length,
-          segmentNames: segments.map(s => s.name)
+          segmentCount: validSegments.length,
+          segmentNames: validSegments.map(s => s.name),
+          invalidSegments: invalidSegments.map(s => s.name)
         });
 
         if (mergeResult.success && deleteAfter) {
@@ -374,6 +467,12 @@ const server = http.createServer(async (req, res) => {
               await fs.promises.unlink(segPath);
               allDeletedPaths.push(segPath);
             } catch (_) { }
+          }
+        }
+
+        if (cleanupInvalid && invalidSegments.length) {
+          for (const seg of invalidSegments) {
+            try { await fs.promises.unlink(seg.path); } catch (_) { }
           }
         }
       }
@@ -394,6 +493,16 @@ const server = http.createServer(async (req, res) => {
 
     // Unknown GET path
     sendJson(res, 404, { error: 'not-found' });
+    return;
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization,Content-Type'
+    });
+    res.end();
     return;
   }
 

@@ -95,12 +95,12 @@ export function transformFirestoreWorklog(docData: any): Array<{
         const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
         const nowMs = nowDate.getTime();
 
-        // Collect all system events from breaks array
+        // Collect system/idle events from breaks array
         const systemEvents: Array<{ startTime: Date; endTime: Date | null; cause?: string; }> = [];
         if (Array.isArray(docData.breaks)) {
             const normalizedBreaks = normalizeBreaks(docData.breaks);
             normalizedBreaks
-                .filter((b: any) => b && b.startTime && b.isSystemEvent)
+                .filter((b: any) => b && b.startTime && (b.isSystemEvent || b.cause === 'idle' || b.cause === 'screen_lock' || b.cause === 'away'))
                 .forEach((b: any) => {
                     systemEvents.push({
                         startTime: b.startTime,
@@ -130,7 +130,8 @@ export function transformFirestoreWorklog(docData: any): Array<{
                 const activityStart = toDate(entry.startTime);
                 if (!activityStart) return;
                 const activityEnd = toDate(entry.endTime) ?? nowDate;
-                const normalizedType = (entry.type || '').toLowerCase() === 'on_break' ? 'On Break' : 'Working';
+                const rawType = (entry.type || '').toString().toLowerCase();
+                const normalizedType = (rawType === 'on_break' || rawType === 'break') ? 'On Break' : 'Working';
                 const isBreak = normalizedType === 'On Break';
 
                 // If it's a break or already a system event, add directly
@@ -173,15 +174,17 @@ export function transformFirestoreWorklog(docData: any): Array<{
                         });
                     }
 
-                    // Add the system event
+                    // Add the system/idle event
                     const sysDuration = (sysEndMs - sysStartMs) / 1000;
+                    const isScreenLock = sysEvent.cause === 'screen_lock';
+                    const isIdleLike = sysEvent.cause === 'idle' || sysEvent.cause === 'away';
                     segments.push({
-                        type: 'System Event',
+                        type: isScreenLock ? 'System Event' : 'On Break',
                         startTime: sysEvent.startTime,
                         endTime: sysEvent.endTime,
                         durationSeconds: Math.max(0, sysDuration),
-                        cause: sysEvent.cause as 'screen_lock' | undefined,
-                        isSystemEvent: true,
+                        cause: sysEvent.cause as 'idle' | 'away' | 'screen_lock' | undefined,
+                        isSystemEvent: isScreenLock,
                     });
 
                     // Move cursor past the system event
@@ -452,7 +455,7 @@ const ActivitySheet: React.FC<{ workLog: any, timezone?: string }> = ({ workLog,
                                         <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                                         </svg>
-                                        System Event: Screen Locked
+                                        {seg.cause === 'screen_lock' ? 'System Event: Screen Locked' : 'System Event'}
                                     </span>
                                 ) : (
                                     <span className="text-yellow-800 dark:text-yellow-300 font-bold">

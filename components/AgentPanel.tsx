@@ -71,12 +71,14 @@ const hasOpenBreak = (entries: any[] = [], causes?: Array<string>) => (
 const AgentPanel: React.FC = () => {
     const { userData } = useAuth();
     useAgentLiveStream();
+    const isDesktopEnv = typeof window !== 'undefined' && Boolean(window.desktopAPI);
     const [workLog, setWorkLog] = useState<WorkLog | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [displayWorkSeconds, setDisplayWorkSeconds] = useState(0);
     const [displayBreakSeconds, setDisplayBreakSeconds] = useState(0);
     const [isAway, setIsAway] = useState(false); // Track screen lock "away" state
+    const [isIdle, setIsIdle] = useState(false);
     const [activeTab, setActiveTab] = useState('timeClock');
 
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
@@ -235,6 +237,7 @@ const AgentPanel: React.FC = () => {
                 const data = snap.data();
                 manualBreakRef.current = !!data.manualBreak;
                 isIdleRef.current = !!data.isIdle; // Update idle ref for timer calculation
+                setIsIdle(!!data.isIdle);
                 setIsAway(!!data.isAway); // Track screen lock away state
                 if (data.manualBreak) idleBreakActiveRef.current = false;
 
@@ -245,6 +248,7 @@ const AgentPanel: React.FC = () => {
                     const getDuration = (ts: any) => (Date.now() - getMillis(ts)) / 1000;
 
                     const hasOpenIdleBreak = hasOpenBreak(currentLog.breaks || [], ['idle', 'screen_lock']);
+                    const shouldUpdateBreaks = !isDesktopEnv;
 
                     // Auto-Break on Idle
                     if (data.isIdle === true && currentLog.status === 'working') {
@@ -254,23 +258,26 @@ const AgentPanel: React.FC = () => {
                         let newBreaks = [...(currentLog.breaks || [])] as any[];
                         const idleStartTs = Timestamp.now();
 
-                        // Close any open break to prevent overlap
-                        newBreaks = closeOpenBreaks(newBreaks, idleStartTs);
-
-                        newBreaks.push({ startTime: idleStartTs, endTime: null, cause: 'idle' });
+                        if (shouldUpdateBreaks) {
+                            // Close any open break to prevent overlap
+                            newBreaks = closeOpenBreaks(newBreaks, idleStartTs);
+                            newBreaks.push({ startTime: idleStartTs, endTime: null, cause: 'idle' });
+                        }
                         const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, idleStartTs, {
                             type: 'on_break',
                             cause: 'idle',
                             startTime: idleStartTs,
                             endTime: null
                         } as SerializedActivity);
-                        updateWorkLog(currentLog.id, {
+                        const updatePayload: Record<string, any> = {
                             status: 'on_break',
                             totalWorkSeconds: increment(wDur),
                             lastEventTimestamp: serverTimestamp(),
-                            breaks: newBreaks,
                             activities
-                        }).catch((err: any) => {
+                        };
+                        if (shouldUpdateBreaks) updatePayload.breaks = newBreaks;
+
+                        updateWorkLog(currentLog.id, updatePayload).catch((err: any) => {
                             console.error('[AgentPanel] failed to persist idle break', err);
                             reportDesktopError({ message: 'worklog_update_failed_idle_break', error: err?.message || String(err) });
                         });
@@ -282,19 +289,23 @@ const AgentPanel: React.FC = () => {
                         const bDur = getDuration(currentLog.lastEventTimestamp);
                         let newBreaks = [...(currentLog.breaks || [])];
                         const resumeTs = Timestamp.now();
-                        newBreaks = closeOpenBreaks(newBreaks, resumeTs);
+                        if (shouldUpdateBreaks) {
+                            newBreaks = closeOpenBreaks(newBreaks, resumeTs);
+                        }
                         const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, resumeTs, {
                             type: 'working',
                             startTime: resumeTs,
                             endTime: null
                         } as SerializedActivity);
-                        updateWorkLog(currentLog.id, {
+                        const updatePayload: Record<string, any> = {
                             status: 'working',
                             totalBreakSeconds: increment(bDur),
                             lastEventTimestamp: serverTimestamp(),
-                            breaks: newBreaks,
                             activities
-                        }).catch((err: any) => {
+                        };
+                        if (shouldUpdateBreaks) updatePayload.breaks = newBreaks;
+
+                        updateWorkLog(currentLog.id, updatePayload).catch((err: any) => {
                             console.error('[AgentPanel] failed to persist idle resume', err);
                             reportDesktopError({ message: 'worklog_update_failed_idle_resume', error: err?.message || String(err) });
                         });
@@ -441,8 +452,8 @@ const AgentPanel: React.FC = () => {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                         <div className="p-4 bg-gray-100 dark:bg-gray-800 rounded-lg border text-center">
                             <p className="text-sm text-gray-500">CURRENT STATUS</p>
-                            <p className={`text-2xl font-bold mt-1 uppercase ${isAway ? 'text-amber-600' : 'text-gray-900 dark:text-white'}`}>
-                                {isAway ? '🔒 Away' : (workLog?.status.replace('_', ' ') || 'Clocked Out')}
+                            <p className={`text-2xl font-bold mt-1 uppercase ${isAway ? 'text-amber-600' : isIdle ? 'text-orange-600' : 'text-gray-900 dark:text-white'}`}>
+                                {isAway ? '🔒 Away' : isIdle ? 'Idle Break' : (workLog?.status.replace('_', ' ') || 'Clocked Out')}
                             </p>
                         </div>
                         <div className="grid grid-cols-2 gap-4">

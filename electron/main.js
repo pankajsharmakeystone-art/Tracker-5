@@ -643,6 +643,7 @@ const DESKTOP_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 let desktopSessionId = null;
 let activeUploads = new Set(); // Concurrency lock to prevent parallel processing of the same file
 let activeMergeRequests = new Set(); // Concurrency lock to prevent parallel merge requests
+let lastCompletedMerge = new Map(); // mergeKey -> timestamp (ms)
 let rtdbConnectedCallback = null;
 let rtdbConnectedRef = null;
 let rtdbPresenceRef = null;
@@ -1993,9 +1994,12 @@ async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
       .set({
         status: "break",
         isIdle: true,
+        isAway: false,
         idleSecs,
         idleReason: reason || null,
         lockedBySystem: reason === 'system_lock',
+        awayReason: FieldValue.delete(),
+        awayStartedAt: FieldValue.delete(),
         lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true });
     recordStatusWriteSuccess();
@@ -2238,6 +2242,11 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
  */
 async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
   const mergeKey = `${agentName}|${date}`;
+  const lastCompletedAt = lastCompletedMerge.get(mergeKey);
+  if (lastCompletedAt && (Date.now() - lastCompletedAt) < 5 * 60 * 1000) {
+    log(`[merge] Skipping duplicate merge request for ${agentName} on ${date} (recently completed)`);
+    return { success: false, reason: 'merge-recently-completed' };
+  }
   if (activeMergeRequests.has(mergeKey)) {
     log(`[merge] Skipping duplicate merge request for ${agentName} on ${date}`);
     return { success: false, reason: 'merge-already-in-progress' };
@@ -2271,6 +2280,7 @@ async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
     if (response.ok) {
       const result = await response.json();
       log(`[merge] Merge successful:`, result);
+      lastCompletedMerge.set(mergeKey, Date.now());
       return { success: true, result };
     } else {
       const errorText = await response.text().catch(() => '');
@@ -3260,6 +3270,42 @@ async function closeOpenIdleEntry(uid) {
   }
 }
 
+// Helper to close open break entry by cause (e.g., away)
+async function closeOpenBreakEntry(uid, cause) {
+  try {
+    const worklogsSnap = await db.collection('worklogs')
+      .where('userId', '==', uid)
+      .where('status', 'in', ['working', 'on_break', 'break'])
+      .limit(1)
+      .get();
+
+    if (!worklogsSnap.empty) {
+      const worklogDoc = worklogsSnap.docs[0];
+      const worklogData = worklogDoc.data() || {};
+      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+
+      let updated = false;
+      for (let i = breaks.length - 1; i >= 0; i--) {
+        if (breaks[i].cause === cause && !breaks[i].endTime) {
+          log(`[worklog] Closing open ${cause} entry at index:`, i);
+          breaks[i] = { ...breaks[i], endTime: Timestamp.now() };
+          updated = true;
+        }
+      }
+
+      if (updated) {
+        await worklogDoc.ref.update({
+          breaks,
+          lastEventTimestamp: FieldValue.serverTimestamp()
+        });
+        log(`[worklog] Closed open ${cause} entry successfully`);
+      }
+    }
+  } catch (e) {
+    log(`[worklog] Failed to close ${cause} entry:`, e?.message || e);
+  }
+}
+
 // Atomically transition from screen_lock to idle (close screen_lock and add idle with SAME timestamp)
 // This prevents 0-duration working gaps between the two entries
 async function transitionScreenLockToIdle(uid) {
@@ -3395,6 +3441,11 @@ function startAgentStatusLoop(uid) {
         }
 
         // Do not do idle-driven writes while manual break is active
+        return;
+      }
+
+      // If screen is locked, keep Away status and do NOT apply idle logic.
+      if (isAway) {
         return;
       }
 
@@ -5225,10 +5276,13 @@ app.whenReady().then(() => {
         log('[away] Failed to set Away status:', e?.message || e);
       }
 
-      // Add system event entry for screen lock to the active worklog for activity logs
+      // Add away break entry to the active worklog for activity logs
       // Uses TRANSACTION to prevent race conditions and duplicate entries
       try {
-        log('[away] Attempting transactional screen_lock write...');
+        log('[away] Attempting transactional away break write...');
+
+        // Close any open idle entry to prevent overlap
+        await closeOpenIdleEntry(currentUid);
 
         // 1. Find the active worklog (Query outside transaction first)
         // Client SDK transactions cannot run queries, only get(docRef).
@@ -5269,20 +5323,20 @@ app.whenReady().then(() => {
           // 3. SAFETY: Strict Deduplication inside Transaction
           if (existingBreaks.length > 0) {
             const last = existingBreaks[existingBreaks.length - 1];
-            if (last.isSystemEvent && last.cause === 'screen_lock' && !last.endTime) {
-              log('[away] Transaction aborted: screen_lock event already exists');
+            if (last.cause === 'away' && !last.endTime) {
+              log('[away] Transaction aborted: away break already exists');
               return;
             }
           }
 
-          log('[away] Transaction: Found worklog', worklogDoc.id, 'adding screen_lock');
+          log('[away] Transaction: Found worklog', worklogDoc.id, 'adding away break');
 
-          // 4. Add new system event entry
+          // 4. Add new away break entry
           const newEntry = {
             startTime: Timestamp.now(),
             endTime: null,
-            cause: 'screen_lock',
-            isSystemEvent: true
+            cause: 'away',
+            isSystemEvent: false
           };
 
           transaction.update(activeDocRef, {
@@ -5293,7 +5347,7 @@ app.whenReady().then(() => {
 
         log('[away] Transaction committed successfully');
       } catch (e) {
-        log('[away] Failed to add screen_lock system event (transaction failed):', e?.message || e);
+        log('[away] Failed to add away break (transaction failed):', e?.message || e);
       }
     } finally {
       screenLockInFlight = false;
@@ -5311,16 +5365,19 @@ app.whenReady().then(() => {
       await db.collection('agentStatus').doc(currentUid).set({
         status: 'online',
         isAway: false,
+        isIdle: false,
         awayReason: FieldValue.delete(),
         awayStartedAt: FieldValue.delete(),
+        idleReason: FieldValue.delete(),
         lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true });
     } catch (e) {
       log('[away] Failed to clear Away status:', e?.message || e);
     }
 
-    // Close the open screen_lock system event entry in the worklog
-    await closeOpenScreenLockEntry(currentUid);
+    // Close any open away/idle entries in the worklog
+    await closeOpenBreakEntry(currentUid, 'away');
+    await closeOpenIdleEntry(currentUid);
 
     // Resume recording if needed after unlock
     if (agentClockedIn && !manualBreakActive) {

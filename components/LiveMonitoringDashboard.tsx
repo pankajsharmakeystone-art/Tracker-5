@@ -2,10 +2,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
 import { DateTime } from 'luxon';
-import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses } from '../services/db';
+import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses, streamGlobalAdminSettings } from '../services/db';
 import { streamAllPresence, isPresenceFresh } from '../services/presence';
 import { useAuth } from '../hooks/useAuth';
-import type { WorkLog } from '../types';
+import type { WorkLog, AdminSettingsType } from '../types';
 import Spinner from './Spinner';
 import LiveStreamModal from './LiveStreamModal';
 import ActivitySheet, { transformFirestoreWorklog } from './ActivitySheet';
@@ -296,6 +296,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [organizationTimezone, setOrganizationTimezone] = useState<string>('UTC');
     const [forceLogoutPending, setForceLogoutPending] = useState<string | null>(null);
     const [reconnectPending, setReconnectPending] = useState<string | null>(null);
+    const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
+    const [mergePending, setMergePending] = useState<string | null>(null);
     const reconnectRequestRef = React.useRef<{ uid: string; requestId: string } | null>(null);
     const reconnectTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -321,6 +323,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             .catch(() => {/* ignore */ });
         return () => { mounted = false; };
     }, []);
+
+    useEffect(() => streamGlobalAdminSettings(setAdminSettings), []);
 
     const isToday = useMemo(() => {
         const d = new Date();
@@ -462,6 +466,53 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             return managerTeamIds.includes(log.teamId);
         }
         return false;
+    };
+
+    const handleMergeRecordings = async (log: WorkLog) => {
+        if (!log) return;
+        const uploadUrl = (adminSettings?.httpUploadUrl || '').trim();
+        if (!uploadUrl) {
+            alert('HTTP upload URL is not configured.');
+            return;
+        }
+
+        const agentName = (log.userDisplayName || log.userId || '').trim();
+        if (!agentName) {
+            alert('Missing agent name for merge.');
+            return;
+        }
+
+        const mergeDateSource = toDateSafe(log.clockInTime ?? log.startTime ?? log.date) || new Date();
+        const dateStr = DateTime.fromJSDate(mergeDateSource)
+            .setZone(organizationTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone, { keepLocalTime: false })
+            .toISODate()
+            || new Date().toISOString().slice(0, 10);
+
+        setMergePending(log.userId);
+        try {
+            const baseUrl = uploadUrl.replace(/\/upload\/?$/, '');
+            const mergeUrl = new URL('/merge-all', baseUrl);
+            mergeUrl.searchParams.set('agent', agentName);
+            mergeUrl.searchParams.set('date', dateStr);
+            mergeUrl.searchParams.set('delete', 'true');
+            mergeUrl.searchParams.set('cleanupInvalid', 'true');
+
+            const headers: Record<string, string> = {};
+            const token = (adminSettings?.httpUploadToken || '').trim();
+            if (token) headers.Authorization = `Bearer ${token}`;
+
+            const response = await fetch(mergeUrl.toString(), { method: 'GET', headers });
+            if (!response.ok) {
+                const text = await response.text().catch(() => '');
+                alert(`Merge failed: ${response.status} ${text}`);
+                return;
+            }
+            alert('Merge request completed.');
+        } catch (err: any) {
+            alert(`Merge failed: ${err?.message || String(err)}`);
+        } finally {
+            setMergePending(null);
+        }
     };
 
     const canForceLogoutAgent = (log: WorkLog) => {
@@ -719,6 +770,16 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             title="Request Live Screen"
                                         >
                                             Live
+                                        </button>
+                                    )}
+                                    {adminSettings?.httpUploadUrl && (
+                                        <button
+                                            onClick={() => handleMergeRecordings(agent)}
+                                            disabled={mergePending === agent.userId}
+                                            className="font-medium text-purple-600 dark:text-purple-400 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="Manually merge recordings for this agent/date"
+                                        >
+                                            Merge
                                         </button>
                                     )}
                                     {(agent.isZombie || (agent.status !== 'clocked_out' && !isToday)) && (

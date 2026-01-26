@@ -29,7 +29,14 @@ const buildConstraints = (sourceId, resolution, fps) => {
   };
 };
 
-async function startRecorderForSource(source, resolution, fps) {
+const deriveScreenLabel = (source, index = 0) => {
+  const name = String(source?.name || '').trim();
+  const match = name.match(/(?:screen|display|monitor)\s*([0-9]+)/i);
+  if (match) return `screen${match[1]}`;
+  return `screen${index + 1}`;
+};
+
+async function startRecorderForSource(source, resolution, fps, labelOverride) {
   const { id, name } = source;
   const constraints = buildConstraints(id, resolution, fps);
   const mediaDevices = navigator.mediaDevices;
@@ -56,8 +63,10 @@ async function startRecorderForSource(source, resolution, fps) {
   let tempFileReady = false;
   let pendingChunks = []; // Buffer chunks until temp file is ready
 
+  const label = labelOverride || deriveScreenLabel(source, 0);
+
   try {
-    const createRes = await ipcRenderer.invoke('recorder-create-temp-file', id, name);
+    const createRes = await ipcRenderer.invoke('recorder-create-temp-file', id, label);
     if (createRes?.success) {
       tempFileReady = true;
       console.log('[recorder] Temp file created for', id);
@@ -83,7 +92,7 @@ async function startRecorderForSource(source, resolution, fps) {
   sessions.set(id, {
     mediaRecorder,
     stream,
-    sourceName: name,
+    sourceName: label,
     finalizePromise,
     startTime,
     tempFileReady,
@@ -197,8 +206,10 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
     const screenSources = sourcesResult.filter((src) => src.id?.startsWith('screen') || /screen/i.test(src.name));
     const targets = screenSources.length > 0 ? screenSources : sourcesResult;
 
-    for (const src of targets) {
-      await startRecorderForSource(src, resolution, fps);
+    for (let index = 0; index < targets.length; index += 1) {
+      const src = targets[index];
+      const label = deriveScreenLabel(src, index);
+      await startRecorderForSource(src, resolution, fps, label);
     }
   } catch (error) {
     console.error('[recorder] failed to start', error);
