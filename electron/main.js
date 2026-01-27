@@ -3721,7 +3721,7 @@ function startAutoClockOutWatcher() {
         if (now >= target) {
           const key = target.toISOString();
           if (lastAutoClockOutTargetKey === key) return;
-          await performAutoClockOut();
+          await performAutoClockOut(target);
           lastAutoClockOutTargetKey = key;
         }
       } catch (e) {
@@ -3746,7 +3746,7 @@ function stopAutoClockOutWatcher() {
   }
 }
 
-async function performAutoClockOut() {
+async function performAutoClockOut(shiftEndDate) {
   try {
     if (!currentUid) return;
     if (!cachedAdminSettings?.autoClockOutEnabled) {
@@ -3754,6 +3754,70 @@ async function performAutoClockOut() {
       return;
     }
     log("[autoClockOut] performing auto clock out for uid:", currentUid);
+
+    const effectiveShiftEnd = shiftEndDate instanceof Date ? shiftEndDate : new Date();
+    const shiftEndTs = Timestamp.fromDate(effectiveShiftEnd);
+
+    // Close any active worklogs at the scheduled shift end time
+    try {
+      const worklogsSnap = await db.collection('worklogs')
+        .where('userId', '==', currentUid)
+        .where('status', 'in', ['working', 'on_break', 'break'])
+        .get();
+
+      if (!worklogsSnap.empty) {
+        const updates = worklogsSnap.docs.map(async (docSnap) => {
+          const data = docSnap.data() || {};
+          const getMillis = (ts) => (ts?.toMillis ? ts.toMillis() : (ts?.toDate ? ts.toDate().getTime() : null));
+          const lastEventMillis = getMillis(data.lastEventTimestamp);
+          const shiftEndMillis = effectiveShiftEnd.getTime();
+
+          let workDelta = 0;
+          let breakDelta = 0;
+          if (lastEventMillis != null && shiftEndMillis > lastEventMillis) {
+            const elapsedSeconds = (shiftEndMillis - lastEventMillis) / 1000;
+            const normalizedStatus = (data.status || 'working').toString().toLowerCase();
+            if (normalizedStatus === 'on_break' || normalizedStatus === 'break') {
+              breakDelta = elapsedSeconds;
+            } else {
+              workDelta = elapsedSeconds;
+            }
+          }
+
+          const payload = {
+            status: 'clocked_out',
+            clockOutTime: shiftEndTs,
+            lastEventTimestamp: shiftEndTs,
+            ...(workDelta > 0 ? { totalWorkSeconds: FieldValue.increment(workDelta) } : {}),
+            ...(breakDelta > 0 ? { totalBreakSeconds: FieldValue.increment(breakDelta) } : {}),
+            activities: (() => {
+              const activities = Array.isArray(data.activities) ? data.activities.map(a => ({ ...a })) : [];
+              if (activities.length > 0) {
+                const last = activities[activities.length - 1];
+                if (last && !last.endTime) {
+                  activities[activities.length - 1] = { ...last, endTime: shiftEndTs };
+                }
+              }
+              return activities.length ? activities : undefined;
+            })(),
+            breaks: (() => {
+              const breaks = Array.isArray(data.breaks) ? data.breaks.map(b => ({ ...b })) : [];
+              if (!breaks.length) return undefined;
+              return breaks.map((b) => (b && !b.endTime ? { ...b, endTime: shiftEndTs } : b));
+            })()
+          };
+
+          // Remove undefined fields so we don't overwrite with undefined
+          Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);
+
+          await docSnap.ref.update(payload);
+        });
+
+        await Promise.all(updates);
+      }
+    } catch (e) {
+      log("[autoClockOut] Failed to close active worklog(s):", e?.message || e);
+    }
 
     // Stop recording if active
     // Force stop even if isRecordingActive is false (to clean up)
@@ -3771,7 +3835,7 @@ async function performAutoClockOut() {
     await db.collection('agentStatus').doc(currentUid).set({
       status: 'offline',
       isIdle: false,
-      lastUpdate: FieldValue.serverTimestamp()
+      lastUpdate: shiftEndTs
     }, { merge: true }).catch(() => { });
 
     // Keep the user profile in sync on desktop-driven auto clock-out.
@@ -3779,7 +3843,7 @@ async function performAutoClockOut() {
       await db.collection("users").doc(currentUid).set({
         isLoggedIn: false,
         activeSession: FieldValue.delete(),
-        lastClockOut: FieldValue.serverTimestamp(),
+        lastClockOut: shiftEndTs,
         sessionClearedAt: FieldValue.serverTimestamp()
       }, { merge: true });
     } catch (e) {

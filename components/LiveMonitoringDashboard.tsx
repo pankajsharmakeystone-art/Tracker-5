@@ -149,27 +149,36 @@ const EditTimeModal = ({ log, onClose, timezone }: { log: WorkLog, onClose: () =
             const newStartMillis = startDate.getTime();
             const newEndMillis = endDate ? endDate.getTime() : Date.now();
 
-            // Recalculate Valid Break Seconds
-            // We must only count breaks that fall WITHIN the new start/end times.
-            let newTotalBreakSeconds = 0;
+            const computeTotalsFromSegments = () => {
+                const logSnapshot: any = {
+                    ...log,
+                    clockInTime: Timestamp.fromDate(startDate),
+                    clockOutTime: endDate ? Timestamp.fromDate(endDate) : null,
+                    status: endDate ? 'clocked_out' : log.status
+                };
+                const segments = transformFirestoreWorklog(logSnapshot);
 
-            if (log.breaks && log.breaks.length > 0) {
-                log.breaks.forEach(b => {
-                    const bStart = b.startTime.toDate().getTime();
-                    const bEnd = b.endTime ? b.endTime.toDate().getTime() : Date.now();
+                let totalWork = 0;
+                let totalBreak = 0;
 
-                    // Find intersection of [bStart, bEnd] with [newStart, newEnd]
-                    const overlapStart = Math.max(bStart, newStartMillis);
-                    const overlapEnd = Math.min(bEnd, newEndMillis);
+                for (const seg of segments) {
+                    if (seg.type === 'Clock Out') continue;
+                    const segStartMs = seg.startTime.getTime();
+                    const segEndMs = (seg.endTime ?? (endDate ?? new Date())).getTime();
+                    const overlapStart = Math.max(segStartMs, newStartMillis);
+                    const overlapEnd = Math.min(segEndMs, newEndMillis);
+                    if (overlapEnd <= overlapStart) continue;
+                    const overlapSeconds = (overlapEnd - overlapStart) / 1000;
+                    if (seg.type === 'Working') totalWork += overlapSeconds;
+                    else if (seg.type === 'On Break' || seg.type === 'System Event') totalBreak += overlapSeconds;
+                }
 
-                    if (overlapEnd > overlapStart) {
-                        newTotalBreakSeconds += (overlapEnd - overlapStart) / 1000;
-                    }
-                });
-            }
+                return { totalWork, totalBreak };
+            };
 
-            const totalElapsedSeconds = (newEndMillis - newStartMillis) / 1000;
-            const newTotalWorkSeconds = Math.max(0, totalElapsedSeconds - newTotalBreakSeconds);
+            const totals = computeTotalsFromSegments();
+            const newTotalWorkSeconds = Math.max(0, totals.totalWork);
+            const newTotalBreakSeconds = Math.max(0, totals.totalBreak);
 
             updates.totalWorkSeconds = newTotalWorkSeconds;
             updates.totalBreakSeconds = newTotalBreakSeconds;
@@ -289,7 +298,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [loading, setLoading] = useState(true);
     const [agentStatuses, setAgentStatuses] = useState<Record<string, any>>({});
     const [presence, setPresence] = useState<Record<string, any>>({});
-    const [editingLog, setEditingLog] = useState<WorkLog | null>(null);
     const [viewingLog, setViewingLog] = useState<WorkLog | null>(null);
     const [liveStreamAgent, setLiveStreamAgent] = useState<{ uid: string; displayName: string; teamId?: string } | null>(null);
     const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
@@ -298,6 +306,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [reconnectPending, setReconnectPending] = useState<string | null>(null);
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
     const [mergePending, setMergePending] = useState<string | null>(null);
+    const [repairPending, setRepairPending] = useState<string | null>(null);
     const reconnectRequestRef = React.useRef<{ uid: string; requestId: string } | null>(null);
     const reconnectTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -495,7 +504,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             mergeUrl.searchParams.set('agent', agentName);
             mergeUrl.searchParams.set('date', dateStr);
             mergeUrl.searchParams.set('delete', 'true');
-            mergeUrl.searchParams.set('cleanupInvalid', 'true');
 
             const headers: Record<string, string> = {};
             const token = (adminSettings?.httpUploadToken || '').trim();
@@ -512,6 +520,52 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             alert(`Merge failed: ${err?.message || String(err)}`);
         } finally {
             setMergePending(null);
+        }
+    };
+
+    const handleRepairRecordings = async (log: WorkLog) => {
+        if (!log) return;
+        const uploadUrl = (adminSettings?.httpUploadUrl || '').trim();
+        if (!uploadUrl) {
+            alert('HTTP upload URL is not configured.');
+            return;
+        }
+
+        const agentName = (log.userDisplayName || log.userId || '').trim();
+        if (!agentName) {
+            alert('Missing agent name for repair.');
+            return;
+        }
+
+        const repairDateSource = toDateSafe(log.clockInTime ?? log.startTime ?? log.date) || new Date();
+        const dateStr = DateTime.fromJSDate(repairDateSource)
+            .setZone(organizationTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone, { keepLocalTime: false })
+            .toISODate()
+            || new Date().toISOString().slice(0, 10);
+
+        setRepairPending(log.userId);
+        try {
+            const baseUrl = uploadUrl.replace(/\/upload\/?$/, '');
+            const repairUrl = new URL('/repair-all', baseUrl);
+            repairUrl.searchParams.set('agent', agentName);
+            repairUrl.searchParams.set('date', dateStr);
+            repairUrl.searchParams.set('onlyInvalid', 'false');
+
+            const headers: Record<string, string> = {};
+            const token = (adminSettings?.httpUploadToken || '').trim();
+            if (token) headers.Authorization = `Bearer ${token}`;
+
+            const response = await fetch(repairUrl.toString(), { method: 'GET', headers });
+            if (!response.ok) {
+                const text = await response.text().catch(() => '');
+                alert(`Repair failed: ${response.status} ${text}`);
+                return;
+            }
+            alert('Repair request completed.');
+        } catch (err: any) {
+            alert(`Repair failed: ${err?.message || String(err)}`);
+        } finally {
+            setRepairPending(null);
         }
     };
 
@@ -649,13 +703,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                     onClose={closeLiveStreamModal}
                 />
             )}
-            {editingLog && (
-                <EditTimeModal
-                    log={editingLog}
-                    onClose={() => setEditingLog(null)}
-                    timezone={organizationTimezone}
-                />
-            )}
             {viewingLog && (
                 <TimeEntriesModal
                     log={viewingLog}
@@ -756,13 +803,6 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                     >
                                         Logs
                                     </button>
-                                    <button
-                                        onClick={() => setEditingLog(agent)}
-                                        className="font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
-                                        title="Edit Time Log"
-                                    >
-                                        Edit
-                                    </button>
                                     {canRequestStreamForAgent(agent) && (
                                         <button
                                             onClick={() => handleLiveStream(agent)}
@@ -780,6 +820,16 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             title="Manually merge recordings for this agent/date"
                                         >
                                             Merge
+                                        </button>
+                                    )}
+                                    {adminSettings?.httpUploadUrl && (
+                                        <button
+                                            onClick={() => handleRepairRecordings(agent)}
+                                            disabled={repairPending === agent.userId}
+                                            className="font-medium text-orange-600 dark:text-orange-400 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title="Attempt to repair corrupt recordings for this agent/date"
+                                        >
+                                            Repair
                                         </button>
                                     )}
                                     {(agent.isZombie || (agent.status !== 'clocked_out' && !isToday)) && (

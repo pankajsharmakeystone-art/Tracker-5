@@ -94,13 +94,46 @@ export function transformFirestoreWorklog(docData: any): Array<{
         console.log('[ActivitySheet] Using ACTIVITIES path. activities:', docData.activities.length, 'breaks:', docData.breaks?.length || 0);
         const nowDate = typeof Timestamp !== 'undefined' ? Timestamp.now().toDate() : new Date();
         const nowMs = nowDate.getTime();
+        const sessionEnd = (docData.status === 'clocked_out' && docData.clockOutTime)
+            ? (toDate(normalizeClockOutTime(docData.clockOutTime, docData.clockInTime)) || nowDate)
+            : nowDate;
 
-        // Collect system/idle events from breaks array
+        // Collect system events from breaks array (avoid duplicating idle/away when activities already contain breaks)
         const systemEvents: Array<{ startTime: Date; endTime: Date | null; cause?: string; }> = [];
+        const activityBreakWindows: Array<{ startMs: number; endMs: number }> = [];
+
+        docData.activities
+            .filter((entry: any) => entry && entry.startTime)
+            .forEach((entry: any) => {
+                const activityStart = toDate(entry.startTime);
+                if (!activityStart) return;
+                const activityEnd = toDate(entry.endTime) ?? sessionEnd;
+                const rawType = (entry.type || '').toString().toLowerCase();
+                const normalizedType = (rawType === 'on_break' || rawType === 'break') ? 'On Break' : 'Working';
+                const isBreak = normalizedType === 'On Break' || entry.isSystemEvent;
+                if (!isBreak) return;
+                const startMs = activityStart.getTime();
+                const endMs = activityEnd.getTime();
+                if (endMs > startMs) activityBreakWindows.push({ startMs, endMs });
+            });
+
+        const overlapsActivityBreak = (start: Date, end: Date | null) => {
+            const startMs = start.getTime();
+            const endMs = (end ?? nowDate).getTime();
+            return activityBreakWindows.some((w) => startMs < w.endMs && endMs > w.startMs);
+        };
+
         if (Array.isArray(docData.breaks)) {
             const normalizedBreaks = normalizeBreaks(docData.breaks);
             normalizedBreaks
-                .filter((b: any) => b && b.startTime && (b.isSystemEvent || b.cause === 'idle' || b.cause === 'screen_lock' || b.cause === 'away'))
+                .filter((b: any) => {
+                    if (!b || !b.startTime) return false;
+                    if (b.isSystemEvent || b.cause === 'screen_lock') return true;
+                    if (b.cause === 'idle' || b.cause === 'away') {
+                        return !overlapsActivityBreak(b.startTime, b.endTime);
+                    }
+                    return false;
+                })
                 .forEach((b: any) => {
                     systemEvents.push({
                         startTime: b.startTime,
@@ -141,7 +174,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
                     segments.push({
                         type: entry.isSystemEvent ? 'System Event' : 'On Break',
                         startTime: activityStart,
-                        endTime: toDate(entry.endTime) ?? null,
+                        endTime: entry.endTime ? toDate(entry.endTime) : (docData.status === 'clocked_out' ? sessionEnd : null),
                         durationSeconds,
                         cause,
                         isSystemEvent: entry.isSystemEvent || false,
@@ -197,7 +230,7 @@ export function transformFirestoreWorklog(docData: any): Array<{
                     segments.push({
                         type: 'Working',
                         startTime: cursor,
-                        endTime: toDate(entry.endTime) ?? null,
+                        endTime: entry.endTime ? toDate(entry.endTime) : (docData.status === 'clocked_out' ? sessionEnd : null),
                         durationSeconds: Math.max(0, remainingDuration),
                     });
                 }

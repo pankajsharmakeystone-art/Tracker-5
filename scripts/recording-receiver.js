@@ -121,6 +121,41 @@ async function fixWebmDurationWithFfmpeg(inputPath) {
   });
 }
 
+// Remux WebM to a new output path without modifying the original
+async function remuxWebmToOutput(inputPath, outputPath) {
+  return new Promise((resolve) => {
+    const args = [
+      '-y',
+      '-fflags', '+genpts+igndts',
+      '-err_detect', 'ignore_err',
+      '-i', inputPath,
+      '-c', 'copy',
+      '-avoid_negative_ts', 'make_zero',
+      outputPath
+    ];
+
+    console.log(`[ffmpeg] Remuxing: ${path.basename(inputPath)} -> ${path.basename(outputPath)}`);
+
+    const proc = spawn(FFMPEG_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    proc.on('close', async (code) => {
+      if (code === 0 && fs.existsSync(outputPath)) {
+        resolve({ success: true });
+      } else {
+        console.error(`[ffmpeg] Remux failed (code ${code}):`, stderr.slice(-500));
+        resolve({ success: false, error: stderr.slice(-500) || `ffmpeg exit code ${code}` });
+      }
+    });
+
+    proc.on('error', (err) => {
+      console.error(`[ffmpeg] Remux spawn error:`, err.message);
+      resolve({ success: false, error: err.message });
+    });
+  });
+}
+
 // Merge multiple WebM segments into a single file
 // Uses FFmpeg concat demuxer for lossless, fast merging
 async function mergeSegments(segmentPaths, outputPath) {
@@ -487,6 +522,70 @@ const server = http.createServer(async (req, res) => {
         screenCount: screenGroups.size,
         results,
         deletedSegments: deleteAfter ? allDeletedPaths.length : 0
+      });
+      return;
+    }
+
+    // Repair segments: GET /repair-all?agent=NAME&date=YYYY-MM-DD&pattern=OPTIONAL&onlyInvalid=true
+    // Writes repaired copies to a "repaired" subfolder without deleting originals
+    if (pathname === '/repair-all') {
+      const agent = url.searchParams.get('agent');
+      const date = url.searchParams.get('date') || new Date().toISOString().slice(0, 10);
+      const pattern = url.searchParams.get('pattern');
+      const onlyInvalid = url.searchParams.get('onlyInvalid') !== 'false';
+
+      if (!agent) {
+        sendJson(res, 400, { success: false, error: 'missing-agent-param' });
+        return;
+      }
+
+      const found = await findSegments(agent, date, pattern);
+      if (!found.success || found.segments.length === 0) {
+        sendJson(res, 404, { success: false, error: 'no-segments-found', folder: found.folder });
+        return;
+      }
+
+      const { valid: validSegments, invalid: invalidSegments } = await filterValidSegments(found.segments);
+      const targets = onlyInvalid ? invalidSegments : found.segments;
+
+      if (!targets.length) {
+        sendJson(res, 200, {
+          success: true,
+          repaired: 0,
+          skipped: found.segments.length,
+          invalidSegments: invalidSegments.map(s => s.name),
+          folder: found.folder
+        });
+        return;
+      }
+
+      const outputFolder = path.join(found.folder, 'repaired');
+      await fs.promises.mkdir(outputFolder, { recursive: true });
+
+      const results = [];
+      for (const seg of targets) {
+        const parsed = path.parse(seg.name);
+        const outputName = `${parsed.name}.fixed${parsed.ext || '.webm'}`;
+        const outputPath = path.join(outputFolder, outputName);
+        const result = await remuxWebmToOutput(seg.path, outputPath);
+        results.push({
+          name: seg.name,
+          outputName,
+          success: result.success,
+          error: result.error
+        });
+      }
+
+      const repaired = results.filter(r => r.success).length;
+      const failed = results.filter(r => !r.success).length;
+
+      sendJson(res, failed === 0 ? 200 : 207, {
+        success: failed === 0,
+        repaired,
+        failed,
+        results,
+        invalidSegments: invalidSegments.map(s => s.name),
+        outputFolder
       });
       return;
     }
