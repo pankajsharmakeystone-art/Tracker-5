@@ -2997,10 +2997,13 @@ function applyAdminSettings(next) {
     }
   }
 
-  // Desktop-side auto clock-out has historically caused trouble (unexpected sign-outs, recording stops,
-  // and state mismatches). Auto clock-out is enforced server-side via the scheduled Cloud Function.
-  // Keep the desktop watcher disabled to avoid conflicting enforcement.
-  stopAutoClockOutWatcher();
+  // Desktop-side auto clock-out runs every 60 seconds for responsive clock-out at shift end.
+  // Server-side Cloud Function also runs every 5 minutes as a backup.
+  if (cachedAdminSettings?.autoClockOutEnabled && agentClockedIn) {
+    startAutoClockOutWatcher();
+  } else {
+    stopAutoClockOutWatcher();
+  }
 
   restartRecordingSegmentLoop();
 
@@ -3696,11 +3699,11 @@ function getAutoClockTargetDate(now = new Date()) {
   if (!cachedAdminSettings?.autoClockOutEnabled) return null;
   if (!currentUid || !agentClockedIn) return null;
 
-  // Only honor per-day slot. If no slot or already past, do nothing.
+  // Only honor per-day slot.
   if (currentShiftDate) {
     const slot = autoClockSlots?.[currentShiftDate];
     const slotTarget = buildDateFromSlot(slot, currentShiftDate);
-    if (slotTarget && now < slotTarget) return slotTarget;
+    if (slotTarget) return slotTarget;
   }
 
   return null;
@@ -3727,8 +3730,8 @@ function startAutoClockOutWatcher() {
       } catch (e) {
         console.error("[autoClockOutWatcher] error", e);
       }
-    }, 60 * 1000);
-    log("autoClockOutWatcher started");
+    }, 10 * 1000);
+    log("autoClockOutWatcher started (checking every 10 seconds)");
   } catch (e) {
     console.error("[startAutoClockOutWatcher] error", e);
   }

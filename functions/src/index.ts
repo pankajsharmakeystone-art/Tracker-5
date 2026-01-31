@@ -11,7 +11,7 @@ import { DateTime } from "luxon";
 admin.initializeApp();
 const db = admin.firestore();
 const DEFAULT_TIMEZONE = "Asia/Kolkata";
-const DEFAULT_AUTO_CLOCK_GRACE_MINUTES = 10;
+const DEFAULT_AUTO_CLOCK_GRACE_MINUTES = 0;
 let cachedTimezone = DEFAULT_TIMEZONE;
 let lastTimezoneFetch = 0;
 
@@ -193,7 +193,7 @@ export const issueDesktopToken = functions
 
     const uid = context.auth.uid;
     const deviceId = _data && (typeof (_data as any).deviceId === 'string' || typeof (_data as any).deviceId === 'number')
-      ? String(( _data as any).deviceId)
+      ? String((_data as any).deviceId)
       : null;
 
     try {
@@ -402,65 +402,65 @@ export const dropboxOauthCallback = functions.https.onRequest(async (req, res) =
  * CRITICAL: Do NOT close sessions marked as `isOvernightShift: true`.
  */
 export const dailyMidnightCleanup = onSchedule("5 0 * * *", async (event) => {
-    console.log("Starting daily midnight cleanup...");
+  console.log("Starting daily midnight cleanup...");
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayTs = admin.firestore.Timestamp.fromDate(today);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayTs = admin.firestore.Timestamp.fromDate(today);
 
-    // Find stale active logs started before today
-    const snapshot = await db.collection("worklogs")
-      .where("status", "in", ["working", "on_break", "break"])
-      .where("date", "<", todayTs)
-      .get();
+  // Find stale active logs started before today
+  const snapshot = await db.collection("worklogs")
+    .where("status", "in", ["working", "on_break", "break"])
+    .where("date", "<", todayTs)
+    .get();
 
-    if (snapshot.empty) return;
+  if (snapshot.empty) return;
 
-    const batch = db.batch();
-    let count = 0;
+  const batch = db.batch();
+  let count = 0;
 
-    snapshot.docs.forEach((doc) => {
-      const data = doc.data();
-      
-      // Rule N1 Exception: Overnight shifts are allowed to cross midnight.
-      // They will be closed by `autoClockOutAtShiftEnd` or manual action.
-        if (shouldTreatAsOvernight(data)) {
-          console.log(`Skipping overnight shift: ${doc.id}`);
-          return; 
-      }
+  snapshot.docs.forEach((doc) => {
+    const data = doc.data();
 
-      console.log(`Force closing non-overnight stale log ${doc.id}`);
-      
-      // Close effectively at 23:59:59 of the start date
-      const logDate = data.date.toDate();
-      const endOfDay = new Date(logDate);
-      endOfDay.setHours(23, 59, 59, 999);
+    // Rule N1 Exception: Overnight shifts are allowed to cross midnight.
+    // They will be closed by `autoClockOutAtShiftEnd` or manual action.
+    if (shouldTreatAsOvernight(data)) {
+      console.log(`Skipping overnight shift: ${doc.id}`);
+      return;
+    }
 
-      batch.update(db.collection("worklogs").doc(doc.id), {
-        status: "clocked_out",
-        clockOutTime: admin.firestore.Timestamp.fromDate(endOfDay),
-        lastEventTimestamp: admin.firestore.FieldValue.serverTimestamp()
-      });
+    console.log(`Force closing non-overnight stale log ${doc.id}`);
 
-      batch.update(db.collection("agentStatus").doc(data.userId), {
-        status: "offline",
-        manualBreak: false,
-        breakStartedAt: admin.firestore.FieldValue.delete()
-      });
-      
-      batch.update(db.collection("users").doc(data.userId), {
-        isLoggedIn: false,
-        activeSession: admin.firestore.FieldValue.delete()
-      });
+    // Close effectively at 23:59:59 of the start date
+    const logDate = data.date.toDate();
+    const endOfDay = new Date(logDate);
+    endOfDay.setHours(23, 59, 59, 999);
 
-      count++;
+    batch.update(db.collection("worklogs").doc(doc.id), {
+      status: "clocked_out",
+      clockOutTime: admin.firestore.Timestamp.fromDate(endOfDay),
+      lastEventTimestamp: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    if (count > 0) {
-      await batch.commit();
-      console.log(`Closed ${count} stale non-overnight sessions.`);
-    }
+    batch.update(db.collection("agentStatus").doc(data.userId), {
+      status: "offline",
+      manualBreak: false,
+      breakStartedAt: admin.firestore.FieldValue.delete()
+    });
+
+    batch.update(db.collection("users").doc(data.userId), {
+      isLoggedIn: false,
+      activeSession: admin.firestore.FieldValue.delete()
+    });
+
+    count++;
   });
+
+  if (count > 0) {
+    await batch.commit();
+    console.log(`Closed ${count} stale non-overnight sessions.`);
+  }
+});
 
 
 /**

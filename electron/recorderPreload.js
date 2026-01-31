@@ -29,6 +29,18 @@ const buildConstraints = (sourceId, resolution, fps) => {
   };
 };
 
+const pad2 = (value) => String(value).padStart(2, '0');
+
+const formatTimestamp = (date = new Date()) => {
+  const dd = pad2(date.getDate());
+  const mm = pad2(date.getMonth() + 1);
+  const yyyy = date.getFullYear();
+  const HH = pad2(date.getHours());
+  const MM = pad2(date.getMinutes());
+  const SS = pad2(date.getSeconds());
+  return `${dd}/${mm}/${yyyy}  ${HH}:${MM}:${SS}`;
+};
+
 const deriveScreenLabel = (source, index = 0) => {
   const name = String(source?.name || '').trim();
   const match = name.match(/(?:screen|display|monitor)\s*([0-9]+)/i);
@@ -48,13 +60,63 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     throw new Error('getUserMedia unavailable in recorder window');
   }
 
-  const stream = await getUserMediaFn(constraints);
+  const inputStream = await getUserMediaFn(constraints);
+  const videoTrack = inputStream.getVideoTracks?.()[0];
+  const trackSettings = videoTrack?.getSettings ? videoTrack.getSettings() : {};
+  const width = resolution?.width || trackSettings.width || 1280;
+  const height = resolution?.height || trackSettings.height || 720;
+
+  const video = document.createElement('video');
+  video.srcObject = inputStream;
+  video.muted = true;
+  video.playsInline = true;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  await video.play().catch(() => {
+    // autoplay may be blocked; draw loop will still attempt
+  });
+
+  const draw = () => {
+    if (!ctx) return;
+    try {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const fontSize = Math.max(18, Math.round(canvas.width * 0.018));
+      ctx.font = `${fontSize}px Arial`;
+      ctx.textBaseline = 'top';
+
+      const text = formatTimestamp(new Date());
+      const padding = Math.max(6, Math.round(fontSize * 0.4));
+      const textWidth = ctx.measureText(text).width;
+      const boxWidth = textWidth + padding * 2;
+      const boxHeight = fontSize + padding * 1.4;
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      ctx.fillRect(10, 10, boxWidth, boxHeight);
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillText(text, 10 + padding, 10 + padding * 0.7);
+    } catch (e) {
+      console.warn('[recorder] draw failed', e?.message || e);
+    }
+  };
+
+  let drawTimer = null;
+  const frameInterval = Math.max(250, Math.round(1000 / (fps || 30)));
+  drawTimer = setInterval(draw, frameInterval);
+
+  const canvasStream = canvas.captureStream(fps || 30);
+
   const mimeType = 'video/webm; codecs=vp9';
   const options = {
     mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm'
   };
 
-  const mediaRecorder = new MediaRecorder(stream, options);
+  const mediaRecorder = new MediaRecorder(canvasStream, options);
   let finalizeResolve;
   const finalizePromise = new Promise((resolve) => { finalizeResolve = resolve; });
   const startTime = Date.now();
@@ -91,13 +153,15 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   // Store session data (no more recordedChunks array for memory mode)
   sessions.set(id, {
     mediaRecorder,
-    stream,
+    stream: inputStream,
     sourceName: label,
     finalizePromise,
     startTime,
     tempFileReady,
     pendingChunks: tempFileReady ? null : [],  // Only use if temp file failed
-    finalizeResolve
+    finalizeResolve,
+    drawTimer,
+    canvasStream
   });
 
   mediaRecorder.ondataavailable = async (event) => {
@@ -152,6 +216,8 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       console.error('[recorder] failed to finalize recording', err);
     } finally {
       try {
+        if (session?.drawTimer) clearInterval(session.drawTimer);
+        session?.canvasStream?.getTracks?.()?.forEach((t) => t.stop());
         session?.stream?.getTracks()?.forEach((t) => t.stop());
       } catch (e) { }
       sessions.delete(id);

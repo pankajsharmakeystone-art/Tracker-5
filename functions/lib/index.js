@@ -11,7 +11,7 @@ const luxon_1 = require("luxon");
 admin.initializeApp();
 const db = admin.firestore();
 const DEFAULT_TIMEZONE = "Asia/Kolkata";
-const DEFAULT_AUTO_CLOCK_GRACE_MINUTES = 10;
+const DEFAULT_AUTO_CLOCK_GRACE_MINUTES = 0;
 let cachedTimezone = DEFAULT_TIMEZONE;
 let lastTimezoneFetch = 0;
 const getOrganizationTimezone = async () => {
