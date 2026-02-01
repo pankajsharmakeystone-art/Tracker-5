@@ -159,12 +159,24 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
         return log.status === 'working' && !isIdleBreak && !isAway;
     }).length;
 
-    // Sort: Working/Online first, then Break, then Offline. Within each group: current user first, then alphabetical.
+    // Sort: Working first, then Break (including idle/away), then Offline. Within each group: current user first, then alphabetical.
     const displayLogs = [...uniqueAgentLogs].sort((a, b) => {
-        const aStatus = normalizeStatus(a.status);
-        const bStatus = normalizeStatus(b.status);
+        // Helper to get effective status considering agentStatus
+        const getEffectiveStatus = (log: WorkLog): 'working' | 'on_break' | 'clocked_out' => {
+            const agentStatus = agentStatuses[log.userId];
+            const isIdleBreak = agentStatus?.isIdle === true;
+            const isAway = agentStatus?.isAway === true;
 
-        const priority = (s: WorkLog['status']) => {
+            // If idle or away, treat as on_break for sorting
+            if (isIdleBreak || isAway) return 'on_break';
+
+            return normalizeStatus(log.status) as 'working' | 'on_break' | 'clocked_out';
+        };
+
+        const aStatus = getEffectiveStatus(a);
+        const bStatus = getEffectiveStatus(b);
+
+        const priority = (s: 'working' | 'on_break' | 'clocked_out') => {
             if (s === 'working') return 0;
             if (s === 'on_break') return 1;
             return 2; // clocked_out (offline)
