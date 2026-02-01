@@ -770,9 +770,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                 </td>
                                 {(() => {
                                     const desktopStatus = agentStatuses?.[agent.userId];
-                                    const isOnManualBreak = agent.status === 'on_break' && !desktopStatus?.isIdle;
+                                    const isOnManualBreak = agent.status === 'on_break' && !desktopStatus?.isIdle && !desktopStatus?.isAway;
                                     const isIdle = desktopStatus?.isIdle === true;
-                                    const isWorking = agent.status === 'working' && !isIdle && !isOnManualBreak;
+                                    const isAway = desktopStatus?.isAway === true;
+                                    const isIdleOrAway = isIdle || isAway;  // Both should highlight idle break column
+                                    const isWorking = agent.status === 'working' && !isIdleOrAway && !isOnManualBreak;
                                     return (
                                         <>
                                             <td className={`py-4 px-6 font-mono font-bold ${isWorking ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 rounded' : 'text-gray-700 dark:text-gray-200'}`}>
@@ -781,7 +783,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             <td className={`py-4 px-6 font-mono ${isOnManualBreak ? 'bg-yellow-100 dark:bg-yellow-900/40 text-yellow-700 dark:text-yellow-300 font-bold rounded' : 'text-gray-700 dark:text-gray-200'}`}>
                                                 {formatDuration(agent.manualBreakSeconds ?? agent.displayBreak)}
                                             </td>
-                                            <td className={`py-4 px-6 font-mono ${isIdle ? 'bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300 font-bold rounded' : 'text-gray-600 dark:text-gray-300'}`}>
+                                            <td className={`py-4 px-6 font-mono ${isIdleOrAway ? 'bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300 font-bold rounded' : 'text-gray-600 dark:text-gray-300'}`}>
                                                 {formatDuration(agent.idleBreakSeconds ?? 0)}
                                             </td>
                                         </>
