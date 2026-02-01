@@ -209,7 +209,18 @@ export const issueDesktopToken = functions
 
       if (user.isLoggedIn === true && user.activeDesktopSessionId) {
         const activeDeviceId = user.activeDesktopDeviceId ? String(user.activeDesktopDeviceId) : null;
-        if (activeDeviceId && deviceId && activeDeviceId === deviceId) {
+
+        // Check if session has expired (12 hours timeout)
+        const SESSION_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
+        const sessionStartedAt = user.activeDesktopSessionStartedAt?.toMillis?.()
+          ?? user.activeDesktopSessionStartedAt?.toDate?.()?.getTime?.()
+          ?? null;
+        const isSessionExpired = sessionStartedAt && (Date.now() - sessionStartedAt > SESSION_TIMEOUT_MS);
+
+        if (isSessionExpired) {
+          console.log(`[issueDesktopToken] Session expired for ${uid}, allowing new login`);
+          // Session is stale, allow new login
+        } else if (activeDeviceId && deviceId && activeDeviceId === deviceId) {
           // Allow same-machine re-login.
         } else if (!activeDeviceId) {
           // Backward-compatible: allow if device id was never stored.

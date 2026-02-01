@@ -170,6 +170,7 @@ const deriveDateKey = (logStartDate, timezone) => {
 exports.issueDesktopToken = functions
     .region(FUNCTIONS_REGION)
     .https.onCall(async (_data, context) => {
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     if (!context.auth || !context.auth.uid) {
         throw new functions.https.HttpsError("unauthenticated", "Authentication required.");
     }
@@ -188,7 +189,15 @@ exports.issueDesktopToken = functions
         }
         if (user.isLoggedIn === true && user.activeDesktopSessionId) {
             const activeDeviceId = user.activeDesktopDeviceId ? String(user.activeDesktopDeviceId) : null;
-            if (activeDeviceId && deviceId && activeDeviceId === deviceId) {
+            // Check if session has expired (12 hours timeout)
+            const SESSION_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
+            const sessionStartedAt = (_h = (_c = (_b = (_a = user.activeDesktopSessionStartedAt) === null || _a === void 0 ? void 0 : _a.toMillis) === null || _b === void 0 ? void 0 : _b.call(_a)) !== null && _c !== void 0 ? _c : (_g = (_f = (_e = (_d = user.activeDesktopSessionStartedAt) === null || _d === void 0 ? void 0 : _d.toDate) === null || _e === void 0 ? void 0 : _e.call(_d)) === null || _f === void 0 ? void 0 : _f.getTime) === null || _g === void 0 ? void 0 : _g.call(_f)) !== null && _h !== void 0 ? _h : null;
+            const isSessionExpired = sessionStartedAt && (Date.now() - sessionStartedAt > SESSION_TIMEOUT_MS);
+            if (isSessionExpired) {
+                console.log(`[issueDesktopToken] Session expired for ${uid}, allowing new login`);
+                // Session is stale, allow new login
+            }
+            else if (activeDeviceId && deviceId && activeDeviceId === deviceId) {
                 // Allow same-machine re-login.
             }
             else if (!activeDeviceId) {

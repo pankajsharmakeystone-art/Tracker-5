@@ -248,21 +248,25 @@ const AgentPanel: React.FC = () => {
                     const getDuration = (ts: any) => (Date.now() - getMillis(ts)) / 1000;
 
                     const hasOpenIdleBreak = hasOpenBreak(currentLog.breaks || [], ['idle', 'screen_lock']);
-                    const shouldUpdateBreaks = !isDesktopEnv;
 
                     // Auto-Break on Idle
+                    // In desktop environment, the desktop client handles idle break writes
+                    // to prevent race conditions and duplicates
                     if (data.isIdle === true && currentLog.status === 'working') {
                         if (hasOpenIdleBreak) return;
                         idleBreakActiveRef.current = true;
+
+                        // Skip worklog writes in desktop env - desktop handles it
+                        if (isDesktopEnv) return;
+
                         const wDur = getDuration(currentLog.lastEventTimestamp);
                         let newBreaks = [...(currentLog.breaks || [])] as any[];
                         const idleStartTs = Timestamp.now();
 
-                        if (shouldUpdateBreaks) {
-                            // Close any open break to prevent overlap
-                            newBreaks = closeOpenBreaks(newBreaks, idleStartTs);
-                            newBreaks.push({ startTime: idleStartTs, endTime: null, cause: 'idle' });
-                        }
+                        // Close any open break to prevent overlap
+                        newBreaks = closeOpenBreaks(newBreaks, idleStartTs);
+                        newBreaks.push({ startTime: idleStartTs, endTime: null, cause: 'idle' });
+
                         const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, idleStartTs, {
                             type: 'on_break',
                             cause: 'idle',
@@ -273,9 +277,9 @@ const AgentPanel: React.FC = () => {
                             status: 'on_break',
                             totalWorkSeconds: increment(wDur),
                             lastEventTimestamp: serverTimestamp(),
+                            breaks: newBreaks,
                             activities
                         };
-                        if (shouldUpdateBreaks) updatePayload.breaks = newBreaks;
 
                         updateWorkLog(currentLog.id, updatePayload).catch((err: any) => {
                             console.error('[AgentPanel] failed to persist idle break', err);
@@ -283,15 +287,19 @@ const AgentPanel: React.FC = () => {
                         });
                     }
                     // Auto-Resume
+                    // In desktop environment, the desktop client handles idle resume writes
+                    // to prevent race conditions and duplicates
                     else if (data.isIdle === false && (idleBreakActiveRef.current || hasOpenIdleBreak)) {
                         idleBreakActiveRef.current = false;
+
+                        // Skip worklog writes in desktop env - desktop handles it
+                        if (isDesktopEnv) return;
+
                         // Don't auto-resume if it was a manual break (handled by manualBreak check above generally, but good to be safe)
                         const bDur = getDuration(currentLog.lastEventTimestamp);
-                        let newBreaks = [...(currentLog.breaks || [])];
+                        let newBreaks = closeOpenBreaks([...(currentLog.breaks || [])], Timestamp.now());
                         const resumeTs = Timestamp.now();
-                        if (shouldUpdateBreaks) {
-                            newBreaks = closeOpenBreaks(newBreaks, resumeTs);
-                        }
+
                         const activities = transitionActivities(currentLog.activities as SerializedActivity[] | undefined, resumeTs, {
                             type: 'working',
                             startTime: resumeTs,
@@ -301,9 +309,9 @@ const AgentPanel: React.FC = () => {
                             status: 'working',
                             totalBreakSeconds: increment(bDur),
                             lastEventTimestamp: serverTimestamp(),
+                            breaks: newBreaks,
                             activities
                         };
-                        if (shouldUpdateBreaks) updatePayload.breaks = newBreaks;
 
                         updateWorkLog(currentLog.id, updatePayload).catch((err: any) => {
                             console.error('[AgentPanel] failed to persist idle resume', err);

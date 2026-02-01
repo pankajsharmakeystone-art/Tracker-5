@@ -3195,8 +3195,34 @@ async function closeOpenScreenLockEntry(uid) {
   }
 }
 
+// In-flight guard to prevent concurrent idle break operations
+let idleBreakInFlight = false;
+
+// Helper to close the last open activity and add a new one
+function transitionActivities(activities, transitionTs, newEntry) {
+  const result = Array.isArray(activities) ? [...activities] : [];
+  // Close the last activity if it's open
+  if (result.length > 0) {
+    const last = result[result.length - 1];
+    if (!last.endTime) {
+      result[result.length - 1] = { ...last, endTime: transitionTs };
+    }
+  }
+  // Add the new activity entry
+  result.push(newEntry);
+  return result;
+}
+
 // Helper to add an idle break entry to the worklog breaks array
+// Uses a Firestore transaction to prevent race conditions/duplicates
+// Also updates activities array for consistent tracking
 async function addIdleBreakEntry(uid) {
+  if (idleBreakInFlight) {
+    log('[worklog] addIdleBreakEntry: Operation already in flight, skipping');
+    return;
+  }
+  idleBreakInFlight = true;
+
   try {
     const worklogsSnap = await db.collection('worklogs')
       .where('userId', '==', uid)
@@ -3206,40 +3232,67 @@ async function addIdleBreakEntry(uid) {
 
     if (!worklogsSnap.empty) {
       const worklogDoc = worklogsSnap.docs[0];
-      const worklogData = worklogDoc.data() || {};
-      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+      const worklogRef = worklogDoc.ref;
 
-      // Check if there's already an open idle entry to prevent duplicates
-      const hasOpenIdleEntry = breaks.some(b => b.cause === 'idle' && !b.endTime);
-      if (hasOpenIdleEntry) {
-        log('[worklog] addIdleBreakEntry: Open idle entry already exists, skipping');
-        return;
-      }
+      // Use a transaction to ensure atomic read-check-write
+      await db.runTransaction(async (transaction) => {
+        const freshSnap = await transaction.get(worklogRef);
+        if (!freshSnap.exists) {
+          log('[worklog] addIdleBreakEntry: Worklog disappeared during transaction');
+          return;
+        }
 
-      log('[worklog] addIdleBreakEntry: Adding idle break entry');
+        const worklogData = freshSnap.data() || {};
+        const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+        const activities = Array.isArray(worklogData.activities) ? worklogData.activities : [];
 
-      const idleEntry = {
-        startTime: Timestamp.now(),
-        endTime: null,
-        cause: 'idle',
-        isSystemEvent: false  // Idle is a break, not a system event like screen_lock
-      };
+        // Check if there's already an open idle entry to prevent duplicates
+        const hasOpenIdleEntry = breaks.some(b => b.cause === 'idle' && !b.endTime);
+        if (hasOpenIdleEntry) {
+          log('[worklog] addIdleBreakEntry: Open idle entry already exists (transaction check), skipping');
+          return;
+        }
 
-      await worklogDoc.ref.update({
-        breaks: [...breaks, idleEntry],
-        lastEventTimestamp: FieldValue.serverTimestamp()
+        log('[worklog] addIdleBreakEntry: Adding idle break entry via transaction');
+
+        const idleStartTime = Timestamp.now();
+
+        const idleEntry = {
+          startTime: idleStartTime,
+          endTime: null,
+          cause: 'idle',
+          isSystemEvent: false  // Idle is a break, not a system event like screen_lock
+        };
+
+        // Also update activities array
+        const newActivities = transitionActivities(activities, idleStartTime, {
+          type: 'on_break',
+          cause: 'idle',
+          startTime: idleStartTime,
+          endTime: null
+        });
+
+        transaction.update(worklogRef, {
+          status: 'on_break',
+          breaks: [...breaks, idleEntry],
+          activities: newActivities,
+          lastEventTimestamp: FieldValue.serverTimestamp()
+        });
       });
 
-      log('[worklog] addIdleBreakEntry: Added idle break entry successfully');
+      log('[worklog] addIdleBreakEntry: Transaction committed successfully');
     } else {
       log('[worklog] addIdleBreakEntry: No active worklog found for user:', uid);
     }
   } catch (e) {
     log('[worklog] Failed to add idle break entry:', e?.message || e);
+  } finally {
+    idleBreakInFlight = false;
   }
 }
 
 // Helper to close open idle break entry when user becomes active
+// Also updates activities array for consistent tracking
 async function closeOpenIdleEntry(uid) {
   try {
     const worklogsSnap = await db.collection('worklogs')
@@ -3251,23 +3304,35 @@ async function closeOpenIdleEntry(uid) {
     if (!worklogsSnap.empty) {
       const worklogDoc = worklogsSnap.docs[0];
       const worklogData = worklogDoc.data() || {};
-      const breaks = Array.isArray(worklogData.breaks) ? worklogData.breaks : [];
+      const breaks = Array.isArray(worklogData.breaks) ? [...worklogData.breaks] : [];
+      const activities = Array.isArray(worklogData.activities) ? worklogData.activities : [];
 
-      let updated = false;
+      const resumeTime = Timestamp.now();
+      let updatedBreaks = false;
+
       for (let i = breaks.length - 1; i >= 0; i--) {
         if (breaks[i].cause === 'idle' && !breaks[i].endTime) {
           log('[worklog] Closing open idle entry at index:', i);
-          breaks[i] = { ...breaks[i], endTime: Timestamp.now() };
-          updated = true;
+          breaks[i] = { ...breaks[i], endTime: resumeTime };
+          updatedBreaks = true;
         }
       }
 
-      if (updated) {
+      if (updatedBreaks) {
+        // Also update activities array - close break and start working
+        const newActivities = transitionActivities(activities, resumeTime, {
+          type: 'working',
+          startTime: resumeTime,
+          endTime: null
+        });
+
         await worklogDoc.ref.update({
+          status: 'working',
           breaks,
+          activities: newActivities,
           lastEventTimestamp: FieldValue.serverTimestamp()
         });
-        log('[worklog] Closed open idle entry successfully');
+        log('[worklog] Closed open idle entry and updated activities successfully');
       }
     }
   } catch (e) {
@@ -3313,7 +3378,16 @@ async function closeOpenBreakEntry(uid, cause) {
 
 // Atomically transition from screen_lock to idle (close screen_lock and add idle with SAME timestamp)
 // This prevents 0-duration working gaps between the two entries
+// Uses a transaction to prevent race conditions when status loop calls overlap
+// Also updates activities array for consistent tracking
 async function transitionScreenLockToIdle(uid) {
+  // Guard against concurrent calls (already guarded by idleBreakInFlight for the add case)
+  if (idleBreakInFlight) {
+    log('[worklog] transitionScreenLockToIdle: Idle break operation in flight, skipping');
+    return;
+  }
+  idleBreakInFlight = true;
+
   try {
     const worklogsSnap = await db.collection('worklogs')
       .where('userId', '==', uid)
@@ -3323,50 +3397,81 @@ async function transitionScreenLockToIdle(uid) {
 
     if (!worklogsSnap.empty) {
       const worklogDoc = worklogsSnap.docs[0];
-      const worklogData = worklogDoc.data() || {};
-      let breaks = Array.isArray(worklogData.breaks) ? [...worklogData.breaks] : [];
+      const worklogRef = worklogDoc.ref;
 
-      // Use a single timestamp for both operations to prevent gaps
-      const transitionTime = Timestamp.now();
-      let closedScreenLock = false;
-
-      // Close any open screen_lock entries
-      for (let i = breaks.length - 1; i >= 0; i--) {
-        if (breaks[i].cause === 'screen_lock' && !breaks[i].endTime) {
-          log('[worklog] transitionScreenLockToIdle: Closing screen_lock at index:', i);
-          breaks[i] = { ...breaks[i], endTime: transitionTime };
-          closedScreenLock = true;
+      // Use a transaction to ensure atomic read-modify-write
+      await db.runTransaction(async (transaction) => {
+        const freshSnap = await transaction.get(worklogRef);
+        if (!freshSnap.exists) {
+          log('[worklog] transitionScreenLockToIdle: Worklog disappeared during transaction');
+          return;
         }
-      }
 
-      // Check if idle entry already exists
-      const hasOpenIdleEntry = breaks.some(b => b.cause === 'idle' && !b.endTime);
+        const worklogData = freshSnap.data() || {};
+        let breaks = Array.isArray(worklogData.breaks) ? [...worklogData.breaks] : [];
+        const activities = Array.isArray(worklogData.activities) ? worklogData.activities : [];
 
-      if (!hasOpenIdleEntry) {
-        // Add idle entry with the SAME timestamp as screen_lock close
-        const idleEntry = {
-          startTime: transitionTime,
-          endTime: null,
-          cause: 'idle',
-          isSystemEvent: false
-        };
-        breaks.push(idleEntry);
-        log('[worklog] transitionScreenLockToIdle: Added idle entry with same timestamp');
-      }
+        // Use a single timestamp for both operations to prevent gaps
+        const transitionTime = Timestamp.now();
+        let closedScreenLock = false;
 
-      if (closedScreenLock || !hasOpenIdleEntry) {
-        await worklogDoc.ref.update({
-          breaks,
-          lastEventTimestamp: FieldValue.serverTimestamp()
-        });
-        log('[worklog] transitionScreenLockToIdle: Committed atomic transition');
-      }
+        // Close any open screen_lock entries
+        for (let i = breaks.length - 1; i >= 0; i--) {
+          if (breaks[i].cause === 'screen_lock' && !breaks[i].endTime) {
+            log('[worklog] transitionScreenLockToIdle: Closing screen_lock at index:', i);
+            breaks[i] = { ...breaks[i], endTime: transitionTime };
+            closedScreenLock = true;
+          }
+        }
+
+        // Check if idle entry already exists
+        const hasOpenIdleEntry = breaks.some(b => b.cause === 'idle' && !b.endTime);
+
+        let addedIdleEntry = false;
+        if (!hasOpenIdleEntry) {
+          // Add idle entry with the SAME timestamp as screen_lock close
+          const idleEntry = {
+            startTime: transitionTime,
+            endTime: null,
+            cause: 'idle',
+            isSystemEvent: false
+          };
+          breaks.push(idleEntry);
+          addedIdleEntry = true;
+          log('[worklog] transitionScreenLockToIdle: Added idle entry with same timestamp');
+        }
+
+        if (closedScreenLock || addedIdleEntry) {
+          // Also update activities if we added a new idle entry
+          let newActivities = activities;
+          if (addedIdleEntry) {
+            newActivities = transitionActivities(activities, transitionTime, {
+              type: 'on_break',
+              cause: 'idle',
+              startTime: transitionTime,
+              endTime: null
+            });
+          }
+
+          transaction.update(worklogRef, {
+            status: 'on_break',
+            breaks,
+            activities: newActivities,
+            lastEventTimestamp: FieldValue.serverTimestamp()
+          });
+          log('[worklog] transitionScreenLockToIdle: Transaction committed');
+        } else {
+          log('[worklog] transitionScreenLockToIdle: No changes needed (idle already exists, no screen_lock open)');
+        }
+      });
     } else {
-      // No screen_lock was open, just add idle entry
-      await addIdleBreakEntry(uid);
+      // No active worklog, nothing to do
+      log('[worklog] transitionScreenLockToIdle: No active worklog found');
     }
   } catch (e) {
     log('[worklog] transitionScreenLockToIdle failed:', e?.message || e);
+  } finally {
+    idleBreakInFlight = false;
   }
 }
 
