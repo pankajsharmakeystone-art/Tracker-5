@@ -962,12 +962,12 @@ function startRecordingSegmentLoop() {
   recordingSegmentInterval = setInterval(async () => {
     if (!currentUid || !agentClockedIn) return;
     if (!isRecordingActive) return;
-    if (!isAutoRecordingEnabled()) return;
+    // Segment recording works for both auto and manual modes
     if (recordingSegmentInFlight) return;
     recordingSegmentInFlight = true;
     try {
       await stopBackgroundRecordingAndFlush({ timeoutMs: 5000, payload: { suppressAutoResume: true } });
-      if (currentUid && agentClockedIn && isRecordingActive && isAutoRecordingEnabled()) {
+      if (currentUid && agentClockedIn && isRecordingActive) {
         startBackgroundRecording();
       }
     } catch (_) { }
@@ -2340,9 +2340,9 @@ function registerDevtoolsShortcuts(windowInstance) {
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 700,
+    width: 650,
     height: 700,
-    minWidth: 700,
+    minWidth: 650,
     minHeight: 700,
     resizable: true,
     maximizable: true,
