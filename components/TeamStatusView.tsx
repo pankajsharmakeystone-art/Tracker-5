@@ -137,8 +137,27 @@ const TeamStatusView: React.FC<Props> = ({ teamId, currentUserId, isMinimizable 
         return Array.from(agentMap.values());
     }, [workLogs]);
 
-    const workingCount = uniqueAgentLogs.filter(log => log.status === 'working').length;
-    const onBreakCount = uniqueAgentLogs.filter(log => log.status === 'on_break' || (log.status as any) === 'break').length;
+    // Count agents on break: includes status-based breaks AND idle/away agents from agentStatuses
+    const onBreakCount = uniqueAgentLogs.filter(log => {
+        const agentStatus = agentStatuses[log.userId];
+        // Agent is on break if:
+        // 1. Their worklog status is on_break/break, OR
+        // 2. They are idle (isIdle from agentStatus), OR
+        // 3. They are away/screen locked (isAway from agentStatus)
+        const isStatusBreak = log.status === 'on_break' || (log.status as any) === 'break';
+        const isIdleBreak = agentStatus?.isIdle === true;
+        const isAway = agentStatus?.isAway === true;
+        return isStatusBreak || isIdleBreak || isAway;
+    }).length;
+
+    // Count working agents: those with working status AND not idle/away
+    const workingCount = uniqueAgentLogs.filter(log => {
+        const agentStatus = agentStatuses[log.userId];
+        const isIdleBreak = agentStatus?.isIdle === true;
+        const isAway = agentStatus?.isAway === true;
+        // Only count as working if status is 'working' AND not on idle/away break
+        return log.status === 'working' && !isIdleBreak && !isAway;
+    }).length;
 
     // Sort: Working/Online first, then Break, then Offline. Within each group: current user first, then alphabetical.
     const displayLogs = [...uniqueAgentLogs].sort((a, b) => {
