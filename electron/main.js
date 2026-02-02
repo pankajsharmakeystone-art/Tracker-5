@@ -870,16 +870,8 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
       // This prevents uploading recordings to the wrong user's account
       if (ownerUid && ownerUid !== currentUid) {
         log('[uploads] skipping file owned by different user:', ownerUid, 'current:', currentUid);
-
-        // Log pending status so admin can see which files are waiting for their owner
-        await logRecordingEvent({
-          userId: ownerUid,
-          userName: ownerName,
-          fileName,
-          status: 'pending',
-          fileSize: stat.size,
-          error: 'waiting-for-owner-login'
-        });
+        // Skip logging pending status to reduce Firestore costs
+        // Only failed uploads are logged
         continue;
       }
 
@@ -915,16 +907,18 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
         log('[uploads] HTTP upload result:', httpResult.success ? 'success' : (httpResult.error || 'failed'));
         setTargetUploadResult(fileName, 'http', { success: !!httpResult?.success, error: httpResult?.error || httpResult?.reason || null });
 
-        // Log to recordingLogs collection so failed retries appear in Recording Logs panel
-        await logRecordingEvent({
-          userId: ownerUid || currentUid,
-          userName: ownerName || cachedDisplayName,
-          fileName,
-          status: httpResult.success ? 'success' : 'failed',
-          uploadTarget: 'http',
-          fileSize: stat?.size || null,
-          error: httpResult.success ? null : (httpResult.error || httpResult.reason || 'http-upload-failed')
-        });
+        // Log ONLY failed uploads to recordingLogs to reduce Firestore costs
+        if (!httpResult.success) {
+          await logRecordingEvent({
+            userId: ownerUid || currentUid,
+            userName: ownerName || cachedDisplayName,
+            fileName,
+            status: 'failed',
+            uploadTarget: 'http',
+            fileSize: stat?.size || null,
+            error: httpResult.error || httpResult.reason || 'http-upload-failed'
+          });
+        }
       }
 
       const allSucceededAfter = enabledTargets.every((t) => isTargetUploaded(fileName, t));
@@ -4695,23 +4689,21 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
       ? enabledTargets.every((t) => isTargetUploaded(fileName, t))
       : uploadResults.some((entry) => entry.success);
 
-    // Log recording events for admin visibility
+    // Log ONLY failed recording events to reduce Firestore costs
     for (const result of uploadResults) {
-      const downloadUrl = result.meta?.webViewLink || result.meta?.webContentLink ||
-        (result.meta?.id ? `https://drive.google.com/file/d/${result.meta.id}/view` : null) ||
-        (result.path && result.target === 'dropbox' ? `dropbox:${result.path}` : null);
+      if (result.success) continue;  // Skip successful uploads
 
       await logRecordingEvent({
         userId: ownerUid || currentUid,
         userName: ownerName || cachedDisplayName,
         fileName,
-        status: result.success ? 'success' : 'failed',
+        status: 'failed',
         uploadTarget: result.target,
         fileSize: buffer?.length || null,
         durationMs: meta?.durationMs || null,
         stopReason: meta?.stopReason || null,
-        downloadUrl,
-        error: result.success ? null : (result.error || result.reason || 'upload-failed')
+        downloadUrl: null,
+        error: result.error || result.reason || 'upload-failed'
       });
     }
 
