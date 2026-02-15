@@ -6,6 +6,8 @@ const { ipcRenderer, desktopCapturer } = require('electron');
 const sessions = new Map();
 let nextSaveMeta = null;
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const sanitizeName = (name) => (name || 'screen').replace(/[^a-z0-9_\-]/gi, '_');
 
 const buildConstraints = (sourceId, resolution, fps) => {
@@ -48,6 +50,58 @@ const deriveScreenLabel = (source, index = 0) => {
   return `screen${index + 1}`;
 };
 
+const sourceDiagnostics = (source, trackSettings, extra = {}) => ({
+  sourceId: source?.id || null,
+  sourceName: source?.name || null,
+  trackWidth: trackSettings?.width || null,
+  trackHeight: trackSettings?.height || null,
+  trackFrameRate: trackSettings?.frameRate || null,
+  ...extra
+});
+
+function isLikelyBlackFrame(ctx, width, height) {
+  if (!ctx || !width || !height) return true;
+  const sampleWidth = 64;
+  const sampleHeight = 36;
+  const imageData = ctx.getImageData(0, 0, Math.min(sampleWidth, width), Math.min(sampleHeight, height));
+  const data = imageData?.data;
+  if (!data || data.length === 0) return true;
+
+  let nonBlackPixels = 0;
+  const pixelCount = data.length / 4;
+  const threshold = 24;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    if (r > threshold || g > threshold || b > threshold) nonBlackPixels += 1;
+  }
+
+  return (nonBlackPixels / pixelCount) < 0.01;
+}
+
+async function validateInitialFrames(video, canvas, ctx) {
+  // Warm up a little to avoid classifying startup blank frame as a failure.
+  await delay(350);
+  const checks = 10;
+  let blackSamples = 0;
+
+  for (let i = 0; i < checks; i += 1) {
+    try {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (isLikelyBlackFrame(ctx, canvas.width, canvas.height)) {
+        blackSamples += 1;
+      }
+    } catch (_) {
+      blackSamples += 1;
+    }
+    await delay(120);
+  }
+
+  return { checks, blackSamples, blackRatio: blackSamples / checks };
+}
+
 async function startRecorderForSource(source, resolution, fps, labelOverride) {
   const { id, name } = source;
   const constraints = buildConstraints(id, resolution, fps);
@@ -75,10 +129,33 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Failed to get canvas 2d context');
 
   await video.play().catch(() => {
     // autoplay may be blocked; draw loop will still attempt
   });
+
+  try {
+    const probe = await validateInitialFrames(video, canvas, ctx);
+    if (probe.blackRatio >= 0.8) {
+      try {
+        await ipcRenderer.invoke('recorder-diagnostic', {
+          type: 'black_screen_detected',
+          ...sourceDiagnostics(source, trackSettings, {
+            requestedWidth: resolution?.width || null,
+            requestedHeight: resolution?.height || null,
+            requestedFps: fps || null,
+            checks: probe.checks,
+            blackSamples: probe.blackSamples
+          })
+        });
+      } catch (_) { }
+      throw new Error(`black-screen-detected:${id}`);
+    }
+  } catch (probeErr) {
+    inputStream.getTracks?.().forEach((t) => t.stop());
+    throw probeErr;
+  }
 
   const draw = () => {
     if (!ctx) return;
@@ -262,6 +339,18 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
       '1080p': { width: 1920, height: 1080 }
     };
     const resolution = mapping[quality] || mapping['720p'];
+    const fallbackProfiles = [];
+    const pushProfile = (res, candidateFps) => {
+      const safeFps = Math.max(5, Math.min(60, Number(candidateFps) || 30));
+      const key = `${res.width}x${res.height}@${safeFps}`;
+      if (!fallbackProfiles.some((p) => p.key === key)) {
+        fallbackProfiles.push({ key, resolution: res, fps: safeFps });
+      }
+    };
+
+    pushProfile(resolution, fps);
+    pushProfile(mapping['720p'], Math.min(24, fps || 24));
+    pushProfile(mapping['480p'], 15);
 
     const res = await ipcRenderer.invoke('recorder-get-sources');
     if (!res?.success) {
@@ -271,11 +360,58 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
     const sourcesResult = res.sources || [];
     const screenSources = sourcesResult.filter((src) => src.id?.startsWith('screen') || /screen/i.test(src.name));
     const targets = screenSources.length > 0 ? screenSources : sourcesResult;
+    const startFailures = [];
+    let startedCount = 0;
 
     for (let index = 0; index < targets.length; index += 1) {
       const src = targets[index];
       const label = deriveScreenLabel(src, index);
-      await startRecorderForSource(src, resolution, fps, label);
+      let sourceStarted = false;
+      let lastError = null;
+
+      for (const profile of fallbackProfiles) {
+        try {
+          await startRecorderForSource(src, profile.resolution, profile.fps, label);
+          sourceStarted = true;
+          startedCount += 1;
+          if (profile.key !== fallbackProfiles[0].key) {
+            try {
+              await ipcRenderer.invoke('recorder-diagnostic', {
+                type: 'source_started_with_fallback_profile',
+                sourceId: src.id,
+                sourceName: src.name,
+                profile: profile.key
+              });
+            } catch (_) { }
+          }
+          break;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+
+      if (!sourceStarted) {
+        const message = lastError?.message || String(lastError || 'unknown-start-error');
+        startFailures.push({ sourceId: src.id, sourceName: src.name, error: message });
+        try {
+          await ipcRenderer.invoke('recorder-diagnostic', {
+            type: 'source_start_failed_all_profiles',
+            sourceId: src.id,
+            sourceName: src.name,
+            error: message
+          });
+        } catch (_) { }
+      }
+    }
+
+    if (startedCount === 0) {
+      const error = new Error(`all-sources-failed:${startFailures.map((f) => f.error).join('|')}`);
+      error.failures = startFailures;
+      throw error;
+    }
+
+    if (startFailures.length > 0) {
+      console.warn('[recorder] some display sources failed to start', startFailures);
     }
   } catch (error) {
     console.error('[recorder] failed to start', error);

@@ -170,6 +170,49 @@ function hydrateEnv(filePath) {
 
 potentialEnvFiles.forEach(hydrateEnv);
 
+const GPU_FALLBACK_STATE_PATH = path.join(app.getPath("userData"), "gpu-fallback-state.json");
+
+function loadGpuFallbackState() {
+  try {
+    if (!fs.existsSync(GPU_FALLBACK_STATE_PATH)) {
+      return { disableHardwareAcceleration: false };
+    }
+    const raw = fs.readFileSync(GPU_FALLBACK_STATE_PATH, "utf8");
+    const parsed = JSON.parse(raw || "{}");
+    return {
+      disableHardwareAcceleration: parsed?.disableHardwareAcceleration === true,
+      autoEnabledAt: parsed?.autoEnabledAt || null,
+      reason: parsed?.reason || null
+    };
+  } catch (err) {
+    log("[gpu] Failed to load fallback state", err?.message || err);
+    return { disableHardwareAcceleration: false };
+  }
+}
+
+function saveGpuFallbackState(nextState = {}) {
+  try {
+    const current = loadGpuFallbackState();
+    const merged = { ...current, ...nextState };
+    fs.writeFileSync(GPU_FALLBACK_STATE_PATH, JSON.stringify(merged), "utf8");
+    return merged;
+  } catch (err) {
+    log("[gpu] Failed to save fallback state", err?.message || err);
+    return null;
+  }
+}
+
+let gpuFallbackState = loadGpuFallbackState();
+const disableHardwareAcceleration = String(process.env.DESKTOP_DISABLE_HARDWARE_ACCELERATION || "").toLowerCase() === "true"
+  || gpuFallbackState.disableHardwareAcceleration === true;
+if (disableHardwareAcceleration) {
+  app.disableHardwareAcceleration();
+  const source = String(process.env.DESKTOP_DISABLE_HARDWARE_ACCELERATION || "").toLowerCase() === "true"
+    ? "env"
+    : "auto-fallback";
+  log(`[gpu] Hardware acceleration disabled (${source})`);
+}
+
 const devToolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
 
 const envOr = (...keys) => {
@@ -4541,12 +4584,40 @@ ipcMain.handle("stop-recording", async (_, meta = {}) => {
 ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
   log("[recorder] background recorder failed", payload?.error || payload);
   await recordHealthEvent("recorder_failed", payload || {});
+  const errorText = String(payload?.error || "").toLowerCase();
+  const isBlackScreenFailure = errorText.includes("black-screen-detected");
+  if (isBlackScreenFailure && !disableHardwareAcceleration) {
+    const saved = saveGpuFallbackState({
+      disableHardwareAcceleration: true,
+      autoEnabledAt: new Date().toISOString(),
+      reason: payload?.error || "black-screen-detected"
+    });
+    if (saved?.disableHardwareAcceleration) {
+      log("[gpu] Auto-enabling hardware acceleration fallback and relaunching app");
+      setTimeout(() => {
+        try {
+          app.relaunch();
+          app.exit(0);
+        } catch (err) {
+          log("[gpu] relaunch failed", err?.message || err);
+        }
+      }, 1200);
+      return { success: true, relaunching: true, reason: "auto-gpu-fallback" };
+    }
+  }
   isRecordingActive = false;
   resetAutoResumeRetry();
   if (currentUid) {
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
   }
   scheduleAutoResumeRetry(payload?.error || "recorder-failed");
+  return { success: true };
+});
+
+ipcMain.handle("recorder-diagnostic", async (_event, payload = {}) => {
+  const eventType = String(payload?.type || "unknown");
+  log(`[recorder] diagnostic: ${eventType}`, payload);
+  await recordHealthEvent(`recorder_${eventType}`, payload || {});
   return { success: true };
 });
 
