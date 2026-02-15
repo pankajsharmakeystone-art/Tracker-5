@@ -499,18 +499,17 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
         setMergePending(log.userId);
         try {
+            const baseUrl = uploadUrl.replace(/\/upload\/?$/, '');
+            const mergeUrl = new URL('/merge-all', baseUrl);
+            mergeUrl.searchParams.set('agent', agentName);
+            mergeUrl.searchParams.set('date', dateStr);
+            mergeUrl.searchParams.set('delete', 'true');
+
+            const headers: Record<string, string> = {};
             const token = (adminSettings?.httpUploadToken || '').trim();
-            const response = await fetch('/api/recording-maintenance', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'merge',
-                    uploadUrl,
-                    agent: agentName,
-                    date: dateStr,
-                    token
-                })
-            });
+            if (token) headers.Authorization = `Bearer ${token}`;
+
+            const response = await fetch(mergeUrl.toString(), { method: 'GET', headers });
             if (!response.ok) {
                 const text = await response.text().catch(() => '');
                 alert(`Merge failed: ${response.status} ${text}`);
@@ -546,18 +545,17 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
         setRepairPending(log.userId);
         try {
+            const baseUrl = uploadUrl.replace(/\/upload\/?$/, '');
+            const repairUrl = new URL('/repair-all', baseUrl);
+            repairUrl.searchParams.set('agent', agentName);
+            repairUrl.searchParams.set('date', dateStr);
+            repairUrl.searchParams.set('onlyInvalid', 'false');
+
+            const headers: Record<string, string> = {};
             const token = (adminSettings?.httpUploadToken || '').trim();
-            const response = await fetch('/api/recording-maintenance', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'repair',
-                    uploadUrl,
-                    agent: agentName,
-                    date: dateStr,
-                    token
-                })
-            });
+            if (token) headers.Authorization = `Bearer ${token}`;
+
+            const response = await fetch(repairUrl.toString(), { method: 'GET', headers });
             if (!response.ok) {
                 const text = await response.text().catch(() => '');
                 alert(`Repair failed: ${response.status} ${text}`);
