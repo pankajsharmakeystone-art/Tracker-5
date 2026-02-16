@@ -21,12 +21,19 @@ export const signUp = async (email: string, password: string, displayName: strin
     throw new Error("An admin account already exists. Please ask your admin for an invitation to join a team.");
   }
   
-  const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-  if (userCredential.user) {
-    await updateProfile(userCredential.user, { displayName });
-    await createUserDocument(userCredential.user, { displayName, role: 'admin' });
+  try {
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+    if (userCredential.user) {
+      await updateProfile(userCredential.user, { displayName });
+      await createUserDocument(userCredential.user, { displayName, role: 'admin' });
+    }
+    return userCredential;
+  } catch (error: any) {
+    if (String(error?.message || '').includes('single-admin-enforced')) {
+      throw new Error("An admin account already exists. Please ask your admin for an invitation to join a team.");
+    }
+    throw error;
   }
-  return userCredential;
 };
 
 // Sign Up with Invite - for Agents/Managers

@@ -39,18 +39,18 @@ export const createUserDocument = async (userAuth: FirebaseUser, additionalData:
             initialTeamIds = [teamId];
         }
 
-        try {
-            await setDoc(userDocRef, {
-                displayName: userAuth.displayName || displayName,
-                email,
-                createdAt,
-                role,
-                teamId: teamId || null,
-                teamIds: initialTeamIds
-            });
-        } catch (error) {
-            console.error("Error creating user document: ", error);
+        if (role === 'admin') {
+            await assertSingleAdminConstraint(userAuth.uid);
         }
+
+        await setDoc(userDocRef, {
+            displayName: userAuth.displayName || displayName,
+            email,
+            createdAt,
+            role,
+            teamId: teamId || null,
+            teamIds: initialTeamIds
+        });
     }
     return userDocRef;
 };
@@ -79,6 +79,16 @@ export const adminExists = async (): Promise<boolean> => {
     const q = query(collection(db, "users"), where("role", "==", "admin"), limit(1));
     const querySnapshot = await getDocs(q);
     return !querySnapshot.empty;
+}
+
+const assertSingleAdminConstraint = async (targetUid: string) => {
+    const q = query(collection(db, "users"), where("role", "==", "admin"), limit(2));
+    const querySnapshot = await getDocs(q);
+    if (querySnapshot.empty) return;
+    const hasDifferentAdmin = querySnapshot.docs.some((d) => d.id !== targetUid);
+    if (hasDifferentAdmin) {
+        throw new Error("single-admin-enforced");
+    }
 }
 
 export const createTeam = async (teamName: string, adminId: string): Promise<Team> => {
@@ -209,6 +219,9 @@ export const streamUsersByTeam = (teamId: string, callback: (users: UserData[]) 
 };
 
 export const updateUser = async (uid: string, data: Partial<UserData>) => {
+    if (data?.role === 'admin') {
+        await assertSingleAdminConstraint(uid);
+    }
     const userDocRef = doc(db, 'users', uid);
     await updateDoc(userDocRef, data);
 }

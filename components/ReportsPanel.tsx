@@ -96,7 +96,7 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [users, setUsers] = useState<UserData[]>([]);
-    const [selectedUserId, setSelectedUserId] = useState('all'); // 'all' or a user UID
+    const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set()); // empty => all users
     const [organizationTimezone, setOrganizationTimezone] = useState<string | null>(null);
 
     useEffect(() => {
@@ -112,6 +112,11 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             }
         };
         fetchUsers();
+    }, [teamId]);
+
+    useEffect(() => {
+        // Reset filter when team changes.
+        setSelectedUserIds(new Set());
     }, [teamId]);
 
     useEffect(() => {
@@ -144,9 +149,9 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
         try {
             let logs = await getWorkLogsForDateRange(teamId, start, end);
 
-            // Filter if a specific user is selected
-            if (selectedUserId !== 'all') {
-                logs = logs.filter(log => log.userId === selectedUserId);
+            // Filter if specific users are selected
+            if (selectedUserIds.size > 0) {
+                logs = logs.filter(log => selectedUserIds.has(log.userId));
             }
 
             // Sort logs by date, then by user name
@@ -194,9 +199,15 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             link.setAttribute("href", encodedUri);
 
             let filename = `work_report_${startDate}_to_${endDate}`;
-            if (selectedUserId !== 'all') {
-                const selectedUserName = users.find(u => u.uid === selectedUserId)?.displayName?.replace(/\s/g, '_') || selectedUserId;
-                filename += `_${selectedUserName}`;
+            if (selectedUserIds.size > 0) {
+                const selectedNames = users
+                    .filter(u => selectedUserIds.has(u.uid))
+                    .map(u => (u.displayName || u.uid).replace(/\s+/g, '_'));
+                if (selectedNames.length === 1) {
+                    filename += `_${selectedNames[0]}`;
+                } else if (selectedNames.length > 1) {
+                    filename += `_${selectedNames.length}_users`;
+                }
             }
             filename += '.csv';
 
@@ -211,6 +222,24 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
         } finally {
             setLoading(false);
         }
+    };
+
+    const areAllUsersSelected = users.length > 0 && selectedUserIds.size === users.length;
+    const toggleAllUsers = () => {
+        if (areAllUsersSelected) {
+            setSelectedUserIds(new Set());
+        } else {
+            setSelectedUserIds(new Set(users.map(u => u.uid)));
+        }
+    };
+
+    const toggleUser = (uid: string) => {
+        setSelectedUserIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(uid)) next.delete(uid);
+            else next.add(uid);
+            return next;
+        });
     };
 
     return (
@@ -240,18 +269,36 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
                 </div>
             </div>
             <div className="mb-4">
-                <label htmlFor="user-select" className="block mb-2 text-sm font-medium text-gray-900 dark:text-white">Select User</label>
-                <select
-                    id="user-select"
-                    value={selectedUserId}
-                    onChange={(e) => setSelectedUserId(e.target.value)}
-                    className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white dark:focus:ring-blue-500 dark:focus:border-blue-500"
-                >
-                    <option value="all">All Users</option>
-                    {users.map(user => (
-                        <option key={user.uid} value={user.uid}>{user.displayName}</option>
-                    ))}
-                </select>
+                <label className="block mb-2 text-sm font-medium text-gray-900 dark:text-white">Select Users</label>
+                <div className="bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg p-2.5 max-h-52 overflow-y-auto">
+                    <label className="flex items-center gap-2 text-sm text-gray-900 dark:text-white mb-2 pb-2 border-b border-gray-200 dark:border-gray-600">
+                        <input
+                            type="checkbox"
+                            checked={areAllUsersSelected}
+                            onChange={toggleAllUsers}
+                            className="w-4 h-4"
+                        />
+                        <span>All Users</span>
+                    </label>
+                    <div className="space-y-1">
+                        {users.map((user) => (
+                            <label key={user.uid} className="flex items-center gap-2 text-sm text-gray-900 dark:text-white">
+                                <input
+                                    type="checkbox"
+                                    checked={selectedUserIds.has(user.uid)}
+                                    onChange={() => toggleUser(user.uid)}
+                                    className="w-4 h-4"
+                                />
+                                <span>{user.displayName}</span>
+                            </label>
+                        ))}
+                    </div>
+                </div>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    {selectedUserIds.size === 0
+                        ? 'No user selected means all users.'
+                        : `${selectedUserIds.size} user(s) selected.`}
+                </p>
             </div>
             <button
                 onClick={handleDownload}
