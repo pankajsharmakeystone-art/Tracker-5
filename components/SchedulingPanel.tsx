@@ -26,6 +26,17 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
     const month = currentDate.getMonth();
     const daysInMonth = useMemo(() => new Date(year, month + 1, 0).getDate(), [year, month]);
     const daysArray = useMemo(() => Array.from({ length: daysInMonth }, (_, i) => i + 1), [daysInMonth]);
+    const dayHeaders = useMemo(() => {
+        return daysArray.map((day) => {
+            const dateObj = new Date(year, month, day);
+            const dd = String(day).padStart(2, '0');
+            const mm = String(month + 1).padStart(2, '0');
+            const yy = String(year).slice(-2);
+            const dateLabel = `${dd}-${mm}-${yy}`;
+            const dayLabel = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+            return { day, dateLabel, dayLabel };
+        });
+    }, [daysArray, month, year]);
 
     const userIndexMap = useMemo(() => new Map(users.map((user, index) => [user.uid, index])), [users]);
     const dayIndexMap = useMemo(() => new Map(daysArray.map((day, index) => [day, index])), [daysArray]);
@@ -213,7 +224,14 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
                     <thead className="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400">
                         <tr>
                             <th className="py-3 px-2 sticky left-0 bg-gray-100 dark:bg-gray-700 z-20 w-40 min-w-[160px]">Agent</th>
-                            {daysArray.map(day => <th key={day} className="py-3 px-2 text-center w-28 min-w-[112px]">{day}</th>)}
+                            {dayHeaders.map(({ day, dateLabel, dayLabel }) => (
+                                <th key={day} className="py-2 px-2 text-center w-28 min-w-[112px]">
+                                    <div className="leading-tight">
+                                        <div className="text-[11px] font-semibold">{dateLabel}</div>
+                                        <div className="text-[10px] font-medium normal-case opacity-80">{dayLabel}</div>
+                                    </div>
+                                </th>
+                            ))}
                         </tr>
                     </thead>
                     <tbody>
