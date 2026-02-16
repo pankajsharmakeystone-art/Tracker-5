@@ -14,6 +14,7 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
     const [currentDate, setCurrentDate] = useState(new Date());
     const [loading, setLoading] = useState(true);
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
+    const [statsDate, setStatsDate] = useState<Date>(new Date());
     
     // Spreadsheet-like state
     const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
@@ -40,6 +41,62 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
 
     const userIndexMap = useMemo(() => new Map(users.map((user, index) => [user.uid, index])), [users]);
     const dayIndexMap = useMemo(() => new Map(daysArray.map((day, index) => [day, index])), [daysArray]);
+    const statsDateStr = `${statsDate.getFullYear()}-${String(statsDate.getMonth() + 1).padStart(2, '0')}-${String(statsDate.getDate()).padStart(2, '0')}`;
+    const statsDisplayDate = `${String(statsDate.getDate()).padStart(2, '0')}-${String(statsDate.getMonth() + 1).padStart(2, '0')}-${String(statsDate.getFullYear()).slice(-2)}`;
+    const statsDayLabel = statsDate.toLocaleDateString('en-US', { weekday: 'short' });
+    const isViewingStatsMonth = year === statsDate.getFullYear() && month === statsDate.getMonth();
+    const selectedRosterStats = useMemo(() => {
+        if (!isViewingStatsMonth) return null;
+
+        const shiftCounts = new Map<string, number>();
+        let offCount = 0;
+        let leaveCount = 0;
+        let unassignedCount = 0;
+        let rosteredCount = 0;
+
+        users.forEach((user) => {
+            const value = schedule[user.uid]?.[statsDateStr];
+            if (!value) {
+                unassignedCount += 1;
+                return;
+            }
+
+            if (value === 'OFF') {
+                offCount += 1;
+                return;
+            }
+
+            if (value === 'L') {
+                leaveCount += 1;
+                return;
+            }
+
+            rosteredCount += 1;
+            const shiftKey = `${value.startTime} - ${value.endTime}`;
+            shiftCounts.set(shiftKey, (shiftCounts.get(shiftKey) || 0) + 1);
+        });
+
+        const shifts = Array.from(shiftCounts.entries())
+            .map(([label, count]) => ({ label, count }))
+            .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+
+        return {
+            totalAgents: users.length,
+            rosteredCount,
+            offCount,
+            leaveCount,
+            unassignedCount,
+            shifts
+        };
+    }, [isViewingStatsMonth, schedule, statsDateStr, users]);
+
+    const handleStatsDateChange = (value: string) => {
+        if (!value) return;
+        const nextDate = new Date(`${value}T00:00:00`);
+        if (Number.isNaN(nextDate.getTime())) return;
+        setStatsDate(nextDate);
+        setCurrentDate(new Date(nextDate.getFullYear(), nextDate.getMonth(), 1));
+    };
 
     useEffect(() => {
         setLoading(true);
@@ -297,12 +354,77 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
     return (
         <div>
             <div className="p-4 mb-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border dark:border-gray-700">
-                <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">How to Use the Scheduler</h3>
-                <ul className="list-disc list-inside text-sm text-gray-600 dark:text-gray-400 space-y-1">
-                    <li><span className="font-semibold">Double-click</span> a cell to edit or create a custom shift.</li>
-                    <li><span className="font-semibold">Click</span> to select a cell, <span className="font-semibold">Shift+Click</span> to select a range, and <span className="font-semibold">Ctrl/Cmd+Click</span> to select multiple cells.</li>
-                    <li>Use <span className="font-semibold">Ctrl/Cmd+C</span> to copy, <span className="font-semibold">Ctrl/Cmd+V</span> to paste, and <span className="font-semibold">Delete</span> key to clear a schedule.</li>
-                </ul>
+                <div className="flex flex-col lg:flex-row gap-4 lg:items-start lg:justify-between">
+                    <div className="min-w-0">
+                        <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">How to Use the Scheduler</h3>
+                        <ul className="list-disc list-inside text-sm text-gray-600 dark:text-gray-400 space-y-1">
+                            <li><span className="font-semibold">Double-click</span> a cell to edit or create a custom shift.</li>
+                            <li><span className="font-semibold">Click</span> to select a cell, <span className="font-semibold">Shift+Click</span> to select a range, and <span className="font-semibold">Ctrl/Cmd+Click</span> to select multiple cells.</li>
+                            <li>Use <span className="font-semibold">Ctrl/Cmd+C</span> to copy, <span className="font-semibold">Ctrl/Cmd+V</span> to paste, and <span className="font-semibold">Delete</span> key to clear a schedule.</li>
+                        </ul>
+                    </div>
+                    <div className="w-full lg:w-[360px] rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
+                        <h4 className="text-sm font-semibold text-gray-900 dark:text-white">Roster Snapshot</h4>
+                        <div className="mb-3">
+                            <label htmlFor="roster-stats-date" className="block text-[11px] font-medium text-gray-600 dark:text-gray-300 mb-1">
+                                Select date
+                            </label>
+                            <input
+                                id="roster-stats-date"
+                                type="date"
+                                value={statsDateStr}
+                                onChange={(e) => handleStatsDateChange(e.target.value)}
+                                className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-900 dark:text-gray-100"
+                            />
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{statsDayLabel}, {statsDisplayDate}</p>
+                        </div>
+                        {!isViewingStatsMonth || !selectedRosterStats ? (
+                            <p className="text-xs text-gray-500 dark:text-gray-400">
+                                Loading selected month roster stats...
+                            </p>
+                        ) : (
+                            <>
+                                <div className="grid grid-cols-2 gap-2 mb-3 text-xs">
+                                    <div className="rounded border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/30 px-2 py-1">
+                                        <div className="text-[10px] uppercase tracking-wide text-blue-700 dark:text-blue-300">Rostered</div>
+                                        <div className="text-sm font-semibold text-blue-800 dark:text-blue-200">{selectedRosterStats.rosteredCount}</div>
+                                    </div>
+                                    <div className="rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 px-2 py-1">
+                                        <div className="text-[10px] uppercase tracking-wide text-gray-600 dark:text-gray-400">Off</div>
+                                        <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">{selectedRosterStats.offCount}</div>
+                                    </div>
+                                    <div className="rounded border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/30 px-2 py-1">
+                                        <div className="text-[10px] uppercase tracking-wide text-purple-700 dark:text-purple-300">Leave</div>
+                                        <div className="text-sm font-semibold text-purple-800 dark:text-purple-200">{selectedRosterStats.leaveCount}</div>
+                                    </div>
+                                    <div className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/30 px-2 py-1">
+                                        <div className="text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-300">Unassigned</div>
+                                        <div className="text-sm font-semibold text-amber-800 dark:text-amber-200">{selectedRosterStats.unassignedCount}</div>
+                                    </div>
+                                </div>
+                                <div className="text-xs text-gray-600 dark:text-gray-300">
+                                    <div className="font-semibold mb-1">Shift-wise</div>
+                                    {selectedRosterStats.shifts.length === 0 ? (
+                                        <div className="text-gray-500 dark:text-gray-400">No shift timings assigned today.</div>
+                                    ) : (
+                                        <ul className="space-y-1">
+                                            {selectedRosterStats.shifts.map((shift) => (
+                                                <li key={shift.label} className="flex items-center justify-between">
+                                                    <span className="font-mono">{shift.label}</span>
+                                                    <span className="font-semibold">{shift.count}</span>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                    <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700 font-medium flex items-center justify-between">
+                                        <span>Total agents</span>
+                                        <span>{selectedRosterStats.totalAgents}</span>
+                                    </div>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
             </div>
             {renderHeader()}
             {renderTable()}

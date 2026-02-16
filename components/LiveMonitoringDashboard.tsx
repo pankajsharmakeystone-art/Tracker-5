@@ -2,10 +2,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
 import { DateTime } from 'luxon';
-import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses, streamGlobalAdminSettings } from '../services/db';
+import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses, streamGlobalAdminSettings, streamUsersByTeam, streamScheduleForMonth, streamAllUsers, getScheduleForMonth } from '../services/db';
 import { streamAllPresence, isPresenceFresh } from '../services/presence';
 import { useAuth } from '../hooks/useAuth';
-import type { WorkLog, AdminSettingsType } from '../types';
+import type { WorkLog, AdminSettingsType, UserData, MonthlySchedule } from '../types';
 import Spinner from './Spinner';
 import LiveStreamModal from './LiveStreamModal';
 import ActivitySheet, { transformFirestoreWorklog } from './ActivitySheet';
@@ -307,6 +307,11 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
     const [mergePending, setMergePending] = useState<string | null>(null);
     const [repairPending, setRepairPending] = useState<string | null>(null);
+    const [teamUsers, setTeamUsers] = useState<UserData[]>([]);
+    const [teamMonthSchedule, setTeamMonthSchedule] = useState<MonthlySchedule>({});
+    const [allAgentUsers, setAllAgentUsers] = useState<UserData[]>([]);
+    const [allTeamsMonthSchedule, setAllTeamsMonthSchedule] = useState<Record<string, MonthlySchedule>>({});
+    const [isShiftBreakdownOpen, setIsShiftBreakdownOpen] = useState(false);
     const reconnectRequestRef = React.useRef<{ uid: string; requestId: string } | null>(null);
     const reconnectTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -334,6 +339,83 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     }, []);
 
     useEffect(() => streamGlobalAdminSettings(setAdminSettings), []);
+
+    useEffect(() => {
+        if (!teamId) {
+            setTeamUsers([]);
+            setTeamMonthSchedule({});
+            return;
+        }
+
+        const selected = new Date(`${selectedDate}T00:00:00`);
+        const year = selected.getFullYear();
+        const month = selected.getMonth() + 1;
+
+        const unsubscribeUsers = streamUsersByTeam(teamId, (users) => {
+            setTeamUsers((users || []).filter((u) => u.role === 'agent'));
+        });
+        const unsubscribeSchedule = streamScheduleForMonth(teamId, year, month, (schedule) => {
+            setTeamMonthSchedule(schedule || {});
+        });
+
+        return () => {
+            unsubscribeUsers();
+            unsubscribeSchedule();
+        };
+    }, [teamId, selectedDate]);
+
+    useEffect(() => {
+        if (teamId) {
+            setAllAgentUsers([]);
+            setAllTeamsMonthSchedule({});
+            return;
+        }
+        const unsubscribe = streamAllUsers((users) => {
+            setAllAgentUsers((users || []).filter((u) => u.role === 'agent'));
+        });
+        return () => unsubscribe();
+    }, [teamId]);
+
+    useEffect(() => {
+        if (teamId) return;
+        const selected = new Date(`${selectedDate}T00:00:00`);
+        const year = selected.getFullYear();
+        const month = selected.getMonth() + 1;
+        let cancelled = false;
+
+        const teamIds = Array.from(
+            new Set(
+                allAgentUsers.flatMap((u) => {
+                    const ids = Array.isArray(u.teamIds) && u.teamIds.length > 0
+                        ? u.teamIds
+                        : (u.teamId ? [u.teamId] : []);
+                    return ids.filter(Boolean);
+                })
+            )
+        );
+
+        if (!teamIds.length) {
+            setAllTeamsMonthSchedule({});
+            return;
+        }
+
+        (async () => {
+            const pairs = await Promise.all(
+                teamIds.map(async (id) => {
+                    const schedule = await getScheduleForMonth(id, year, month);
+                    return [id, schedule] as const;
+                })
+            );
+            if (cancelled) return;
+            setAllTeamsMonthSchedule(Object.fromEntries(pairs));
+        })().catch(() => {
+            if (!cancelled) setAllTeamsMonthSchedule({});
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [teamId, selectedDate, allAgentUsers]);
 
     const isToday = useMemo(() => {
         const d = new Date();
@@ -455,6 +537,129 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             };
         });
     }, [rawLogs, now, selectedDate, organizationTimezone, agentStatuses, presence]);
+
+    const scheduleVsActual = useMemo(() => {
+        const actualByUser = new Map<string, any>();
+        for (const agent of agents) {
+            if (!actualByUser.has(agent.userId)) {
+                actualByUser.set(agent.userId, agent);
+            }
+        }
+        const actualUsers = Array.from(actualByUser.values());
+        const actualCount = actualUsers.length;
+        const lateCount = actualUsers.filter((a) => (a.lateMinutes || 0) > 0).length;
+
+        if (!teamId) {
+            const scheduledByShift = new Map<string, number>();
+            const actualByShift = new Map<string, number>();
+            const lateByShift = new Map<string, number>();
+            const scheduledUsers = new Set<string>();
+            const scheduledUserShift = new Map<string, string>();
+
+            for (const user of allAgentUsers) {
+                const teamIds = Array.isArray(user.teamIds) && user.teamIds.length > 0
+                    ? user.teamIds
+                    : (user.teamId ? [user.teamId] : []);
+                let matchedShift: string | null = null;
+                for (const tid of teamIds) {
+                    const entry = allTeamsMonthSchedule?.[tid]?.[user.uid]?.[selectedDate];
+                    if (entry && typeof entry === 'object') {
+                        matchedShift = `${entry.startTime} - ${entry.endTime}`;
+                        break;
+                    }
+                }
+                if (!matchedShift) continue;
+                scheduledUsers.add(user.uid);
+                scheduledUserShift.set(user.uid, matchedShift);
+                scheduledByShift.set(matchedShift, (scheduledByShift.get(matchedShift) || 0) + 1);
+            }
+
+            let unscheduledPresent = 0;
+            for (const user of actualUsers) {
+                const scheduledShift = scheduledUserShift.get(user.userId);
+                if (!scheduledShift) {
+                    unscheduledPresent += 1;
+                    continue;
+                }
+                actualByShift.set(scheduledShift, (actualByShift.get(scheduledShift) || 0) + 1);
+                if ((user.lateMinutes || 0) > 0) {
+                    lateByShift.set(scheduledShift, (lateByShift.get(scheduledShift) || 0) + 1);
+                }
+            }
+
+            const scheduledCount = scheduledUsers.size;
+            const presentFromScheduled = actualUsers.filter((u) => scheduledUsers.has(u.userId)).length;
+            const absentCount = Math.max(0, scheduledCount - presentFromScheduled);
+            const shiftRows = Array.from(scheduledByShift.entries())
+                .map(([shift, scheduled]) => {
+                    const actual = actualByShift.get(shift) || 0;
+                    const late = lateByShift.get(shift) || 0;
+                    return { shift, scheduled, actual, late, variance: actual - scheduled };
+                })
+                .sort((a, b) => b.scheduled - a.scheduled || a.shift.localeCompare(b.shift));
+
+            return {
+                mode: 'global' as const,
+                scheduledCount,
+                actualCount,
+                lateCount,
+                absentCount,
+                unscheduledPresent,
+                presentPct: scheduledCount > 0 ? Math.round((presentFromScheduled / scheduledCount) * 100) : null as number | null,
+                shiftRows
+            };
+        }
+
+        const scheduledByShift = new Map<string, number>();
+        const actualByShift = new Map<string, number>();
+        const lateByShift = new Map<string, number>();
+        const scheduledUsers = new Set<string>();
+        const scheduledUserShift = new Map<string, string>();
+
+        for (const user of teamUsers) {
+            const entry = teamMonthSchedule?.[user.uid]?.[selectedDate];
+            if (!entry || typeof entry !== 'object') continue;
+            const shift = `${entry.startTime} - ${entry.endTime}`;
+            scheduledUsers.add(user.uid);
+            scheduledUserShift.set(user.uid, shift);
+            scheduledByShift.set(shift, (scheduledByShift.get(shift) || 0) + 1);
+        }
+
+        let unscheduledPresent = 0;
+        for (const user of actualUsers) {
+            const scheduledShift = scheduledUserShift.get(user.userId);
+            if (!scheduledShift) {
+                unscheduledPresent += 1;
+                continue;
+            }
+            actualByShift.set(scheduledShift, (actualByShift.get(scheduledShift) || 0) + 1);
+            if ((user.lateMinutes || 0) > 0) {
+                lateByShift.set(scheduledShift, (lateByShift.get(scheduledShift) || 0) + 1);
+            }
+        }
+
+        const scheduledCount = scheduledUsers.size;
+        const presentFromScheduled = actualUsers.filter((u) => scheduledUsers.has(u.userId)).length;
+        const absentCount = Math.max(0, scheduledCount - presentFromScheduled);
+        const shiftRows = Array.from(scheduledByShift.entries())
+            .map(([shift, scheduled]) => {
+                const actual = actualByShift.get(shift) || 0;
+                const late = lateByShift.get(shift) || 0;
+                return { shift, scheduled, actual, late, variance: actual - scheduled };
+            })
+            .sort((a, b) => b.scheduled - a.scheduled || a.shift.localeCompare(b.shift));
+
+        return {
+            mode: 'team' as const,
+            scheduledCount,
+            actualCount,
+            lateCount,
+            absentCount,
+            unscheduledPresent,
+            presentPct: scheduledCount > 0 ? Math.round((presentFromScheduled / scheduledCount) * 100) : null as number | null,
+            shiftRows
+        };
+    }, [agents, selectedDate, teamId, teamMonthSchedule, teamUsers, allAgentUsers, allTeamsMonthSchedule]);
 
     const handleForceClose = async (log: WorkLog) => {
         if (window.confirm("Force close this session? This marks it as clocked out at the last active time.")) {
@@ -725,6 +930,86 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                         className="bg-white border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
                     />
                 </div>
+            </div>
+
+            <div className="mb-4 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border dark:border-gray-700">
+                <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-sm font-semibold text-gray-900 dark:text-white">Schedule vs Actual</h4>
+                    <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {scheduleVsActual.mode === 'team' ? 'Team schedule comparison' : 'All teams schedule comparison'}
+                    </span>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mb-3">
+                    <div className="rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/40 px-2 py-2">
+                        <div className="text-[10px] uppercase text-gray-500 dark:text-gray-400">Scheduled</div>
+                        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{scheduleVsActual.scheduledCount}</div>
+                    </div>
+                    <div className="rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/40 px-2 py-2">
+                        <div className="text-[10px] uppercase text-gray-500 dark:text-gray-400">Actual</div>
+                        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{scheduleVsActual.actualCount}</div>
+                    </div>
+                    <div className="rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/40 px-2 py-2">
+                        <div className="text-[10px] uppercase text-gray-500 dark:text-gray-400">Present %</div>
+                        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                            {scheduleVsActual.presentPct === null ? 'N/A' : `${scheduleVsActual.presentPct}%`}
+                        </div>
+                    </div>
+                    <div className="rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/30 px-2 py-2">
+                        <div className="text-[10px] uppercase text-red-600 dark:text-red-300">Late</div>
+                        <div className="text-sm font-semibold text-red-700 dark:text-red-200">{scheduleVsActual.lateCount}</div>
+                    </div>
+                    <div className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/30 px-2 py-2">
+                        <div className="text-[10px] uppercase text-amber-700 dark:text-amber-300">Absent</div>
+                        <div className="text-sm font-semibold text-amber-800 dark:text-amber-200">
+                            {scheduleVsActual.absentCount === null ? 'N/A' : scheduleVsActual.absentCount}
+                        </div>
+                    </div>
+                    <div className="rounded border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/30 px-2 py-2">
+                        <div className="text-[10px] uppercase text-blue-700 dark:text-blue-300">Unscheduled Present</div>
+                        <div className="text-sm font-semibold text-blue-800 dark:text-blue-200">{scheduleVsActual.unscheduledPresent}</div>
+                    </div>
+                </div>
+
+                {scheduleVsActual.shiftRows.length > 0 && (
+                    <div>
+                        <button
+                            type="button"
+                            onClick={() => setIsShiftBreakdownOpen((prev) => !prev)}
+                            className="w-full flex items-center justify-between px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600"
+                        >
+                            <span>Shift-wise Breakdown</span>
+                            <span>{isShiftBreakdownOpen ? 'Hide' : 'Show'}</span>
+                        </button>
+                        {isShiftBreakdownOpen && (
+                            <div className="mt-2 overflow-x-auto border border-gray-200 dark:border-gray-700 rounded">
+                                <table className="w-full text-xs text-left text-gray-600 dark:text-gray-300">
+                                    <thead className="bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200">
+                                        <tr>
+                                            <th className="py-2 px-3">Shift</th>
+                                            <th className="py-2 px-3 text-center">Scheduled</th>
+                                            <th className="py-2 px-3 text-center">Actual</th>
+                                            <th className="py-2 px-3 text-center">Variance</th>
+                                            <th className="py-2 px-3 text-center">Late</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {scheduleVsActual.shiftRows.map((row) => (
+                                            <tr key={row.shift} className="border-t dark:border-gray-700">
+                                                <td className="py-2 px-3 font-mono">{row.shift}</td>
+                                                <td className="py-2 px-3 text-center">{row.scheduled}</td>
+                                                <td className="py-2 px-3 text-center">{row.actual}</td>
+                                                <td className={`py-2 px-3 text-center font-semibold ${row.variance < 0 ? 'text-red-600 dark:text-red-300' : row.variance > 0 ? 'text-emerald-600 dark:text-emerald-300' : ''}`}>
+                                                    {row.variance > 0 ? `+${row.variance}` : row.variance}
+                                                </td>
+                                                <td className="py-2 px-3 text-center">{row.late}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
 
             <div className="overflow-x-auto relative shadow-md sm:rounded-lg">
