@@ -4809,6 +4809,22 @@ ipcMain.handle("recorder-save", async (_event, fileName, arrayBuffer, meta = {})
 
 // Active file handles for incremental writes
 const activeRecordingHandles = new Map(); // sourceId -> { fd: number, tempPath: string, bytesWritten: number }
+const WEBM_EBML_HEADER = Buffer.from([0x1A, 0x45, 0xDF, 0xA3]);
+const MAX_HEADER_SCAN_BYTES = 512 * 1024;
+
+function toNodeBuffer(chunkBuffer) {
+  if (!chunkBuffer) return null;
+  if (Buffer.isBuffer(chunkBuffer)) return chunkBuffer;
+  if (chunkBuffer instanceof ArrayBuffer) return Buffer.from(chunkBuffer);
+  if (ArrayBuffer.isView(chunkBuffer)) {
+    return Buffer.from(chunkBuffer.buffer, chunkBuffer.byteOffset, chunkBuffer.byteLength);
+  }
+  if (chunkBuffer?.type === 'Buffer' && Array.isArray(chunkBuffer?.data)) {
+    return Buffer.from(chunkBuffer.data);
+  }
+  if (Array.isArray(chunkBuffer)) return Buffer.from(chunkBuffer);
+  throw new Error(`unsupported-chunk-type:${Object.prototype.toString.call(chunkBuffer)}`);
+}
 
 // Create a temp file for a recording source and return its path
 ipcMain.handle("recorder-create-temp-file", async (_event, sourceId, sourceName) => {
@@ -4820,7 +4836,15 @@ ipcMain.handle("recorder-create-temp-file", async (_event, sourceId, sourceName)
     // Open file for writing (create if doesn't exist, truncate if exists)
     const fd = fs.openSync(tempPath, 'w');
 
-    activeRecordingHandles.set(sourceId, { fd, tempPath, bytesWritten: 0, sourceName: safeName });
+    activeRecordingHandles.set(sourceId, {
+      fd,
+      tempPath,
+      bytesWritten: 0,
+      sourceName: safeName,
+      headerFound: false,
+      headerScanBuffer: Buffer.alloc(0),
+      droppedPrefixBytes: 0
+    });
     log(`[recorder] Created temp file for ${sourceId}: ${tempPath}`);
 
     return { success: true, tempPath };
@@ -4839,7 +4863,44 @@ ipcMain.handle("recorder-append-chunk", async (_event, sourceId, chunkBuffer) =>
       return { success: false, error: 'no-active-handle' };
     }
 
-    const buffer = Buffer.from(chunkBuffer);
+    let buffer = toNodeBuffer(chunkBuffer);
+    if (!buffer || buffer.length === 0) {
+      return { success: true, bytesWritten: handle.bytesWritten, skippedEmpty: true };
+    }
+
+    // Some environments prepend junk bytes before the first valid WebM header.
+    // Guard the initial write so files always start at EBML magic (1A45DFA3).
+    if (!handle.headerFound) {
+      if (handle.headerScanBuffer && handle.headerScanBuffer.length > 0) {
+        buffer = Buffer.concat([handle.headerScanBuffer, buffer]);
+      }
+
+      const headerIndex = buffer.indexOf(WEBM_EBML_HEADER);
+      if (headerIndex === -1) {
+        if (buffer.length > MAX_HEADER_SCAN_BYTES) {
+          const dropCount = buffer.length - MAX_HEADER_SCAN_BYTES;
+          handle.droppedPrefixBytes += dropCount;
+          handle.headerScanBuffer = buffer.slice(-MAX_HEADER_SCAN_BYTES);
+        } else {
+          handle.headerScanBuffer = buffer;
+        }
+        return {
+          success: true,
+          bytesWritten: handle.bytesWritten,
+          awaitingHeader: true
+        };
+      }
+
+      if (headerIndex > 0) {
+        handle.droppedPrefixBytes += headerIndex;
+        log(`[recorder] Dropped ${headerIndex} pre-header bytes for ${sourceId}`);
+      }
+
+      buffer = buffer.slice(headerIndex);
+      handle.headerFound = true;
+      handle.headerScanBuffer = Buffer.alloc(0);
+    }
+
     fs.writeSync(handle.fd, buffer);
     handle.bytesWritten += buffer.length;
 
@@ -4867,6 +4928,13 @@ ipcMain.handle("recorder-finalize", async (_event, sourceId, meta = {}) => {
     // Close the file descriptor
     fs.closeSync(handle.fd);
     log(`[recorder] Closed temp file for ${sourceId}: ${handle.bytesWritten} bytes`);
+
+    if (!handle.headerFound) {
+      try { await fs.promises.unlink(handle.tempPath); } catch (_) { }
+      activeRecordingHandles.delete(sourceId);
+      log(`[recorder] Finalize aborted: missing WebM header for ${sourceId}`);
+      return { success: false, error: 'missing-webm-header' };
+    }
 
     // Generate final filename
     const finalFileName = `recording-${handle.sourceName}-${Date.now()}.webm`;

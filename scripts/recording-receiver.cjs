@@ -70,6 +70,7 @@ const findFfmpegPath = () => {
 
 const FFMPEG_PATH = findFfmpegPath();
 console.log(`[recording-receiver] Using FFmpeg: ${FFMPEG_PATH}`);
+const WEBM_EBML_HEADER = Buffer.from([0x1A, 0x45, 0xDF, 0xA3]);
 
 // Fix WebM duration by remuxing through FFmpeg
 // This adds proper duration metadata that MediaRecorder doesn't include
@@ -153,6 +154,68 @@ async function remuxWebmToOutput(inputPath, outputPath) {
       console.error(`[ffmpeg] Remux spawn error:`, err.message);
       resolve({ success: false, error: err.message });
     });
+  });
+}
+
+async function findEbmlHeaderOffset(filePath, maxScanBytes = 1024 * 1024) {
+  let fh = null;
+  try {
+    fh = await fs.promises.open(filePath, 'r');
+    const stat = await fh.stat();
+    const scanLimit = Math.min(Number(stat?.size || 0), maxScanBytes);
+    if (!scanLimit || scanLimit < WEBM_EBML_HEADER.length) return -1;
+
+    const chunkSize = 64 * 1024;
+    let carry = Buffer.alloc(0);
+    let position = 0;
+
+    while (position < scanLimit) {
+      const readLen = Math.min(chunkSize, scanLimit - position);
+      const chunk = Buffer.alloc(readLen);
+      const readResult = await fh.read(chunk, 0, readLen, position);
+      if (!readResult || !readResult.bytesRead) break;
+
+      const data = carry.length
+        ? Buffer.concat([carry, chunk.slice(0, readResult.bytesRead)])
+        : chunk.slice(0, readResult.bytesRead);
+      const idx = data.indexOf(WEBM_EBML_HEADER);
+      if (idx !== -1) {
+        return position - carry.length + idx;
+      }
+
+      const keep = Math.max(0, WEBM_EBML_HEADER.length - 1);
+      carry = keep > 0 && data.length > keep ? data.slice(data.length - keep) : data;
+      position += readResult.bytesRead;
+    }
+    return -1;
+  } catch (_) {
+    return -1;
+  } finally {
+    if (fh) {
+      try { await fh.close(); } catch (_) { }
+    }
+  }
+}
+
+async function trimWebmToOutput(inputPath, outputPath, offset) {
+  if (!Number.isFinite(offset) || offset < 0) {
+    return { success: false, error: 'invalid-offset' };
+  }
+  return new Promise((resolve) => {
+    const read = fs.createReadStream(inputPath, { start: offset });
+    const write = fs.createWriteStream(outputPath);
+    let settled = false;
+
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    read.on('error', (err) => done({ success: false, error: err?.message || 'trim-read-failed' }));
+    write.on('error', (err) => done({ success: false, error: err?.message || 'trim-write-failed' }));
+    write.on('finish', () => done({ success: true }));
+    read.pipe(write);
   });
 }
 
@@ -567,11 +630,24 @@ const server = http.createServer(async (req, res) => {
         const parsed = path.parse(seg.name);
         const outputName = `${parsed.name}.fixed${parsed.ext || '.webm'}`;
         const outputPath = path.join(outputFolder, outputName);
-        const result = await remuxWebmToOutput(seg.path, outputPath);
+        let result = await remuxWebmToOutput(seg.path, outputPath);
+        let repairedBy = result.success ? 'ffmpeg-remux' : null;
+
+        // Fallback for files with junk prefix bytes before EBML header.
+        if (!result.success) {
+          const headerOffset = await findEbmlHeaderOffset(seg.path, 4 * 1024 * 1024);
+          if (headerOffset > 0) {
+            console.warn(`[repair-all] ${seg.name}: remux failed, trimming ${headerOffset} leading bytes`);
+            result = await trimWebmToOutput(seg.path, outputPath, headerOffset);
+            if (result.success) repairedBy = 'ebml-header-trim';
+          }
+        }
+
         results.push({
           name: seg.name,
           outputName,
           success: result.success,
+          repairedBy,
           error: result.error
         });
       }

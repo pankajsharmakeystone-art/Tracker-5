@@ -766,7 +766,12 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                 alert(`Repair failed: ${response.status} ${text}`);
                 return;
             }
-            alert('Repair request completed.');
+            const payload = await response.json().catch(() => null);
+            const repaired = Number(payload?.repaired ?? 0);
+            const failed = Number(payload?.failed ?? 0);
+            const outputFolder = String(payload?.outputFolder || '');
+            const summary = `Repair completed. Repaired: ${repaired}, Failed: ${failed}${outputFolder ? `\nOutput: ${outputFolder}` : ''}`;
+            alert(summary);
         } catch (err: any) {
             alert(`Repair failed: ${err?.message || String(err)}`);
         } finally {

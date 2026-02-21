@@ -5,6 +5,7 @@ const { ipcRenderer, desktopCapturer } = require('electron');
 
 const sessions = new Map();
 let nextSaveMeta = null;
+let fatalRecorderFailureInFlight = false;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -58,6 +59,34 @@ const sourceDiagnostics = (source, trackSettings, extra = {}) => ({
   trackFrameRate: trackSettings?.frameRate || null,
   ...extra
 });
+
+async function reportFatalRecorderFailure(errorMessage, payload = {}) {
+  if (fatalRecorderFailureInFlight) return;
+  fatalRecorderFailureInFlight = true;
+  try {
+    try {
+      await ipcRenderer.invoke('recorder-diagnostic', {
+        type: 'runtime_capture_failure',
+        error: errorMessage,
+        ...payload
+      });
+    } catch (_) { }
+    try {
+      await stopAllRecorders();
+    } catch (_) { }
+    await ipcRenderer.invoke('recorder-failed', {
+      error: errorMessage,
+      ...payload
+    });
+  } catch (_) {
+    // no-op
+  } finally {
+    // Allow another fatal signal only after a small cooldown.
+    setTimeout(() => {
+      fatalRecorderFailureInFlight = false;
+    }, 4000);
+  }
+}
 
 function isLikelyBlackFrame(ctx, width, height) {
   if (!ctx || !width || !height) return true;
@@ -135,6 +164,25 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     // autoplay may be blocked; draw loop will still attempt
   });
 
+  let mutedSinceMs = null;
+  let runtimeConsecutiveDrawFailures = 0;
+  let runtimeConsecutiveBlackSamples = 0;
+  let runtimeTick = 0;
+  let sourceFailureReported = false;
+
+  const reportSourceFailure = async (reason, extra = {}) => {
+    if (sourceFailureReported) return;
+    sourceFailureReported = true;
+    const payload = sourceDiagnostics(source, trackSettings, {
+      requestedWidth: resolution?.width || null,
+      requestedHeight: resolution?.height || null,
+      requestedFps: fps || null,
+      reason,
+      ...extra
+    });
+    await reportFatalRecorderFailure(`black-screen-detected:${id}:${reason}`, payload);
+  };
+
   try {
     const probe = await validateInitialFrames(video, canvas, ctx);
     if (probe.blackRatio >= 0.8) {
@@ -161,6 +209,26 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     if (!ctx) return;
     try {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      runtimeConsecutiveDrawFailures = 0;
+
+      runtimeTick += 1;
+      if (runtimeTick % 12 === 0) {
+        if (mutedSinceMs && (Date.now() - mutedSinceMs) > 8000) {
+          reportSourceFailure('input-track-muted-too-long', {
+            mutedForMs: Date.now() - mutedSinceMs
+          }).catch(() => { });
+        }
+        if (isLikelyBlackFrame(ctx, canvas.width, canvas.height)) {
+          runtimeConsecutiveBlackSamples += 1;
+        } else {
+          runtimeConsecutiveBlackSamples = 0;
+        }
+        if (runtimeConsecutiveBlackSamples >= 6) {
+          reportSourceFailure('runtime-black-frames', {
+            blackSamplesInRow: runtimeConsecutiveBlackSamples
+          }).catch(() => { });
+        }
+      }
 
       const fontSize = Math.max(18, Math.round(canvas.width * 0.018));
       ctx.font = `${fontSize}px Arial`;
@@ -178,6 +246,13 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       ctx.fillStyle = '#FFFFFF';
       ctx.fillText(text, 10 + padding, 10 + padding * 0.7);
     } catch (e) {
+      runtimeConsecutiveDrawFailures += 1;
+      if (runtimeConsecutiveDrawFailures >= 20) {
+        reportSourceFailure('runtime-draw-failed', {
+          drawFailureCount: runtimeConsecutiveDrawFailures,
+          error: e?.message || String(e)
+        }).catch(() => { });
+      }
       console.warn('[recorder] draw failed', e?.message || e);
     }
   };
@@ -187,6 +262,24 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   drawTimer = setInterval(draw, frameInterval);
 
   const canvasStream = canvas.captureStream(fps || 30);
+  const canvasTrack = canvasStream.getVideoTracks?.()[0];
+  if (canvasTrack) {
+    canvasTrack.onended = () => {
+      reportSourceFailure('canvas-track-ended').catch(() => { });
+    };
+  }
+
+  if (videoTrack) {
+    videoTrack.onended = () => {
+      reportSourceFailure('input-track-ended').catch(() => { });
+    };
+    videoTrack.onmute = () => {
+      mutedSinceMs = Date.now();
+    };
+    videoTrack.onunmute = () => {
+      mutedSinceMs = null;
+    };
+  }
 
   const mimeType = 'video/webm; codecs=vp9';
   const options = {
@@ -214,7 +307,7 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       for (const pendingChunk of pendingChunks) {
         try {
           const arrayBuffer = await pendingChunk.arrayBuffer();
-          await ipcRenderer.invoke('recorder-append-chunk', id, arrayBuffer);
+          await ipcRenderer.invoke('recorder-append-chunk', id, new Uint8Array(arrayBuffer));
         } catch (e) {
           console.warn('[recorder] Failed to flush pending chunk', e);
         }
@@ -251,7 +344,7 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       // Stream directly to disk via IPC
       try {
         const arrayBuffer = await event.data.arrayBuffer();
-        await ipcRenderer.invoke('recorder-append-chunk', id, arrayBuffer);
+        await ipcRenderer.invoke('recorder-append-chunk', id, new Uint8Array(arrayBuffer));
       } catch (err) {
         console.warn('[recorder] Failed to append chunk to disk', err);
       }
@@ -263,6 +356,9 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
 
   mediaRecorder.onerror = (event) => {
     console.error('[recorder] error', event?.error || event);
+    reportSourceFailure('mediarecorder-error', {
+      error: event?.error?.message || String(event?.error || event)
+    }).catch(() => { });
   };
 
   mediaRecorder.onstop = async () => {
@@ -331,6 +427,7 @@ async function stopAndFlushAllRecorders() {
 
 ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
   try {
+    fatalRecorderFailureInFlight = false;
     const quality = String(payload.recordingQuality || '720p');
     const fps = Number(payload.recordingFps || 30);
     const mapping = {
@@ -422,6 +519,7 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
 
 ipcRenderer.on('recorder-stop', async () => {
   try {
+    fatalRecorderFailureInFlight = false;
     await stopAllRecorders();
   } catch (err) {
     console.warn('[recorder] stopAll failed', err);
@@ -430,6 +528,7 @@ ipcRenderer.on('recorder-stop', async () => {
 
 ipcRenderer.on('recorder-stop-and-flush', async (_event, payload = {}) => {
   try {
+    fatalRecorderFailureInFlight = false;
     nextSaveMeta = payload || null;
     await stopAndFlushAllRecorders();
   } catch (err) {
