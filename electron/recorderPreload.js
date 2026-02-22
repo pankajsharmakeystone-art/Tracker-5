@@ -316,6 +316,7 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   const options = { mimeType: selectedMimeType };
 
   const mediaRecorder = new MediaRecorder(inputStream, options);
+  const instanceId = `${id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
   let finalizeResolve;
   const finalizePromise = new Promise((resolve) => { finalizeResolve = resolve; });
   const startTime = Date.now();
@@ -343,14 +344,17 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       }
       pendingChunks = [];
     } else {
-      console.warn('[recorder] Failed to create temp file, falling back to memory mode');
+      throw new Error(createRes?.error || 'create-temp-failed');
     }
   } catch (err) {
-    console.warn('[recorder] Temp file creation failed, falling back to memory mode', err);
+    console.warn('[recorder] Temp file creation failed', err);
+    inputStream.getTracks?.().forEach((t) => t.stop());
+    throw err;
   }
 
   // Store session data (no more recordedChunks array for memory mode)
-  sessions.set(id, {
+  const sessionRecord = {
+    instanceId,
     mediaRecorder,
     stream: inputStream,
     sourceName: label,
@@ -361,13 +365,14 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     finalizeResolve,
     monitorTimer,
     video
-  });
+  };
+  sessions.set(id, sessionRecord);
 
   mediaRecorder.ondataavailable = async (event) => {
     if (!event.data || event.data.size === 0) return;
 
     const session = sessions.get(id);
-    if (!session) return;
+    if (!session || session.instanceId !== instanceId) return;
 
     if (session.tempFileReady) {
       // Stream directly to disk via IPC
@@ -391,25 +396,22 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   };
 
   mediaRecorder.onstop = async () => {
-    const session = sessions.get(id);
     try {
-      if (!session) return;
-
       const isLastSession = sessions.size === 1;
-      const durationMs = session.startTime ? (Date.now() - session.startTime) : null;
+      const durationMs = sessionRecord.startTime ? (Date.now() - sessionRecord.startTime) : null;
       const saveMeta = { isLastSession, durationMs, ...(nextSaveMeta || {}) };
 
-      if (session.tempFileReady) {
+      if (sessionRecord.tempFileReady) {
         // Finalize: close file, move to recordings, trigger upload
         console.log('[recorder] Finalizing incremental recording for', id);
         ipcRenderer.invoke('recorder-finalize', id, saveMeta)
           .catch((err) => console.error('[recorder] finalize failed', err));
-      } else if (session.pendingChunks && session.pendingChunks.length > 0) {
+      } else if (sessionRecord.pendingChunks && sessionRecord.pendingChunks.length > 0) {
         // Fallback: use old memory-based approach (for small recordings or failures)
         console.log('[recorder] Using fallback memory-based save for', id);
-        const blob = new Blob(session.pendingChunks, { type: 'video/webm' });
+        const blob = new Blob(sessionRecord.pendingChunks, { type: 'video/webm' });
         const arrayBuffer = await blob.arrayBuffer();
-        const safeName = sanitizeName(session.sourceName || 'screen');
+        const safeName = sanitizeName(sessionRecord.sourceName || 'screen');
         const fileName = `recording-${safeName}-${Date.now()}.webm`;
         ipcRenderer.invoke('recorder-save', fileName, arrayBuffer, saveMeta)
           .catch((err) => console.error('[recorder] failed to send recording', err));
@@ -418,12 +420,20 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       console.error('[recorder] failed to finalize recording', err);
     } finally {
       try {
-        if (session?.monitorTimer) clearInterval(session.monitorTimer);
-        if (session?.video) session.video.srcObject = null;
-        session?.stream?.getTracks()?.forEach((t) => t.stop());
+        if (sessionRecord?.monitorTimer) clearInterval(sessionRecord.monitorTimer);
+        if (sessionRecord?.video) sessionRecord.video.srcObject = null;
+        sessionRecord?.stream?.getTracks()?.forEach((t) => t.stop());
       } catch (e) { }
-      sessions.delete(id);
-      session?.finalizeResolve?.();
+      const active = sessions.get(id);
+      if (active && active.instanceId === instanceId) {
+        sessions.delete(id);
+      }
+      if (sessions.size === 0) {
+        try {
+          ipcRenderer.send('recorder-state-event', { state: 'idle', reason: 'all_sessions_stopped' });
+        } catch (_) { }
+      }
+      sessionRecord?.finalizeResolve?.();
     }
   };
 
@@ -536,12 +546,23 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
       throw error;
     }
 
+    try {
+      ipcRenderer.send('recorder-state-event', {
+        state: 'recording',
+        sourceCount: startedCount,
+        failedSourceCount: startFailures.length
+      });
+    } catch (_) { }
+
     if (startFailures.length > 0) {
       console.warn('[recorder] some display sources failed to start', startFailures);
     }
   } catch (error) {
     console.error('[recorder] failed to start', error);
     await stopAllRecorders();
+    try {
+      ipcRenderer.send('recorder-state-event', { state: 'idle', reason: 'start_failed' });
+    } catch (_) { }
     ipcRenderer.invoke('recorder-failed', { error: error?.message || String(error) }).catch(() => { });
   }
 });
@@ -564,6 +585,11 @@ ipcRenderer.on('recorder-stop-and-flush', async (_event, payload = {}) => {
     console.warn('[recorder] stop-and-flush failed', err);
   } finally {
     nextSaveMeta = null;
+    if (sessions.size === 0) {
+      try {
+        ipcRenderer.send('recorder-state-event', { state: 'idle', reason: 'stop_and_flush' });
+      } catch (_) { }
+    }
     try {
       ipcRenderer.send('recorder-flushed');
     } catch (e) {

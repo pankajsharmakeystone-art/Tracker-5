@@ -662,6 +662,7 @@ async function retrySpecificRecordingUpload(fileName, logId = null) {
 // Path to the uploaded icon you asked to use for the popup
 const POPUP_ICON_PATH = "/mnt/data/a35a616b-074d-4238-a09e-5dcb70efb649.png";
 const ADMIN_SETTINGS_CACHE_PATH = path.join(app.getPath("userData"), "admin-settings.json");
+const RECORDER_PROFILE_STATE_PATH = path.join(app.getPath("userData"), "recorder-profile-state.json");
 
 // ---------- GLOBALS ----------
 let mainWindow = null;
@@ -692,6 +693,126 @@ let rtdbConnectedRef = null;
 let rtdbPresenceRef = null;
 let rtdbPresenceHeartbeatInterval = null;
 let sessionStartIsoDate = null;  // Tracks clock-in date for merge operations
+let recorderDeviceProfileState = {
+  overrideProfileIndex: 0,
+  updatedAt: null,
+  reason: null
+};
+
+const RECORDER_CAPTURE_PROFILES = [
+  { quality: '1080p', fps: 120 },
+  { quality: '1080p', fps: 60 },
+  { quality: '1080p', fps: 30 },
+  { quality: '720p', fps: 60 },
+  { quality: '720p', fps: 30 },
+  { quality: '720p', fps: 24 },
+  { quality: '480p', fps: 30 },
+  { quality: '480p', fps: 15 }
+];
+
+const QUALITY_RANK = { '480p': 1, '720p': 2, '1080p': 3 };
+
+function loadRecorderDeviceProfileState() {
+  try {
+    if (!fs.existsSync(RECORDER_PROFILE_STATE_PATH)) {
+      return;
+    }
+    const raw = fs.readFileSync(RECORDER_PROFILE_STATE_PATH, 'utf8');
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const idx = Number(parsed?.overrideProfileIndex);
+    recorderDeviceProfileState = {
+      overrideProfileIndex: Number.isFinite(idx)
+        ? Math.max(0, Math.min(RECORDER_CAPTURE_PROFILES.length - 1, idx))
+        : 0,
+      updatedAt: parsed?.updatedAt || null,
+      reason: parsed?.reason || null
+    };
+  } catch (err) {
+    log('[recorder] failed to load device profile state', err?.message || err);
+  }
+}
+
+function persistRecorderDeviceProfileState() {
+  try {
+    fs.writeFileSync(RECORDER_PROFILE_STATE_PATH, JSON.stringify(recorderDeviceProfileState), 'utf8');
+  } catch (err) {
+    log('[recorder] failed to persist device profile state', err?.message || err);
+  }
+}
+
+function normalizeQuality(value) {
+  const q = String(value || '720p').toLowerCase();
+  if (q === '1080p' || q === '720p' || q === '480p') return q;
+  return '720p';
+}
+
+function normalizeFps(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 30;
+  return Math.max(5, Math.min(120, Math.round(n)));
+}
+
+function resolveBaseProfileIndex(adminQuality, adminFps) {
+  const q = normalizeQuality(adminQuality);
+  const fps = normalizeFps(adminFps);
+  const qRank = QUALITY_RANK[q] || QUALITY_RANK['720p'];
+
+  let bestIndex = RECORDER_CAPTURE_PROFILES.length - 1;
+  for (let i = 0; i < RECORDER_CAPTURE_PROFILES.length; i += 1) {
+    const p = RECORDER_CAPTURE_PROFILES[i];
+    const pRank = QUALITY_RANK[p.quality] || 0;
+    if (pRank > qRank) continue;
+    if (p.fps > fps) continue;
+    bestIndex = i;
+    break;
+  }
+  return bestIndex;
+}
+
+function getEffectiveCaptureProfile() {
+  const adminQuality = normalizeQuality(cachedAdminSettings?.recordingQuality || '720p');
+  const adminFps = normalizeFps(cachedAdminSettings?.recordingFps || 30);
+  const baseIndex = resolveBaseProfileIndex(adminQuality, adminFps);
+  const overrideIndex = Number(recorderDeviceProfileState?.overrideProfileIndex || 0);
+  const effectiveIndex = Math.max(baseIndex, overrideIndex);
+  const profile = RECORDER_CAPTURE_PROFILES[Math.max(0, Math.min(RECORDER_CAPTURE_PROFILES.length - 1, effectiveIndex))];
+  return { profile, baseIndex, overrideIndex, effectiveIndex };
+}
+
+function shouldCountAsCaptureInstability(errorText = '') {
+  const text = String(errorText || '').toLowerCase();
+  return (
+    text.includes('runtime-stale-frame-detected') ||
+    text.includes('runtime-frame-callback-timeout') ||
+    text.includes('runtime-draw-failed') ||
+    text.includes('input-track-ended') ||
+    text.includes('mediarecorder-error')
+  );
+}
+
+function applyNextDeviceProfileFallback(reason = 'capture-instability') {
+  const current = Number(recorderDeviceProfileState?.overrideProfileIndex || 0);
+  const next = Math.min(RECORDER_CAPTURE_PROFILES.length - 1, current + 1);
+  if (next === current) return false;
+  recorderDeviceProfileState = {
+    overrideProfileIndex: next,
+    updatedAt: new Date().toISOString(),
+    reason
+  };
+  persistRecorderDeviceProfileState();
+  const p = RECORDER_CAPTURE_PROFILES[next];
+  log(`[recorder] device fallback profile updated -> ${p.quality}@${p.fps} (${reason})`);
+  recordHealthEvent('recorder_profile_fallback_applied', {
+    reason,
+    overrideProfileIndex: next,
+    quality: p.quality,
+    fps: p.fps
+  }).catch(() => { });
+  return true;
+}
+
+loadRecorderDeviceProfileState();
 
 const ensureDesktopSessionId = () => {
   if (!desktopSessionId) {
@@ -1003,7 +1124,8 @@ function startRecordingSegmentLoop() {
     if (recordingSegmentInFlight) return;
     recordingSegmentInFlight = true;
     try {
-      await stopBackgroundRecordingAndFlush({ timeoutMs: 5000, payload: { suppressAutoResume: true } });
+      // Use a longer flush timeout so segment rollover does not overlap old/new recorder sessions.
+      await stopBackgroundRecordingAndFlush({ timeoutMs: 60000, payload: { suppressAutoResume: true } });
       if (currentUid && agentClockedIn && isRecordingActive) {
         startBackgroundRecording();
       }
@@ -1093,6 +1215,19 @@ let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
 const APP_BASE_URL = process.env.APP_BASE_URL || 'https://tracker-5.vercel.app';
+const RECORDER_STATES = Object.freeze({
+  IDLE: 'idle',
+  STARTING: 'starting',
+  RECORDING: 'recording',
+  STOPPING: 'stopping',
+  RECOVERING: 'recovering'
+});
+let recorderState = RECORDER_STATES.IDLE;
+let recorderTransitionQueue = Promise.resolve();
+let recorderFailureStreak = 0;
+let recorderInstabilityStreak = 0;
+const RECORDER_RECREATE_AFTER_FAILURES = 3;
+const RECORDER_PROFILE_FALLBACK_TRIGGER = 2;
 
 let recordingSegmentInterval = null;
 let recordingSegmentInFlight = false;
@@ -2512,47 +2647,134 @@ function createRecorderWindow() {
     });
     ensureMediaPermissions(recorderWindow.webContents);
     recorderWindow.loadFile(path.join(__dirname, 'recorder.html'));
-    recorderWindow.on('closed', () => { recorderWindow = null; });
+    recorderWindow.on('closed', () => {
+      recorderWindow = null;
+      setRecorderState(RECORDER_STATES.IDLE, { reason: 'window_closed' });
+    });
   } catch (error) {
     log("[recorderWindow] failed to create", error?.message || error);
   }
 }
 
-function startBackgroundRecording() {
-  try {
-    if (!recorderWindow) createRecorderWindow();
+function setRecorderState(nextState, context = {}) {
+  if (!nextState || recorderState === nextState) return;
+  const previous = recorderState;
+  recorderState = nextState;
+  log(`[recorder] state ${previous} -> ${nextState}`, context);
+  recordHealthEvent('recorder_state_transition', {
+    from: previous,
+    to: nextState,
+    ...context
+  }).catch(() => { });
+}
+
+function enqueueRecorderTransition(fn) {
+  recorderTransitionQueue = recorderTransitionQueue
+    .then(() => fn())
+    .catch((err) => {
+      log('[recorder] transition failed', err?.message || err);
+    });
+  return recorderTransitionQueue;
+}
+
+function waitForRecorderWindowReady(timeoutMs = 10000) {
+  return new Promise((resolve) => {
     if (!recorderWindow || recorderWindow.isDestroyed()) {
-      // If we can't even reach the recorder window, recording is not actually running.
+      resolve(false);
+      return;
+    }
+    const wc = recorderWindow.webContents;
+    if (!wc || wc.isDestroyed()) {
+      resolve(false);
+      return;
+    }
+    if (!wc.isLoadingMainFrame()) {
+      resolve(true);
+      return;
+    }
+    const timer = setTimeout(() => {
+      wc.removeListener('did-finish-load', onReady);
+      resolve(false);
+    }, timeoutMs);
+    const onReady = () => {
+      clearTimeout(timer);
+      wc.removeListener('did-finish-load', onReady);
+      resolve(true);
+    };
+    wc.once('did-finish-load', onReady);
+  });
+}
+
+async function recreateRecorderWindow(reason = 'recovery') {
+  setRecorderState(RECORDER_STATES.RECOVERING, { reason });
+  try {
+    if (recorderWindow && !recorderWindow.isDestroyed()) {
+      try { recorderWindow.webContents.send('recorder-stop'); } catch (_) { }
+      try { recorderWindow.destroy(); } catch (_) { }
+    }
+  } finally {
+    recorderWindow = null;
+    createRecorderWindow();
+    await waitForRecorderWindowReady(10000);
+  }
+}
+
+function startBackgroundRecording(reason = 'unspecified') {
+  return enqueueRecorderTransition(async () => {
+    try {
+      if (!isRecordingActive) {
+        return false;
+      }
+      if (recorderState === RECORDER_STATES.STARTING || recorderState === RECORDER_STATES.RECORDING) {
+        return true;
+      }
+      if (recorderFlushWait) {
+        await recorderFlushWait.catch(() => { });
+      }
+      if (!recorderWindow || recorderWindow.isDestroyed()) {
+        createRecorderWindow();
+      }
+      const ready = await waitForRecorderWindowReady(10000);
+      if (!ready || !recorderWindow || recorderWindow.isDestroyed()) {
+        throw new Error('recorder-window-not-ready');
+      }
+      const { profile, baseIndex, overrideIndex, effectiveIndex } = getEffectiveCaptureProfile();
+      const quality = profile.quality;
+      const fps = profile.fps;
+      setRecorderState(RECORDER_STATES.STARTING, { reason, quality, fps, baseIndex, overrideIndex, effectiveIndex });
+      recorderWindow.webContents.send('recorder-start', { recordingQuality: quality, recordingFps: fps });
+      log('[recorder] start command sent', { quality, fps, reason, baseIndex, overrideIndex, effectiveIndex });
+      return true;
+    } catch (error) {
+      log('[recorder] failed to start background recording', error?.message || error);
       isRecordingActive = false;
+      setRecorderState(RECORDER_STATES.IDLE, { reason: 'start_failed' });
       if (currentUid) {
         db.collection('agentStatus').doc(currentUid)
           .set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
           .catch(() => { });
       }
-      return;
+      return false;
     }
-    const quality = String(cachedAdminSettings?.recordingQuality || "720p");
-    const fps = Number(cachedAdminSettings?.recordingFps || 30);
-    recorderWindow.webContents.send('recorder-start', { recordingQuality: quality, recordingFps: fps });
-    log('[recorder] start command sent', { quality, fps });
-  } catch (error) {
-    log('[recorder] failed to start background recording', error?.message || error);
-    isRecordingActive = false;
-    if (currentUid) {
-      db.collection('agentStatus').doc(currentUid)
-        .set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true })
-        .catch(() => { });
-    }
-  }
+  });
 }
 
 function stopBackgroundRecording() {
-  try {
-    if (!recorderWindow || recorderWindow.isDestroyed()) return;
-    recorderWindow.webContents.send('recorder-stop');
-  } catch (error) {
-    log('[recorder] failed to stop background recording', error?.message || error);
-  }
+  return enqueueRecorderTransition(async () => {
+    try {
+      if (!recorderWindow || recorderWindow.isDestroyed()) {
+        setRecorderState(RECORDER_STATES.IDLE, { reason: 'stop_no_window' });
+        return;
+      }
+      setRecorderState(RECORDER_STATES.STOPPING, { reason: 'stop' });
+      recorderWindow.webContents.send('recorder-stop');
+      // Non-flush stop has no ACK; use a short grace period before declaring idle.
+      setTimeout(() => setRecorderState(RECORDER_STATES.IDLE, { reason: 'stop_grace_elapsed' }), 2500);
+    } catch (error) {
+      log('[recorder] failed to stop background recording', error?.message || error);
+      setRecorderState(RECORDER_STATES.IDLE, { reason: 'stop_failed' });
+    }
+  });
 }
 
 function stopBackgroundRecordingAndFlush(options = {}) {
@@ -2561,12 +2783,14 @@ function stopBackgroundRecordingAndFlush(options = {}) {
   // Default to 60s (was 7s) to handle large 12hr+ recordings roughly 2-5GB
   const timeoutMs = Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 60000;
   const payload = options?.payload || {};
-  recorderFlushWait = new Promise((resolve) => {
+  recorderFlushWait = enqueueRecorderTransition(async () => new Promise((resolve) => {
     let settled = false;
+    setRecorderState(RECORDER_STATES.STOPPING, { reason: 'flush', timeoutMs });
     const done = () => {
       if (settled) return;
       settled = true;
       recorderFlushWait = null;
+      setRecorderState(RECORDER_STATES.IDLE, { reason: 'flush_complete' });
       resolve();
     };
     const timer = setTimeout(() => {
@@ -2589,7 +2813,7 @@ function stopBackgroundRecordingAndFlush(options = {}) {
       ipcMain.removeListener('recorder-flushed', handler);
       done();
     }
-  });
+  }));
   return recorderFlushWait;
 }
 
@@ -4569,7 +4793,7 @@ ipcMain.handle("stop-recording", async (_, meta = {}) => {
     const popupMessage = meta?.autoRetry ? "Recording interrupted. Retrying..." : "Recording stopped";
     showRecordingPopup(popupMessage);
     resetAutoResumeRetry();
-    stopBackgroundRecording();
+    await stopBackgroundRecordingAndFlush({ payload: { stopReason: meta?.reason || 'stop-recording' } });
     if (meta?.autoRetry) {
       scheduleAutoResumeRetry(meta?.reason || "renderer-failed");
     }
@@ -4578,6 +4802,19 @@ ipcMain.handle("stop-recording", async (_, meta = {}) => {
   } catch (e) {
     console.error("[stop-recording] error", e);
     return { success: false, error: e.message };
+  }
+});
+
+ipcMain.on("recorder-state-event", (_event, payload = {}) => {
+  const state = String(payload?.state || '').toLowerCase();
+  if (state === 'recording') {
+    recorderFailureStreak = 0;
+    recorderInstabilityStreak = 0;
+    setRecorderState(RECORDER_STATES.RECORDING, { sourceCount: payload?.sourceCount || null });
+    return;
+  }
+  if (state === 'idle') {
+    setRecorderState(RECORDER_STATES.IDLE, { reason: payload?.reason || 'renderer_idle' });
   }
 });
 
@@ -4605,10 +4842,37 @@ ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
       return { success: true, relaunching: true, reason: "auto-gpu-fallback" };
     }
   }
+  recorderFailureStreak += 1;
+  const captureInstability = shouldCountAsCaptureInstability(errorText);
+  if (captureInstability) {
+    recorderInstabilityStreak += 1;
+  } else {
+    recorderInstabilityStreak = 0;
+  }
+  setRecorderState(RECORDER_STATES.IDLE, {
+    reason: 'recorder_failed',
+    streak: recorderFailureStreak,
+    instabilityStreak: recorderInstabilityStreak,
+    error: payload?.error || null
+  });
   isRecordingActive = false;
   resetAutoResumeRetry();
   if (currentUid) {
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
+  }
+  if (recorderFailureStreak >= RECORDER_RECREATE_AFTER_FAILURES) {
+    await recreateRecorderWindow('failure-streak');
+    recorderFailureStreak = 0;
+  }
+
+  if (captureInstability && recorderInstabilityStreak >= RECORDER_PROFILE_FALLBACK_TRIGGER) {
+    const changed = applyNextDeviceProfileFallback(payload?.error || 'capture-instability');
+    recorderInstabilityStreak = 0;
+    if (changed && currentUid && agentClockedIn) {
+      await recordHealthEvent('recorder_profile_fallback_retry_scheduled', {
+        reason: payload?.error || 'capture-instability'
+      }).catch(() => { });
+    }
   }
   scheduleAutoResumeRetry(payload?.error || "recorder-failed");
   return { success: true };
@@ -4829,6 +5093,12 @@ function toNodeBuffer(chunkBuffer) {
 // Create a temp file for a recording source and return its path
 ipcMain.handle("recorder-create-temp-file", async (_event, sourceId, sourceName) => {
   try {
+    const existing = activeRecordingHandles.get(sourceId);
+    if (existing) {
+      log(`[recorder] Refusing temp file create for busy source ${sourceId}`);
+      return { success: false, error: 'source-busy' };
+    }
+
     const safeName = String(sourceName || 'screen').replace(/[^a-z0-9_\-]/gi, '_');
     const tempFileName = `temp-${safeName}-${Date.now()}.webm`;
     const tempPath = path.join(TEMP_RECORDINGS_DIR, tempFileName);
@@ -4955,6 +5225,14 @@ ipcMain.handle("recorder-finalize", async (_event, sourceId, meta = {}) => {
     // Read file stats
     const stat = await fs.promises.stat(finalPath);
     const fileSizeBytes = stat.size;
+    await recordHealthEvent('recorder_segment_finalized', {
+      sourceId,
+      sourceName: handle.sourceName,
+      fileName: finalFileName,
+      bytes: fileSizeBytes,
+      durationMs: Number(meta?.durationMs || 0) || null,
+      stopReason: meta?.stopReason || null
+    }).catch(() => { });
 
     // Check if file is valid (not empty)
     if (fileSizeBytes < 1000) {
