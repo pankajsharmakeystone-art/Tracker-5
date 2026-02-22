@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getWorkLogsForDateRange, getUsersByTeam, streamGlobalAdminSettings } from '../services/db';
+import { hasRole } from '../utils/roles';
 import type { WorkLog, UserData } from '../types';
 
 interface Props {
@@ -104,7 +105,7 @@ const ReportsPanel: React.FC<Props> = ({ teamId }) => {
             if (teamId) {
                 try {
                     const teamUsers = await getUsersByTeam(teamId);
-                    setUsers(teamUsers.filter(u => u.role === 'agent' || u.role === 'manager'));
+                    setUsers(teamUsers.filter(u => hasRole(u, 'agent') || hasRole(u, 'manager')));
                 } catch (err) {
                     console.error("Failed to fetch users for report panel:", err);
                     setUsers([]);

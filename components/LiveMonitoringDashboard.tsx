@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
+import { hasRole } from '../utils/roles';
 import { DateTime } from 'luxon';
 import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses, streamGlobalAdminSettings, streamUsersByTeam, streamScheduleForMonth, streamAllUsers, getScheduleForMonth } from '../services/db';
 import { streamAllPresence, isPresenceFresh } from '../services/presence';
@@ -352,7 +353,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         const month = selected.getMonth() + 1;
 
         const unsubscribeUsers = streamUsersByTeam(teamId, (users) => {
-            setTeamUsers((users || []).filter((u) => u.role === 'agent'));
+            setTeamUsers((users || []).filter((u) => hasRole(u, 'agent')));
         });
         const unsubscribeSchedule = streamScheduleForMonth(teamId, year, month, (schedule) => {
             setTeamMonthSchedule(schedule || {});
@@ -371,7 +372,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             return;
         }
         const unsubscribe = streamAllUsers((users) => {
-            setAllAgentUsers((users || []).filter((u) => u.role === 'agent'));
+            setAllAgentUsers((users || []).filter((u) => hasRole(u, 'agent')));
         });
         return () => unsubscribe();
     }, [teamId]);
@@ -675,8 +676,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
     const canRequestStreamForAgent = (log: WorkLog) => {
         if (!log || log.status === 'clocked_out' || !userData) return false;
-        if (userData.role === 'admin') return true;
-        if (userData.role === 'manager' && log.teamId) {
+        if (hasRole(userData, 'admin')) return true;
+        if (hasRole(userData, 'manager') && log.teamId) {
             return managerTeamIds.includes(log.teamId);
         }
         return false;
@@ -781,8 +782,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
     const canForceLogoutAgent = (log: WorkLog) => {
         if (!log?.userId || !userData) return false;
-        if (userData.role === 'admin') return true;
-        if (userData.role === 'manager' && log.teamId) {
+        if (hasRole(userData, 'admin')) return true;
+        if (hasRole(userData, 'manager') && log.teamId) {
             return managerTeamIds.includes(log.teamId);
         }
         return false;

@@ -4,6 +4,7 @@ import { DateTime } from 'luxon';
 import { db } from './firebase';
 import type { User as FirebaseUser } from 'firebase/auth';
 import type { UserData, Role, Team, WorkLog, MonthlySchedule, AdminSettingsType, ShiftTime, ShiftEntry } from '../types';
+import { getPrimaryRole, getUserRoles } from '../utils/roles';
 
 const DEFAULT_ORGANIZATION_TIMEZONE = 'Asia/Kolkata';
 
@@ -33,13 +34,15 @@ export const createUserDocument = async (userAuth: FirebaseUser, additionalData:
         const { email } = userAuth;
         const { displayName, role, teamId } = additionalData;
         const createdAt = serverTimestamp();
+        const roles = getUserRoles({ role, roles: [role] as Role[] });
+        const primaryRole = getPrimaryRole({ role, roles }) || role;
 
         let initialTeamIds: string[] = additionalData.teamIds || [];
         if (initialTeamIds.length === 0 && teamId) {
             initialTeamIds = [teamId];
         }
 
-        if (role === 'admin') {
+        if (roles.includes('admin')) {
             await assertSingleAdminConstraint(userAuth.uid);
         }
 
@@ -47,10 +50,20 @@ export const createUserDocument = async (userAuth: FirebaseUser, additionalData:
             displayName: userAuth.displayName || displayName,
             email,
             createdAt,
-            role,
+            role: primaryRole,
+            roles,
             teamId: teamId || null,
             teamIds: initialTeamIds
         });
+
+        // Bootstrap a global admin marker on first admin creation.
+        // Security rules use this to block self-created admin profiles after initial setup.
+        if (roles.includes('admin')) {
+            const adminSettingsRef = doc(db, 'adminSettings', 'global');
+            await setDoc(adminSettingsRef, {
+                createdAt: serverTimestamp()
+            }, { merge: true });
+        }
     }
     return userDocRef;
 };
@@ -66,7 +79,9 @@ export const getUserDocument = async (uid: string): Promise<UserData | null> => 
             if (!data.teamIds && data.teamId) {
                 teamIds = [data.teamId];
             }
-            return { uid, ...data, teamIds } as UserData;
+            const roles = getUserRoles(data as UserData);
+            const primaryRole = getPrimaryRole({ ...(data as UserData), roles }) || 'agent';
+            return { uid, ...data, role: primaryRole, roles, teamIds } as UserData;
         }
         return null;
     } catch (error) {
@@ -113,8 +128,8 @@ export const getTeamById = async (teamId: string): Promise<Team | null> => {
     return null;
 }
 
-export const streamTeamsForAdmin = (adminId: string, callback: (teams: Team[]) => void) => {
-    const q = query(collection(db, "teams"), where("ownerId", "==", adminId));
+export const streamTeamsForAdmin = (_adminId: string, callback: (teams: Team[]) => void) => {
+    const q = query(collection(db, "teams"));
     return onSnapshot(q, (querySnapshot) => {
         const teams = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Team));
         callback(teams);
@@ -132,7 +147,9 @@ export const getAllUsers = async (): Promise<UserData[]> => {
         const data = doc.data();
         let teamIds = data.teamIds || [];
         if (!data.teamIds && data.teamId) teamIds = [data.teamId];
-        return { uid: doc.id, ...data, teamIds } as UserData;
+        const roles = getUserRoles(data as UserData);
+        const primaryRole = getPrimaryRole({ ...(data as UserData), roles }) || 'agent';
+        return { uid: doc.id, ...data, role: primaryRole, roles, teamIds } as UserData;
     });
 }
 
@@ -144,7 +161,9 @@ export const streamAllUsers = (callback: (users: UserData[]) => void) => {
             const data = doc.data();
             let teamIds = data.teamIds || [];
             if (!data.teamIds && data.teamId) teamIds = [data.teamId];
-            return { uid: doc.id, ...data, teamIds } as UserData;
+            const roles = getUserRoles(data as UserData);
+            const primaryRole = getPrimaryRole({ ...(data as UserData), roles }) || 'agent';
+            return { uid: doc.id, ...data, role: primaryRole, roles, teamIds } as UserData;
         });
         callback(users);
     }, (error) => {
@@ -165,7 +184,9 @@ export const getUsersByTeam = async (teamId: string): Promise<UserData[]> => {
             const data = doc.data();
             let teamIds = data.teamIds || [];
             if (!data.teamIds && data.teamId) teamIds = [data.teamId];
-            usersMap.set(doc.id, { uid: doc.id, ...data, teamIds } as UserData);
+            const roles = getUserRoles(data as UserData);
+            const primaryRole = getPrimaryRole({ ...(data as UserData), roles }) || 'agent';
+            usersMap.set(doc.id, { uid: doc.id, ...data, role: primaryRole, roles, teamIds } as UserData);
         };
 
         snap1.forEach(processDoc);
@@ -197,7 +218,9 @@ export const streamUsersByTeam = (teamId: string, callback: (users: UserData[]) 
             const data = doc.data();
             let teamIds = data.teamIds || [];
             if (!data.teamIds && data.teamId) teamIds = [data.teamId];
-            return { uid: doc.id, ...data, teamIds } as UserData;
+            const roles = getUserRoles(data as UserData);
+            const primaryRole = getPrimaryRole({ ...(data as UserData), roles }) || 'agent';
+            return { uid: doc.id, ...data, role: primaryRole, roles, teamIds } as UserData;
         });
         emit();
     });
@@ -207,7 +230,9 @@ export const streamUsersByTeam = (teamId: string, callback: (users: UserData[]) 
             const data = doc.data();
             let teamIds = data.teamIds || [];
             if (!data.teamIds && data.teamId) teamIds = [data.teamId];
-            return { uid: doc.id, ...data, teamIds } as UserData;
+            const roles = getUserRoles(data as UserData);
+            const primaryRole = getPrimaryRole({ ...(data as UserData), roles }) || 'agent';
+            return { uid: doc.id, ...data, role: primaryRole, roles, teamIds } as UserData;
         });
         emit();
     });
@@ -219,12 +244,21 @@ export const streamUsersByTeam = (teamId: string, callback: (users: UserData[]) 
 };
 
 export const updateUser = async (uid: string, data: Partial<UserData>) => {
-    if (data?.role === 'admin') {
-        await assertSingleAdminConstraint(uid);
+    const nextRoles = getUserRoles(data as UserData);
+    const nextPrimaryRole = getPrimaryRole({ ...(data as UserData), roles: nextRoles }) || data.role || 'agent';
+    const payload: Partial<UserData> = { ...data };
+    if (nextRoles.length > 0) {
+        payload.roles = nextRoles;
+        payload.role = nextPrimaryRole;
     }
     const userDocRef = doc(db, 'users', uid);
-    await updateDoc(userDocRef, data);
+    await updateDoc(userDocRef, payload);
 }
+
+export const deleteUserDocument = async (uid: string) => {
+    const userDocRef = doc(db, 'users', uid);
+    await deleteDoc(userDocRef);
+};
 
 // --- Time Tracking Core Logic (Rule N1) ---
 

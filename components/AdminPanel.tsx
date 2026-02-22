@@ -124,7 +124,7 @@ const AdminPanel: React.FC = () => {
                         </div>
 
                         <div>
-                            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-3">Your Teams</h3>
+                            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-3">All Teams</h3>
                             {loading ? <Spinner /> : (
                                 <div className="space-y-3">
                                     {teams.length > 0 ? teams.map(team => (
@@ -135,7 +135,7 @@ const AdminPanel: React.FC = () => {
                                             </button>
                                         </div>
                                     )) : (
-                                        <p className="text-gray-500 dark:text-gray-400">You haven't created any teams yet.</p>
+                                        <p className="text-gray-500 dark:text-gray-400">No teams found yet.</p>
                                     )}
                                 </div>
                             )}

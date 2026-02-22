@@ -1,9 +1,10 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { streamAllUsers, streamTeamsForAdmin, updateUser } from '../services/db';
+import { streamAllUsers, streamTeamsForAdmin, updateUser, deleteUserDocument } from '../services/db';
 import type { UserData, Team, Role } from '../types';
 import Spinner from './Spinner';
 import { useAuth } from '../hooks/useAuth';
+import { getDisplayRole, getPrimaryRole, getUserRoles, hasRole } from '../utils/roles';
 
 type SortField = 'name' | 'role' | 'team';
 type SortDirection = 'asc' | 'desc';
@@ -18,6 +19,8 @@ const UserManagementTable: React.FC = () => {
     // State for Team Management Modal
     const [editingUser, setEditingUser] = useState<UserData | null>(null);
     const [tempTeamIds, setTempTeamIds] = useState<Set<string>>(new Set());
+    const [editingRolesUser, setEditingRolesUser] = useState<UserData | null>(null);
+    const [tempRoles, setTempRoles] = useState<Set<Role>>(new Set());
 
     // Filter and Sort State
     const [filterTeam, setFilterTeam] = useState<string>('all');
@@ -48,13 +51,77 @@ const UserManagementTable: React.FC = () => {
         };
     }, [adminUser]);
 
-    const handleRoleChange = async (uid: string, newRole: Role) => {
+    const handleRoleChange = async (uid: string, newRoles: Role[]) => {
+        const uniqueRoles = Array.from(new Set(newRoles));
+        if (uniqueRoles.length === 0) {
+            setError('At least one role is required.');
+            return false;
+        }
+        const simulatedUsers = users.map((u) => (
+            u.uid === uid
+                ? { ...u, roles: uniqueRoles, role: getPrimaryRole({ roles: uniqueRoles }) || 'agent' }
+                : u
+        ));
+        const adminCountAfterChange = simulatedUsers.filter((u) => hasRole(u, 'admin')).length;
+        if (adminCountAfterChange === 0) {
+            setError('At least one admin is required. Add admin role to another user before removing it.');
+            return false;
+        }
+        const newPrimaryRole = getPrimaryRole({ roles: uniqueRoles }) || 'agent';
         const originalUsers = [...users];
-        setUsers(users.map(u => u.uid === uid ? { ...u, role: newRole } : u));
+        setUsers(users.map(u => u.uid === uid ? { ...u, role: newPrimaryRole, roles: uniqueRoles } : u));
         try {
-            await updateUser(uid, { role: newRole });
+            await updateUser(uid, { role: newPrimaryRole, roles: uniqueRoles });
+            return true;
         } catch (err) {
             setError(`Failed to update role for user ${uid}.`);
+            setUsers(originalUsers);
+            return false;
+        }
+    };
+
+    const openRolesModal = (user: UserData) => {
+        setTempRoles(new Set(getUserRoles(user)));
+        setEditingRolesUser(user);
+    };
+
+    const toggleRoleSelection = (role: Role) => {
+        const newSet = new Set(tempRoles);
+        if (newSet.has(role)) {
+            newSet.delete(role);
+        } else {
+            newSet.add(role);
+        }
+        setTempRoles(newSet);
+    };
+
+    const saveRoleChanges = async () => {
+        if (!editingRolesUser) return;
+        const success = await handleRoleChange(editingRolesUser.uid, Array.from(tempRoles));
+        if (success) {
+            setEditingRolesUser(null);
+        }
+    };
+
+    const handleDeleteUser = async (target: UserData) => {
+        if (!target?.uid) return;
+        if (target.uid === adminUser?.uid) {
+            setError('You cannot delete your own account from this panel.');
+            return;
+        }
+        if (hasRole(target, 'admin')) {
+            setError('Admin users cannot be deleted from this panel.');
+            return;
+        }
+        const confirmed = window.confirm(`Delete user "${target.displayName || target.email || target.uid}"? This removes the user profile from the dashboard.`);
+        if (!confirmed) return;
+
+        const originalUsers = [...users];
+        setUsers(users.filter((u) => u.uid !== target.uid));
+        try {
+            await deleteUserDocument(target.uid);
+        } catch (err) {
+            setError(`Failed to delete user ${target.uid}.`);
             setUsers(originalUsers);
         }
     };
@@ -136,7 +203,7 @@ const UserManagementTable: React.FC = () => {
 
         // Filter by role
         if (filterRole !== 'all') {
-            result = result.filter(user => user.role === filterRole);
+            result = result.filter(user => hasRole(user, filterRole as Role));
         }
 
         // Filter by name search
@@ -156,7 +223,7 @@ const UserManagementTable: React.FC = () => {
                     comparison = (a.displayName || '').localeCompare(b.displayName || '');
                     break;
                 case 'role':
-                    comparison = (a.role || '').localeCompare(b.role || '');
+                    comparison = getDisplayRole(a).localeCompare(getDisplayRole(b));
                     break;
                 case 'team':
                     comparison = getFirstTeamName(a).localeCompare(getFirstTeamName(b));
@@ -266,26 +333,33 @@ const UserManagementTable: React.FC = () => {
                                     {getTeamNames(user)}
                                 </td>
                                 <td className="py-4 px-6">
-                                    {user.role === 'admin' ? (
-                                        <span className="capitalize">{user.role}</span>
-                                    ) : (
-                                        <select
-                                            value={user.role}
-                                            onChange={(e) => handleRoleChange(user.uid, e.target.value as Role)}
-                                            className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                                        >
-                                            <option value="agent">Agent</option>
-                                            <option value="manager">Manager</option>
-                                        </select>
-                                    )}
+                                    <span className="block text-sm text-gray-700 dark:text-gray-300">
+                                        {getDisplayRole(user)}
+                                    </span>
                                 </td>
                                 <td className="py-4 px-6">
-                                    <button
-                                        onClick={() => openTeamModal(user)}
-                                        className="font-medium text-blue-600 dark:text-blue-500 hover:underline"
-                                    >
-                                        Manage Teams
-                                    </button>
+                                    <div className="flex flex-col gap-2">
+                                        <button
+                                            onClick={() => openRolesModal(user)}
+                                            className="font-medium text-indigo-600 dark:text-indigo-400 hover:underline text-left"
+                                        >
+                                            Manage Roles
+                                        </button>
+                                        <button
+                                            onClick={() => openTeamModal(user)}
+                                            className="font-medium text-blue-600 dark:text-blue-500 hover:underline text-left"
+                                        >
+                                            Manage Teams
+                                        </button>
+                                        {!hasRole(user, 'admin') && (
+                                            <button
+                                                onClick={() => handleDeleteUser(user)}
+                                                className="font-medium text-red-600 dark:text-red-400 hover:underline text-left"
+                                            >
+                                                Delete User
+                                            </button>
+                                        )}
+                                    </div>
                                 </td>
                             </tr>
                         ))}
@@ -307,6 +381,9 @@ const UserManagementTable: React.FC = () => {
                         <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
                             Manage Teams for {editingUser.displayName}
                         </h3>
+                        {error && (
+                            <p className="mb-4 text-sm text-red-600 dark:text-red-400">{error}</p>
+                        )}
                         <div className="space-y-3 max-h-60 overflow-y-auto mb-6">
                             {teams.length > 0 ? teams.map(team => (
                                 <div key={team.id} className="flex items-center">
@@ -335,6 +412,50 @@ const UserManagementTable: React.FC = () => {
                             <button
                                 onClick={saveTeamChanges}
                                 className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 focus:ring-4 focus:ring-blue-300 dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
+                            >
+                                Save Changes
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Role Management Modal */}
+            {editingRolesUser && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6">
+                        <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
+                            Manage Roles for {editingRolesUser.displayName}
+                        </h3>
+                        {error && (
+                            <p className="mb-4 text-sm text-red-600 dark:text-red-400">{error}</p>
+                        )}
+                        <div className="space-y-3 mb-6">
+                            {(['agent', 'manager', 'admin'] as Role[]).map((role) => (
+                                <div key={role} className="flex items-center">
+                                    <input
+                                        id={`role-${editingRolesUser.uid}-${role}`}
+                                        type="checkbox"
+                                        checked={tempRoles.has(role)}
+                                        onChange={() => toggleRoleSelection(role)}
+                                        className="w-4 h-4 text-indigo-600 bg-gray-100 border-gray-300 rounded focus:ring-indigo-500 dark:focus:ring-indigo-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
+                                    />
+                                    <label htmlFor={`role-${editingRolesUser.uid}-${role}`} className="ml-2 text-sm font-medium text-gray-900 dark:text-gray-300 capitalize">
+                                        {role}
+                                    </label>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="flex justify-end gap-3">
+                            <button
+                                onClick={() => setEditingRolesUser(null)}
+                                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={saveRoleChanges}
+                                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:ring-4 focus:ring-indigo-300 dark:bg-indigo-600 dark:hover:bg-indigo-700 dark:focus:ring-indigo-800"
                             >
                                 Save Changes
                             </button>

@@ -64,6 +64,7 @@ export interface UserData {
     uid: string;
     email: string;
     role: Role;
+    roles?: Role[];
     displayName: string;
     teamId?: string;
     teamIds?: string[];

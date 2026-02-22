@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { streamScheduleForMonth, updateScheduleForMonth, streamUsersByTeam, streamGlobalAdminSettings } from '../services/db';
 import type { MonthlySchedule, UserData, ShiftTime, ShiftEntry, AdminSettingsType } from '../types';
+import { hasRole } from '../utils/roles';
 import Spinner from './Spinner';
 
 interface Props {
@@ -103,7 +104,7 @@ const SchedulingPanel: React.FC<Props> = ({ teamId }) => {
         
         // Stream users for the team (real-time)
         const unsubscribeUsers = streamUsersByTeam(teamId, (usersData) => {
-            setUsers(usersData.filter(u => u.role === 'agent'));
+            setUsers(usersData.filter(u => hasRole(u, 'agent')));
         });
 
         // Stream schedule for the month (real-time)

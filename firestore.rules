@@ -9,10 +9,27 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/users/$(uid)).data;
     }
 
+    function userDocExists(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function adminBootstrapDocExists() {
+      return exists(/databases/$(database)/documents/adminSettings/global);
+    }
+
     function hasRole(role) {
       return isSignedIn() && (
         request.auth.token.role == role ||
-        userDoc(request.auth.uid).role == role
+        (
+          userDocExists(request.auth.uid) &&
+          (
+            userDoc(request.auth.uid).role == role ||
+            (
+              userDoc(request.auth.uid).roles != null &&
+              userDoc(request.auth.uid).roles.hasAny([role])
+            )
+          )
+        )
       );
     }
 
@@ -39,6 +56,21 @@ service cloud.firestore {
       return isManager() && teamsForUser(request.auth.uid).hasAny([teamId]);
     }
 
+    function payloadHasAdminRole() {
+      return request.resource.data.role == 'admin'
+        || (
+          request.resource.data.roles != null
+          && request.resource.data.roles.hasAny(['admin'])
+        );
+    }
+
+    function isFirstAdminBootstrap(userId) {
+      return isSignedIn()
+        && request.auth.uid == userId
+        && payloadHasAdminRole()
+        && !adminBootstrapDocExists();
+    }
+
     match /adminSettings/{docId} {
       allow read, write: if isAdmin();
     }
@@ -52,9 +84,26 @@ service cloud.firestore {
 
       // Managers may need to update limited operational fields for users on their team
       // (e.g., during force logout / clock-out flows).
-      allow create: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow create: if isAdmin()
+        || isFirstAdminBootstrap(userId)
+        || (
+          isSignedIn()
+          && request.auth.uid == userId
+          && !payloadHasAdminRole()
+        );
       allow update: if isAdmin()
-        || (isSignedIn() && request.auth.uid == userId)
+        || (
+          isSignedIn()
+          && request.auth.uid == userId
+          && !request.resource.data.diff(resource.data).changedKeys().hasAny([
+            "role",
+            "roles",
+            "teamId",
+            "teamIds",
+            "createdAt",
+            "email"
+          ])
+        )
         || (
           isManagerOfUser(userId)
           && request.resource.data.diff(resource.data).changedKeys().hasOnly([
@@ -99,8 +148,48 @@ service cloud.firestore {
       allow read, write: if isAdmin() || (isSignedIn() && request.auth.uid == uid) || isManagerOfUser(uid);
     }
 
+    match /recordingLogs/{logId} {
+      allow read: if isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid)
+        || isManagerOfTeam(resource.data.teamId);
+
+      allow create: if isAdmin()
+        || (isSignedIn() && request.resource.data.userId == request.auth.uid);
+
+      allow update, delete: if isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid)
+        || isManagerOfTeam(resource.data.teamId);
+    }
+
+    match /recordingRetryCommands/{logId} {
+      allow read: if isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid)
+        || isManagerOfUser(resource.data.userId);
+
+      allow create: if isAdmin()
+        || (
+          isManager()
+          && request.resource.data.userId != null
+          && isManagerOfUser(request.resource.data.userId)
+        );
+
+      allow update, delete: if isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /autoClockConfigs/{uid} {
+      allow read, write: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
+    }
+
+    match /liveSessions/{agentUid} {
+      allow read, write: if isAdmin()
+        || isManagerOfUser(agentUid)
+        || (isSignedIn() && request.auth.uid == agentUid);
+    }
+
     match /{document=**} {
-      allow read, write: if isSignedIn();
+      allow read: if isSignedIn();
+      allow write: if false;
     }
   }
 }

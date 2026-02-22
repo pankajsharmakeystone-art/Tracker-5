@@ -32,18 +32,6 @@ const buildConstraints = (sourceId, resolution, fps) => {
   };
 };
 
-const pad2 = (value) => String(value).padStart(2, '0');
-
-const formatTimestamp = (date = new Date()) => {
-  const dd = pad2(date.getDate());
-  const mm = pad2(date.getMonth() + 1);
-  const yyyy = date.getFullYear();
-  const HH = pad2(date.getHours());
-  const MM = pad2(date.getMinutes());
-  const SS = pad2(date.getSeconds());
-  return `${dd}/${mm}/${yyyy}  ${HH}:${MM}:${SS}`;
-};
-
 const deriveScreenLabel = (source, index = 0) => {
   const name = String(source?.name || '').trim();
   const match = name.match(/(?:screen|display|monitor)\s*([0-9]+)/i);
@@ -110,6 +98,31 @@ function isLikelyBlackFrame(ctx, width, height) {
   return (nonBlackPixels / pixelCount) < 0.01;
 }
 
+function computeFrameFingerprint(ctx, width, height) {
+  if (!ctx || !width || !height) return null;
+  const sampleWidth = Math.min(64, width);
+  const sampleHeight = Math.min(36, height);
+  const imageData = ctx.getImageData(0, 0, sampleWidth, sampleHeight);
+  const data = imageData?.data;
+  if (!data || data.length === 0) return null;
+
+  // Small quantized fingerprint for freeze detection.
+  const buckets = [];
+  const stepX = Math.max(1, Math.floor(sampleWidth / 8));
+  const stepY = Math.max(1, Math.floor(sampleHeight / 6));
+  for (let y = 0; y < sampleHeight; y += stepY) {
+    for (let x = 0; x < sampleWidth; x += stepX) {
+      const i = (y * sampleWidth + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const lum = Math.floor(((r + g + b) / 3) / 16);
+      buckets.push(lum.toString(16));
+    }
+  }
+  return buckets.join('');
+}
+
 async function validateInitialFrames(video, canvas, ctx) {
   // Warm up a little to avoid classifying startup blank frame as a failure.
   await delay(350);
@@ -154,11 +167,12 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   video.muted = true;
   video.playsInline = true;
 
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Failed to get canvas 2d context');
+  // Analysis canvas is only for health checks. Recording uses raw capture stream.
+  const analysisCanvas = document.createElement('canvas');
+  analysisCanvas.width = Math.min(640, width || 640);
+  analysisCanvas.height = Math.min(360, height || 360);
+  const analysisCtx = analysisCanvas.getContext('2d');
+  if (!analysisCtx) throw new Error('Failed to get analysis canvas context');
 
   await video.play().catch(() => {
     // autoplay may be blocked; draw loop will still attempt
@@ -167,7 +181,11 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   let mutedSinceMs = null;
   let runtimeConsecutiveDrawFailures = 0;
   let runtimeConsecutiveBlackSamples = 0;
-  let runtimeTick = 0;
+  let monitorTick = 0;
+  let lastFrameCallbackAt = Date.now();
+  let monitorTimer = null;
+  let lastFingerprint = null;
+  let sameFingerprintChecks = 0;
   let sourceFailureReported = false;
 
   const reportSourceFailure = async (reason, extra = {}) => {
@@ -184,7 +202,7 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   };
 
   try {
-    const probe = await validateInitialFrames(video, canvas, ctx);
+    const probe = await validateInitialFrames(video, analysisCanvas, analysisCtx);
     if (probe.blackRatio >= 0.8) {
       try {
         await ipcRenderer.invoke('recorder-diagnostic', {
@@ -205,49 +223,59 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     throw probeErr;
   }
 
-  const draw = () => {
-    if (!ctx) return;
+  if (typeof video.requestVideoFrameCallback === 'function') {
+    const onFrame = () => {
+      lastFrameCallbackAt = Date.now();
+      if (video && video.srcObject) {
+        try { video.requestVideoFrameCallback(onFrame); } catch (_) { }
+      }
+    };
+    try { video.requestVideoFrameCallback(onFrame); } catch (_) { }
+  }
+
+  const monitorCaptureHealth = () => {
+    if (!analysisCtx) return;
     try {
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height);
       runtimeConsecutiveDrawFailures = 0;
 
-      runtimeTick += 1;
-      if (runtimeTick % 12 === 0) {
+      monitorTick += 1;
+      if (monitorTick % 2 === 0) {
         if (mutedSinceMs && (Date.now() - mutedSinceMs) > 8000) {
           reportSourceFailure('input-track-muted-too-long', {
             mutedForMs: Date.now() - mutedSinceMs
           }).catch(() => { });
         }
-        if (isLikelyBlackFrame(ctx, canvas.width, canvas.height)) {
+        if (isLikelyBlackFrame(analysisCtx, analysisCanvas.width, analysisCanvas.height)) {
           runtimeConsecutiveBlackSamples += 1;
         } else {
           runtimeConsecutiveBlackSamples = 0;
         }
-        if (runtimeConsecutiveBlackSamples >= 6) {
+        if (runtimeConsecutiveBlackSamples >= 10) {
           reportSourceFailure('runtime-black-frames', {
             blackSamplesInRow: runtimeConsecutiveBlackSamples
           }).catch(() => { });
         }
+
+        const fingerprint = computeFrameFingerprint(analysisCtx, analysisCanvas.width, analysisCanvas.height);
+        if (fingerprint && fingerprint === lastFingerprint) {
+          sameFingerprintChecks += 1;
+        } else {
+          sameFingerprintChecks = 0;
+          lastFingerprint = fingerprint;
+        }
+
+        // Detect long-running frozen image (not necessarily black).
+        // Runs every ~2s; threshold 90 ~= 3 minutes.
+        if (sameFingerprintChecks >= 90) {
+          reportSourceFailure('runtime-stale-frame-detected', {
+            staleForApproxSeconds: sameFingerprintChecks * 2
+          }).catch(() => { });
+        }
       }
-
-      const fontSize = Math.max(18, Math.round(canvas.width * 0.018));
-      ctx.font = `${fontSize}px Arial`;
-      ctx.textBaseline = 'top';
-
-      const text = formatTimestamp(new Date());
-      const padding = Math.max(6, Math.round(fontSize * 0.4));
-      const textWidth = ctx.measureText(text).width;
-      const boxWidth = textWidth + padding * 2;
-      const boxHeight = fontSize + padding * 1.4;
-
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-      ctx.fillRect(10, 10, boxWidth, boxHeight);
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(text, 10 + padding, 10 + padding * 0.7);
     } catch (e) {
       runtimeConsecutiveDrawFailures += 1;
-      if (runtimeConsecutiveDrawFailures >= 20) {
+      if (runtimeConsecutiveDrawFailures >= 12) {
         reportSourceFailure('runtime-draw-failed', {
           drawFailureCount: runtimeConsecutiveDrawFailures,
           error: e?.message || String(e)
@@ -255,19 +283,19 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       }
       console.warn('[recorder] draw failed', e?.message || e);
     }
+
+    // Detect frozen capture pipeline even when pixels are unchanged.
+    if (typeof video.requestVideoFrameCallback === 'function') {
+      const msSinceLastFrame = Date.now() - lastFrameCallbackAt;
+      if (msSinceLastFrame > 20000) {
+        reportSourceFailure('runtime-frame-callback-timeout', {
+          msSinceLastFrame
+        }).catch(() => { });
+      }
+    }
   };
 
-  let drawTimer = null;
-  const frameInterval = Math.max(250, Math.round(1000 / (fps || 30)));
-  drawTimer = setInterval(draw, frameInterval);
-
-  const canvasStream = canvas.captureStream(fps || 30);
-  const canvasTrack = canvasStream.getVideoTracks?.()[0];
-  if (canvasTrack) {
-    canvasTrack.onended = () => {
-      reportSourceFailure('canvas-track-ended').catch(() => { });
-    };
-  }
+  monitorTimer = setInterval(monitorCaptureHealth, 1000);
 
   if (videoTrack) {
     videoTrack.onended = () => {
@@ -282,11 +310,12 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   }
 
   const mimeType = 'video/webm; codecs=vp9';
-  const options = {
-    mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm'
-  };
+  const selectedMimeType = MediaRecorder.isTypeSupported(mimeType)
+    ? mimeType
+    : (MediaRecorder.isTypeSupported('video/webm; codecs=vp8') ? 'video/webm; codecs=vp8' : 'video/webm');
+  const options = { mimeType: selectedMimeType };
 
-  const mediaRecorder = new MediaRecorder(canvasStream, options);
+  const mediaRecorder = new MediaRecorder(inputStream, options);
   let finalizeResolve;
   const finalizePromise = new Promise((resolve) => { finalizeResolve = resolve; });
   const startTime = Date.now();
@@ -330,8 +359,8 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     tempFileReady,
     pendingChunks: tempFileReady ? null : [],  // Only use if temp file failed
     finalizeResolve,
-    drawTimer,
-    canvasStream
+    monitorTimer,
+    video
   });
 
   mediaRecorder.ondataavailable = async (event) => {
@@ -389,8 +418,8 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       console.error('[recorder] failed to finalize recording', err);
     } finally {
       try {
-        if (session?.drawTimer) clearInterval(session.drawTimer);
-        session?.canvasStream?.getTracks?.()?.forEach((t) => t.stop());
+        if (session?.monitorTimer) clearInterval(session.monitorTimer);
+        if (session?.video) session.video.srcObject = null;
         session?.stream?.getTracks()?.forEach((t) => t.stop());
       } catch (e) { }
       sessions.delete(id);

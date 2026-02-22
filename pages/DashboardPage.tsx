@@ -8,6 +8,7 @@ import Spinner from '../components/Spinner';
 import AdminPanel from '../components/AdminPanel';
 import AgentPanel from '../components/AgentPanel';
 import ManagerPanel from '../components/ManagerPanel';
+import { hasRole } from '../utils/roles';
 
 const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> => {
     let timer: number | undefined;
@@ -31,6 +32,7 @@ const DashboardPage: React.FC = () => {
     const [autoClockOutMessage, setAutoClockOutMessage] = useState<string | null>(null);
     const [signingOut, setSigningOut] = useState(false);
     const [agentWebBlocked, setAgentWebBlocked] = useState(false);
+    const [dualRoleView, setDualRoleView] = useState<'manager' | 'agent'>('manager');
     const currentUid = userData?.uid || user?.uid || null;
     const currentUidRef = useRef<string | null>(currentUid);
     const isDesktopEnv = typeof window !== 'undefined' && Boolean(window.desktopAPI);
@@ -57,8 +59,9 @@ const DashboardPage: React.FC = () => {
     }, [loading, user, userData]);
 
     useEffect(() => {
-        if (!loading && userData?.role === 'agent') {
-            setAgentWebBlocked(!isDesktopEnv);
+        if (!loading && userData) {
+            const isAgentOnly = hasRole(userData, 'agent') && !hasRole(userData, 'manager') && !hasRole(userData, 'admin');
+            setAgentWebBlocked(isAgentOnly && !isDesktopEnv);
         } else {
             setAgentWebBlocked(false);
         }
@@ -193,16 +196,38 @@ const DashboardPage: React.FC = () => {
     const displayName = userData?.displayName || user?.displayName || user?.email;
 
     const renderContent = () => {
-        switch (userData.role) {
-            case 'admin':
-                return <AdminPanel />;
-            case 'manager':
-                return <ManagerPanel />;
-            case 'agent':
-                 return <AgentPanel />;
-            default:
-                return <p className="text-red-500">Error: Invalid user role.</p>;
+        if (hasRole(userData, 'admin')) {
+            return <AdminPanel />;
         }
+
+        const isManager = hasRole(userData, 'manager');
+        const isAgent = hasRole(userData, 'agent');
+
+        if (isManager && isAgent) {
+            return (
+                <div>
+                    <div className="mb-4 flex gap-2">
+                        <button
+                            onClick={() => setDualRoleView('manager')}
+                            className={`px-3 py-1.5 rounded-md text-sm ${dualRoleView === 'manager' ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200'}`}
+                        >
+                            Manager View
+                        </button>
+                        <button
+                            onClick={() => setDualRoleView('agent')}
+                            className={`px-3 py-1.5 rounded-md text-sm ${dualRoleView === 'agent' ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200'}`}
+                        >
+                            Agent View
+                        </button>
+                    </div>
+                    {dualRoleView === 'manager' ? <ManagerPanel /> : <AgentPanel />}
+                </div>
+            );
+        }
+
+        if (isManager) return <ManagerPanel />;
+        if (isAgent) return <AgentPanel />;
+        return <p className="text-red-500">Error: Invalid user role.</p>;
     };
 
 
