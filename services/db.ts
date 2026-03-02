@@ -3,7 +3,7 @@ import { doc, setDoc, getDoc, serverTimestamp, collection, query, where, getDocs
 import { DateTime } from 'luxon';
 import { db } from './firebase';
 import type { User as FirebaseUser } from 'firebase/auth';
-import type { UserData, Role, Team, WorkLog, MonthlySchedule, AdminSettingsType, ShiftTime, ShiftEntry } from '../types';
+import type { UserData, Role, Team, WorkLog, MonthlySchedule, AdminSettingsType, ShiftTime, ShiftEntry, AppActivitySummary, AppAlert } from '../types';
 import { getPrimaryRole, getUserRoles } from '../utils/roles';
 
 const DEFAULT_ORGANIZATION_TIMEZONE = 'Asia/Kolkata';
@@ -1172,6 +1172,69 @@ export const forceLogoutAgent = async (uid: string) => {
     }
 };
 
+// --- App Activity Tracking ---
+
+export const writeAppActivitySummary = async (userId: string, date: string, summary: AppActivitySummary) => {
+    const docId = `${userId}_${date}`;
+    const docRef = doc(db, 'appActivity', docId);
+    await setDoc(docRef, {
+        ...summary,
+        userId,
+        date,
+        updatedAt: serverTimestamp()
+    }, { merge: true });
+};
+
+export const streamAppActivitySummary = (userId: string, date: string, callback: (summary: AppActivitySummary | null) => void) => {
+    const docId = `${userId}_${date}`;
+    const docRef = doc(db, 'appActivity', docId);
+    return onSnapshot(docRef, (docSnap) => {
+        if (docSnap.exists()) {
+            callback(docSnap.data() as AppActivitySummary);
+        } else {
+            callback(null);
+        }
+    }, (error) => {
+        console.error('[streamAppActivitySummary] error:', error);
+        callback(null);
+    });
+};
+
+export const streamAppActivitySummaries = (date: string, callback: (summaries: AppActivitySummary[]) => void, teamId?: string) => {
+    const activitiesRef = collection(db, 'appActivity');
+    const q = query(activitiesRef, where('date', '==', date));
+    return onSnapshot(q, async (snapshot) => {
+        let summaries = snapshot.docs.map(d => ({ ...d.data() } as AppActivitySummary));
+        if (teamId) {
+            // Filter by team: look up users to check teamId
+            const usersSnap = await getDocs(collection(db, 'users'));
+            const teamUserIds = new Set<string>();
+            usersSnap.docs.forEach(u => {
+                const data = u.data();
+                const userTeams = data.teamIds || (data.teamId ? [data.teamId] : []);
+                if (userTeams.includes(teamId)) teamUserIds.add(u.id);
+            });
+            summaries = summaries.filter(s => teamUserIds.has(s.userId));
+        }
+        callback(summaries);
+    }, (error) => {
+        console.error('[streamAppActivitySummaries] error:', error);
+        callback([]);
+    });
+};
+
+export const getAppActivityForDateRange = async (userId: string, startDate: string, endDate: string): Promise<AppActivitySummary[]> => {
+    const activitiesRef = collection(db, 'appActivity');
+    const q = query(
+        activitiesRef,
+        where('userId', '==', userId),
+        where('date', '>=', startDate),
+        where('date', '<=', endDate)
+    );
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(d => ({ ...d.data() } as AppActivitySummary));
+};
+
 // --- Recording Logs ---
 
 export type RecordingLogEntry = {
@@ -1344,4 +1407,38 @@ export const getRetryCommandStatus = async (logId: string): Promise<{
         console.error('[getRetryCommandStatus] error:', error);
         return { status: 'not_found', error: (error as Error).message };
     }
+};
+
+// --- App Alerts (Red Flag Notifications) ---
+
+export const streamRecentAppAlerts = (
+    callback: (alerts: AppAlert[]) => void,
+    teamId?: string,
+    sessionStart: number = Date.now()
+): (() => void) => {
+    const alertsRef = collection(db, 'appAlerts');
+    // Keep query index-light (no compound where+orderBy), then filter/sort client-side.
+    // This avoids silent failures when index definitions lag behind deployments.
+    const q = teamId
+        ? query(alertsRef, where('teamId', '==', teamId), limit(200))
+        : query(alertsRef, limit(200));
+
+    const toMillis = (value: any): number => {
+        if (typeof value === 'number') return value;
+        if (value && typeof value.toMillis === 'function') return value.toMillis();
+        if (value && typeof value.seconds === 'number') return value.seconds * 1000;
+        return 0;
+    };
+
+    return onSnapshot(q, (snap) => {
+        const alerts: AppAlert[] = snap.docs
+            .map(d => ({ id: d.id, ...d.data() } as AppAlert))
+            .filter(a => toMillis((a as any).timestamp || (a as any).createdAt) >= sessionStart)
+            .sort((a, b) => toMillis((b as any).timestamp || (b as any).createdAt) - toMillis((a as any).timestamp || (a as any).createdAt))
+            .slice(0, 50);
+        callback(alerts);
+    }, (error) => {
+        console.error('[streamRecentAppAlerts] snapshot error:', error);
+        callback([]);
+    });
 };

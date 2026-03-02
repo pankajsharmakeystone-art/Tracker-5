@@ -15,6 +15,46 @@ export interface ActivityEntry {
     cause?: 'manual' | 'idle';
 }
 
+// --- App & Website Tracking ---
+
+export type AppCategory = 'productive' | 'social' | 'entertainment' | 'communication' | 'design' | 'development' | 'uncategorized';
+
+export interface AppActivityEntry {
+    app: string;
+    title: string;
+    category: AppCategory;
+    startTime: any;
+    endTime: any;
+    durationSeconds: number;
+    url?: string;
+}
+
+export interface AppActivitySummary {
+    userId: string;
+    date: string;
+    totalTrackedSeconds: number;
+    byCategory: Record<AppCategory, number>;
+    topApps: Array<{ app: string; category: AppCategory; seconds: number }>;
+    entries: AppActivityEntry[];
+}
+
+export interface AppCategoryRule {
+    pattern: string;
+    category: AppCategory;
+    type: 'app' | 'title';
+}
+
+export interface AppAlert {
+    id: string;
+    userId: string;
+    userDisplayName: string;
+    app: string;
+    title: string;
+    category: AppCategory;
+    timestamp: number;
+    teamId?: string;
+}
+
 export interface WorkLog {
     id: string;
     userId: string;
@@ -130,6 +170,10 @@ export interface AdminSettingsType {
     recordingSegmentMinutes?: number;
     organizationTimezone?: string;
     showLiveTeamStatusToAgents?: boolean;
+    enableAppTracking?: boolean;
+    appTrackingIntervalSeconds?: number;
+    appCategoryRules?: AppCategoryRule[];
+    redFlagCategories?: AppCategory[];
 }
 
 declare global {
@@ -171,6 +215,8 @@ declare global {
                 resolution?: { width: number; height: number };
                 error?: string;
             }>;
+            getAppTrackingStatus?: () => Promise<{ enabled: boolean; currentApp?: string; currentCategory?: string }>;
+            onAppTrackingUpdate?: (cb: (data: { app: string; title: string; category: string }) => void) => (() => void) | void;
         };
         currentUserUid?: string;
     }

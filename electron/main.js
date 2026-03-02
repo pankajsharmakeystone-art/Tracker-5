@@ -15,6 +15,7 @@ const { DateTime } = require("luxon");
 const { google } = require("googleapis");
 const fixWebmDuration = require("fix-webm-duration");
 const crypto = require("crypto");
+const appTracker = require("./appTracker");
 // ts-ebml for lightweight WebM duration fix
 const { Decoder, Encoder, Reader, tools } = require("ts-ebml");
 
@@ -347,6 +348,23 @@ const FieldValue = firebase.firestore.FieldValue;
 const Timestamp = firebase.firestore.Timestamp;
 const DEFAULT_ORGANIZATION_TIMEZONE = "Asia/Kolkata";
 
+// Initialize app tracker with context from main process
+appTracker.init({
+  log: log,
+  getUid: () => currentUid,
+  isClockedIn: () => agentClockedIn,
+  isIdle: () => lastIdleState,
+  isScreenLocked: () => isAway,
+  getAdminSettings: () => cachedAdminSettings,
+  getMainWindow: () => mainWindow,
+  getRtdb: () => rtdb,
+  getDb: () => db,
+  ensureAuth: ensureDesktopAuth,
+  getUserDisplayName: () => cachedDisplayName || currentUid,
+  getUserTeamId: () => cachedUserPrimaryTeamId || null,
+});
+
+
 // ---------- CONFIG ----------
 const RECORDINGS_DIR = path.join(app.getPath("userData"), "recordings");
 if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
@@ -490,63 +508,50 @@ function isRecordingCompleted(fileName) {
   return Boolean(entry?.completed);
 }
 
+function hasPendingHttpUploadsForMerge(agentName, date) {
+  try {
+    const targetName = String(agentName || '').trim().toLowerCase();
+    const files = uploadManifest?.files && typeof uploadManifest.files === 'object'
+      ? uploadManifest.files
+      : {};
+
+    for (const [fileName, rawEntry] of Object.entries(files)) {
+      const entry = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
+      const uploadedTargets = entry.uploadedTargets && typeof entry.uploadedTargets === 'object'
+        ? entry.uploadedTargets
+        : {};
+      if (uploadedTargets.http === true || entry.completed === true) continue;
+
+      let owner = String(entry.ownerName || entry.ownerUid || '').trim().toLowerCase();
+      if (targetName && owner && owner !== targetName) continue;
+
+      let mtimeMs = Number(entry.mtimeMs) || 0;
+      if (!mtimeMs) {
+        try {
+          const stat = fs.statSync(path.join(RECORDINGS_DIR, fileName));
+          mtimeMs = Number(stat?.mtimeMs) || 0;
+        } catch (_) { }
+      }
+      if (!mtimeMs) continue;
+
+      if (getIsoDateFromMs(mtimeMs) !== date) continue;
+      return true;
+    }
+  } catch (_) { }
+  return false;
+}
+
 loadUploadedManifest();
 
 // ---------- RECORDING LOGS (Firestore) ----------
-// Logs upload events to Firestore so admins/managers can see upload status
+// Recording logs are disabled by product decision to reduce Firestore costs.
 async function logRecordingEvent(eventData = {}) {
-  try {
-    const authed = await ensureDesktopAuth();
-    if (!authed) {
-      log('[recordingLogs] auth missing, skipping log');
-      return null;
-    }
-
-    const payload = {
-      userId: eventData.userId || currentUid || null,
-      userName: eventData.userName || cachedDisplayName || null,
-      teamId: eventData.teamId || null,
-      fileName: eventData.fileName || null,
-      status: eventData.status || 'unknown', // 'success' | 'failed' | 'pending'
-      uploadTarget: eventData.uploadTarget || null, // 'dropbox' | 'googleSheets' | 'http'
-      machineName: os.hostname() || null,
-      fileSize: eventData.fileSize || null,
-      durationMs: eventData.durationMs || null,
-      downloadUrl: eventData.downloadUrl || null,
-      error: eventData.error || null,
-      retryCount: eventData.retryCount || 0,
-      stopReason: eventData.stopReason || null, // 'lock-screen' | 'manual_break' | 'clocked_out' | 'suspend' | 'shutdown' | etc.
-      createdAt: eventData.createdAt || FieldValue.serverTimestamp(),
-      uploadedAt: eventData.status === 'success' ? FieldValue.serverTimestamp() : null,
-      loggedAt: FieldValue.serverTimestamp()
-    };
-
-    const docRef = await db.collection('recordingLogs').add(payload);
-    log('[recordingLogs] logged event:', payload.status, payload.fileName);
-    return docRef.id;
-  } catch (err) {
-    log('[recordingLogs] failed to log event:', err?.message || err);
-    return null;
-  }
+  return null;
 }
 
 // Update an existing recording log entry (used for retry status updates)
 async function updateRecordingLog(logId, updates = {}) {
-  try {
-    if (!logId) return false;
-    const authed = await ensureDesktopAuth();
-    if (!authed) return false;
-
-    await db.collection('recordingLogs').doc(logId).update({
-      ...updates,
-      lastUpdatedAt: FieldValue.serverTimestamp()
-    });
-    log('[recordingLogs] updated log:', logId, updates.status || '');
-    return true;
-  } catch (err) {
-    log('[recordingLogs] failed to update log:', err?.message || err);
-    return false;
-  }
+  return false;
 }
 
 // Retry uploading a specific recording file by fileName
@@ -686,8 +691,11 @@ const DESKTOP_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 // RTDB presence (preferred for realtime "connected" state; supports onDisconnect)
 let desktopSessionId = null;
 let activeUploads = new Set(); // Concurrency lock to prevent parallel processing of the same file
+let retryUploadsInFlight = null; // Single-flight guard for retry scan
 let activeMergeRequests = new Set(); // Concurrency lock to prevent parallel merge requests
 let lastCompletedMerge = new Map(); // mergeKey -> timestamp (ms)
+let lastHttpUploadByMergeKey = new Map(); // mergeKey -> timestamp (ms)
+let pendingMergeRequests = new Set(); // mergeKey values queued while merge is in progress
 let rtdbConnectedCallback = null;
 let rtdbConnectedRef = null;
 let rtdbPresenceRef = null;
@@ -970,6 +978,12 @@ function getIsoTimeFromMs(ms) {
 }
 
 async function retryPendingRecordingUploadsOnLogin(options = {}) {
+  if (retryUploadsInFlight) {
+    log('[uploads] retry scan already in progress, joining existing run');
+    return retryUploadsInFlight;
+  }
+
+  retryUploadsInFlight = (async () => {
   // Only retry when we're registered and authenticated.
   if (!currentUid) return;
   try {
@@ -1071,7 +1085,7 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
         log('[uploads] HTTP upload result:', httpResult.success ? 'success' : (httpResult.error || 'failed'));
         setTargetUploadResult(fileName, 'http', { success: !!httpResult?.success, error: httpResult?.error || httpResult?.reason || null });
 
-        // Log ONLY failed uploads to recordingLogs to reduce Firestore costs
+        // Recording log writes are disabled (cost optimization).
         if (!httpResult.success) {
           await logRecordingEvent({
             userId: ownerUid || currentUid,
@@ -1093,6 +1107,13 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
     }
   } catch (err) {
     log('[uploads] retry scan failed', err?.message || err);
+  }
+  })();
+
+  try {
+    return await retryUploadsInFlight;
+  } finally {
+    retryUploadsInFlight = null;
   }
 }
 
@@ -1127,7 +1148,16 @@ function startRecordingSegmentLoop() {
       // Use a longer flush timeout so segment rollover does not overlap old/new recorder sessions.
       await stopBackgroundRecordingAndFlush({ timeoutMs: 60000, payload: { suppressAutoResume: true } });
       if (currentUid && agentClockedIn && isRecordingActive) {
-        startBackgroundRecording();
+        const restarted = await startBackgroundRecording('segment_rollover');
+        if (!restarted && currentUid && agentClockedIn) {
+          // Segment rollover must not silently stop capture. Retry quickly a few times.
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            await new Promise((r) => setTimeout(r, attempt * 1500));
+            isRecordingActive = true;
+            const ok = await startBackgroundRecording(`segment_rollover_retry_${attempt}`);
+            if (ok) break;
+          }
+        }
       }
     } catch (_) { }
     finally {
@@ -1213,6 +1243,8 @@ function stopRecordingRetryCommandsListener() {
 let isRecordingActive = false; // track recording
 let popupWindow = null; // reference to the transient popup
 let cachedDisplayName = null; // cached user displayName (filled on register)
+let cachedUserPrimaryTeamId = null; // cached team context for app alerts
+let cachedUserTeamIds = []; // cached team ids from users doc
 const DEFAULT_LOGIN_ROUTE_HASH = '#/login';
 const APP_BASE_URL = process.env.APP_BASE_URL || 'https://tracker-5.vercel.app';
 const RECORDER_STATES = Object.freeze({
@@ -1953,6 +1985,10 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
 
   agentClockedIn = false;
   stopAgentStatusLoop();
+  // Flush app tracking data to Firestore before losing auth
+  try { await appTracker.flush(); } catch (_) { }
+  appTracker.stop();
+  appTracker.reset();
   stopRecordingRetryCommandsListener();
   // Best-effort: explicitly mark desktop offline in RTDB so the console/UI doesn't
   // show a stuck `online` state if onDisconnect doesn't fire for any reason.
@@ -2022,6 +2058,9 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   } catch (_) {
     // ignore
   }
+  try {
+    await waitForActiveUploadsToSettle(120000);
+  } catch (_) { }
 
   // Auto-merge recording segments (same as performClockOut)
   try {
@@ -2311,43 +2350,43 @@ function shouldUploadToGoogleSheets() {
 }
 
 const getHttpUploadConfig = () => {
-  const url = (cachedAdminSettings?.httpUploadUrl || '').trim();
-  if (!url) return null;
+  const rawUrls = String(cachedAdminSettings?.httpUploadUrl || '').trim();
+  if (!rawUrls) return null;
   const token = (cachedAdminSettings?.httpUploadToken || '').trim();
-  return { url, token };
+
+  const urls = rawUrls
+    .split(/[\r\n,;]+/)
+    .map((u) => String(u || '').trim())
+    .filter(Boolean)
+    .map((u) => (/^https?:\/\//i.test(u) ? u : `http://${u}`));
+
+  if (!urls.length) return null;
+  return { urls, token };
 };
 
 function shouldUploadToHttp() {
   if (!cachedAdminSettings?.autoUpload) return false;
   if (cachedAdminSettings?.uploadToHttp === false) return false;
-  return Boolean(getHttpUploadConfig()?.url);
+  const cfg = getHttpUploadConfig();
+  return Array.isArray(cfg?.urls) && cfg.urls.length > 0;
 }
 
 async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTime }) {
   const config = getHttpUploadConfig();
-  if (!config?.url) return { success: false, reason: 'http-not-configured' };
+  if (!Array.isArray(config?.urls) || config.urls.length === 0) return { success: false, reason: 'http-not-configured' };
   const shouldRepair = cachedAdminSettings?.httpUploadFfmpegRepairEnabled ?? true;
+  const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+  const MAX_ATTEMPTS_PER_URL = 2;
 
   try {
-    // 1. Pre-flight Ping: Verify server is reachable
-    try {
-      const pingRes = await fetch(config.url, { method: 'GET', timeout: 5000 });
-      if (!pingRes.ok && pingRes.status !== 405 && pingRes.status !== 404) {
-        throw new Error(`Server returned ${pingRes.status}`);
-      }
-    } catch (pingErr) {
-      log(`[http-upload] Pre-flight ping failed:`, pingErr.message);
-      return { success: false, error: 'server-unreachable', detail: pingErr.message };
-    }
-
-    // 2. Read entire file into buffer
+    // 1) Read file once
     const fileBuffer = await fs.promises.readFile(filePath);
     const fileSize = fileBuffer.length;
     const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
 
     log(`[http-upload] Uploading ${fileName}: ${fileSize} bytes (hash: ${fileHash})`);
 
-    // 3. Build headers
+    // 2) Build headers
     const headers = {
       'Content-Type': 'application/octet-stream',
       'Content-Length': fileSize.toString(),
@@ -2364,46 +2403,73 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
       headers.Authorization = `Bearer ${config.token}`;
     }
 
-    // 4. Upload with retries
-    let attempt = 0;
-    const MAX_ATTEMPTS = 3;
+    // 3) Try each configured URL with retries. This allows LAN URL + public URL fallback.
+    const preferredUrls = [...config.urls];
     let lastError = null;
-
-    while (attempt < MAX_ATTEMPTS) {
-      try {
-        if (attempt > 0) {
-          const delay = Math.pow(2, attempt) * 1000;
-          log(`[http-upload] Retrying ${fileName} (attempt ${attempt + 1}/${MAX_ATTEMPTS}) after ${delay}ms...`);
-          await new Promise(r => setTimeout(r, delay));
-        }
-
-        const response = await fetch(config.url, {
-          method: 'POST',
-          headers,
-          body: fileBuffer,
-          timeout: 300000 // 5 minutes timeout for large files
-        });
-
-        if (response.ok) {
-          const result = await response.json().catch(() => ({}));
-          log(`[http-upload] Successfully uploaded ${fileName} (${fileSize} bytes)`);
-          return { success: true, message: 'upload-complete', size: fileSize, ...result };
-        } else {
-          const text = await response.text();
-          lastError = `HTTP ${response.status}: ${text}`;
-          if (response.status === 401) {
-            return { success: false, status: 401, error: 'unauthorized' };
+    for (const endpoint of preferredUrls) {
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_URL; attempt++) {
+        try {
+          if (attempt > 1) {
+            const delay = Math.pow(2, attempt - 1) * 1000;
+            log(`[http-upload] Retrying ${fileName} to ${endpoint} (attempt ${attempt}/${MAX_ATTEMPTS_PER_URL}) after ${delay}ms...`);
+            await new Promise((r) => setTimeout(r, delay));
           }
+
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(new Error('request-timeout')), REQUEST_TIMEOUT_MS);
+          let response;
+          try {
+            response = await fetch(endpoint, {
+              method: 'POST',
+              headers,
+              body: fileBuffer,
+              signal: controller.signal
+            });
+          } finally {
+            clearTimeout(timeout);
+          }
+
+          if (response.ok) {
+            const result = await response.json().catch(() => ({}));
+            log(`[http-upload] Successfully uploaded ${fileName} via ${endpoint} (${fileSize} bytes)`);
+            try {
+              const key = `${String(safeName || '')}|${String(isoDate || '')}`;
+              lastHttpUploadByMergeKey.set(key, Date.now());
+              // If user is clocked out, late uploads should trigger a fresh merge attempt.
+              if (!agentClockedIn) {
+                requestSegmentMerge(String(safeName || ''), String(isoDate || ''), true)
+                  .catch((e) => log('[merge] post-upload merge trigger failed:', e?.message || e));
+              }
+            } catch (_) { }
+            return { success: true, message: 'upload-complete', size: fileSize, endpoint, ...result };
+          }
+
+          const text = await response.text().catch(() => '');
+          lastError = `HTTP ${response.status}${text ? `: ${text}` : ''}`;
+          if (response.status === 401) {
+            return { success: false, status: 401, error: 'unauthorized', endpoint };
+          }
+          if (response.status >= 400 && response.status < 500) {
+            // Client-side request issue for this endpoint; no value retrying further for this endpoint.
+            break;
+          }
+        } catch (err) {
+          const code = err?.code || err?.cause?.code || null;
+          const msg = err?.message || String(err);
+          lastError = code ? `${code}: ${msg}` : msg;
+          log(`[http-upload] Upload error via ${endpoint}:`, lastError);
         }
-      } catch (err) {
-        lastError = err.message;
-        log(`[http-upload] Upload error:`, err.message);
       }
-      attempt++;
     }
 
-    log(`[http-upload] Failed to upload ${fileName} after ${MAX_ATTEMPTS} attempts: ${lastError}`);
-    return { success: false, error: 'upload-failed', detail: lastError };
+    log(`[http-upload] Failed to upload ${fileName} across all configured endpoints: ${lastError}`);
+    return {
+      success: false,
+      error: /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|request-timeout|ECONNRESET/i.test(String(lastError || ''))
+        ? 'server-unreachable'
+        : 'upload-failed',
+      detail: lastError
+    };
   } catch (error) {
     log(`[http-upload] Fatal error:`, error?.message || error);
     return { success: false, error: error?.message || 'http-upload-failed' };
@@ -2417,55 +2483,96 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
 async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
   const mergeKey = `${agentName}|${date}`;
   const lastCompletedAt = lastCompletedMerge.get(mergeKey);
-  if (lastCompletedAt && (Date.now() - lastCompletedAt) < 5 * 60 * 1000) {
+  const lastUploadAt = lastHttpUploadByMergeKey.get(mergeKey) || 0;
+  if (lastCompletedAt && (Date.now() - lastCompletedAt) < 5 * 60 * 1000 && lastUploadAt <= lastCompletedAt) {
     log(`[merge] Skipping duplicate merge request for ${agentName} on ${date} (recently completed)`);
     return { success: false, reason: 'merge-recently-completed' };
   }
   if (activeMergeRequests.has(mergeKey)) {
     log(`[merge] Skipping duplicate merge request for ${agentName} on ${date}`);
+    pendingMergeRequests.add(mergeKey);
     return { success: false, reason: 'merge-already-in-progress' };
+  }
+  if (activeUploads.size > 0) {
+    log(`[merge] Skipping merge for ${agentName} on ${date} - uploads still active (${activeUploads.size})`);
+    return { success: false, reason: 'uploads-active' };
+  }
+  if (hasPendingHttpUploadsForMerge(agentName, date)) {
+    log(`[merge] Skipping merge for ${agentName} on ${date} - pending HTTP uploads remain`);
+    return { success: false, reason: 'uploads-pending' };
   }
   activeMergeRequests.add(mergeKey);
 
   const config = getHttpUploadConfig();
-  if (!config?.url) {
+  const mergeBases = Array.isArray(config?.urls) ? config.urls : [];
+  if (!mergeBases.length) {
     log('[merge] No HTTP upload URL configured, skipping merge');
+    activeMergeRequests.delete(mergeKey);
     return { success: false, reason: 'http-not-configured' };
   }
 
   try {
-    // Build merge URL from the upload URL (replace /upload with /merge-all)
-    const baseUrl = config.url.replace(/\/upload\/?$/, '');
-    const mergeUrl = new URL('/merge-all', baseUrl);
-    mergeUrl.searchParams.set('agent', agentName);
-    mergeUrl.searchParams.set('date', date);
-    if (deleteOriginals) {
-      mergeUrl.searchParams.set('delete', 'true');
+    let lastError = null;
+    for (const endpoint of mergeBases) {
+      try {
+        // Build merge URL from the upload URL (replace /upload with /merge-all)
+        const baseUrl = endpoint.replace(/\/upload\/?$/, '');
+        const mergeUrl = new URL('/merge-all', baseUrl);
+        mergeUrl.searchParams.set('agent', agentName);
+        mergeUrl.searchParams.set('date', date);
+        if (deleteOriginals) {
+          mergeUrl.searchParams.set('delete', 'true');
+        }
+
+        log(`[merge] Requesting per-screen merge for ${agentName} on ${date}: ${mergeUrl.toString()}`);
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(new Error('merge-timeout')), 120000);
+        let response;
+        try {
+          response = await fetch(mergeUrl.toString(), {
+            method: 'GET',
+            headers: config.token ? { Authorization: `Bearer ${config.token}` } : {},
+            signal: controller.signal
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
+
+        if (response.ok) {
+          const result = await response.json().catch(() => ({}));
+          log(`[merge] Merge successful via ${endpoint}:`, result);
+          lastCompletedMerge.set(mergeKey, Date.now());
+          return { success: true, result, endpoint };
+        }
+
+        const errorText = await response.text().catch(() => '');
+        lastError = `HTTP ${response.status}${errorText ? `: ${errorText}` : ''}`;
+        log(`[merge] Merge failed via ${endpoint}: ${lastError}`);
+      } catch (error) {
+        lastError = error?.message || String(error);
+        log(`[merge] Merge request error via ${endpoint}:`, lastError);
+      }
     }
-
-    log(`[merge] Requesting per-screen merge for ${agentName} on ${date}: ${mergeUrl.toString()}`);
-
-    const response = await fetch(mergeUrl.toString(), {
-      method: 'GET',
-      headers: config.token ? { Authorization: `Bearer ${config.token}` } : {},
-      timeout: 120000 // 2 minutes for merge operation
-    });
-
-    if (response.ok) {
-      const result = await response.json();
-      log(`[merge] Merge successful:`, result);
-      lastCompletedMerge.set(mergeKey, Date.now());
-      return { success: true, result };
-    } else {
-      const errorText = await response.text().catch(() => '');
-      log(`[merge] Merge failed: ${response.status} ${errorText}`);
-      return { success: false, status: response.status, error: errorText };
-    }
-    log(`[merge] Merge request error:`, error?.message || error);
-    return { success: false, error: error?.message || 'merge-request-failed' };
+    return { success: false, error: lastError || 'merge-request-failed' };
   } finally {
     activeMergeRequests.delete(mergeKey);
+    if (pendingMergeRequests.has(mergeKey)) {
+      pendingMergeRequests.delete(mergeKey);
+      setTimeout(() => {
+        requestSegmentMerge(agentName, date, deleteOriginals)
+          .catch((e) => log('[merge] queued merge retry failed:', e?.message || e));
+      }, 1200);
+    }
   }
+}
+
+async function waitForActiveUploadsToSettle(maxWaitMs = 120000) {
+  const deadline = Date.now() + Math.max(0, Number(maxWaitMs) || 0);
+  while (activeUploads.size > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return activeUploads.size === 0;
 }
 
 
@@ -3197,13 +3304,21 @@ async function fetchDisplayName(uid) {
     const userDoc = await db.collection('users').doc(uid).get();
     if (userDoc && userDoc.exists) {
       const d = userDoc.data();
+      const teamIds = Array.isArray(d?.teamIds) ? d.teamIds.filter(Boolean) : [];
+      const primaryTeam = d?.teamId || teamIds[0] || null;
+      cachedUserPrimaryTeamId = primaryTeam ? String(primaryTeam) : null;
+      cachedUserTeamIds = teamIds.map((t) => String(t));
       const raw = (d && (d.displayName || d.email)) ? (d.displayName || d.email) : uid;
       const safe = String(raw).replace(/[\/:\\*?"<>|]/g, '-').trim();
       return safe || uid;
     }
+    cachedUserPrimaryTeamId = null;
+    cachedUserTeamIds = [];
     return uid;
   } catch (e) {
     console.error("[fetchDisplayName] error", e);
+    cachedUserPrimaryTeamId = null;
+    cachedUserTeamIds = [];
     return uid;
   }
 }
@@ -3896,6 +4011,7 @@ async function hydrateClockedInStateFromWorklogs(uid) {
 
     agentClockedIn = true;
     startAgentStatusLoop(uid);
+    appTracker.start();
 
     // Start auto-recording only when actively working.
     const safeSettings = cachedAdminSettings || {};
@@ -4424,6 +4540,9 @@ ipcMain.handle("unregister-uid", async () => {
     currentUid = null;
     agentClockedIn = false;
     isRecordingActive = false;
+    cachedDisplayName = null;
+    cachedUserPrimaryTeamId = null;
+    cachedUserTeamIds = [];
     resetAutoResumeRetry();
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
@@ -4511,6 +4630,12 @@ async function applyAgentStatus(status) {
     manualBreakStartedAtMs = null;
     clearManualBreakReminderTimer();
     stopAgentStatusLoop();
+
+    // Flush app tracking data to Firestore before full clock-out cleanup
+    try { await appTracker.flush(); } catch (_) { }
+    appTracker.stop();
+    appTracker.reset();
+
     currentShiftDate = null;
     lastAutoClockOutTargetKey = null;
 
@@ -4522,6 +4647,9 @@ async function applyAgentStatus(status) {
     await stopBackgroundRecordingAndFlush({ payload: { stopReason: 'clocked_out' } });
     try {
       await retryPendingRecordingUploadsOnLogin({ ignoreStability: true, stableForMs: 0 });
+    } catch (_) { }
+    try {
+      await waitForActiveUploadsToSettle(120000);
     } catch (_) { }
 
     // Auto-merge recording segments on clock-out
@@ -4580,6 +4708,7 @@ async function applyAgentStatus(status) {
       lastAutoClockOutTargetKey = null;
     }
     startAgentStatusLoop(currentUid);
+    appTracker.start(); // Start app/website tracking on clock-in
 
     const safeSettings = cachedAdminSettings || {};
     const allowRecording = safeSettings.allowRecording !== false;
@@ -4608,6 +4737,13 @@ async function applyAgentStatus(status) {
       } else {
         log('Online signal received, but recording is already active (ignoring)');
         willRecord = true;
+        // Re-assert isRecording in Firestore in case it was cleared by a prior restart/clock-out
+        if (currentUid) {
+          db.collection('agentStatus').doc(currentUid).set({
+            isRecording: true,
+            lastUpdate: FieldValue.serverTimestamp()
+          }, { merge: true }).catch(() => { });
+        }
       }
     }
 
@@ -5111,6 +5247,8 @@ ipcMain.handle("recorder-create-temp-file", async (_event, sourceId, sourceName)
       tempPath,
       bytesWritten: 0,
       sourceName: safeName,
+      closing: false,
+      closed: false,
       headerFound: false,
       headerScanBuffer: Buffer.alloc(0),
       droppedPrefixBytes: 0
@@ -5131,6 +5269,10 @@ ipcMain.handle("recorder-append-chunk", async (_event, sourceId, chunkBuffer) =>
     if (!handle) {
       // No active handle - might be a stale call, ignore
       return { success: false, error: 'no-active-handle' };
+    }
+    if (handle.closing || handle.closed) {
+      // Finalize in progress/finished, ignore late chunks to prevent EBADF writes.
+      return { success: true, bytesWritten: handle.bytesWritten, ignoredBecauseClosing: true };
     }
 
     let buffer = toNodeBuffer(chunkBuffer);
@@ -5195,8 +5337,10 @@ ipcMain.handle("recorder-finalize", async (_event, sourceId, meta = {}) => {
   }
 
   try {
+    handle.closing = true;
     // Close the file descriptor
     fs.closeSync(handle.fd);
+    handle.closed = true;
     log(`[recorder] Closed temp file for ${sourceId}: ${handle.bytesWritten} bytes`);
 
     if (!handle.headerFound) {

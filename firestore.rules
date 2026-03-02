@@ -187,6 +187,26 @@ service cloud.firestore {
         || (isSignedIn() && request.auth.uid == agentUid);
     }
 
+    match /appActivity/{docId} {
+      allow read: if isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid)
+        || isManagerOfUser(resource.data.userId);
+
+      allow create: if isAdmin()
+        || (isSignedIn() && request.resource.data.userId == request.auth.uid);
+
+      allow update: if isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid);
+
+      allow delete: if isAdmin();
+    }
+
+    match /appAlerts/{alertId} {
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow read:   if isAdmin() || isManagerOfUser(resource.data.userId);
+      allow delete: if isAdmin() || isManagerOfUser(resource.data.userId);
+    }
+
     match /{document=**} {
       allow read: if isSignedIn();
       allow write: if false;

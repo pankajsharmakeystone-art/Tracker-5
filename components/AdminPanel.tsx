@@ -1,8 +1,8 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../hooks/useAuth';
-import { createTeam, streamTeamsForAdmin } from '../services/db';
-import type { Team } from '../types';
+import { createTeam, streamTeamsForAdmin, streamRecentAppAlerts } from '../services/db';
+import type { Team, AppAlert } from '../types';
 import Spinner from './Spinner';
 import UserManagementTable from './UserManagementTable';
 import LiveMonitoringDashboard from './LiveMonitoringDashboard';
@@ -10,7 +10,8 @@ import TeamStatusView from './TeamStatusView';
 import SchedulingPanel from './SchedulingPanel';
 import ReportsPanel from './ReportsPanel';
 import AdminSettings from './AdminSettings';
-import RecordingLogsPanel from './RecordingLogsPanel';
+import AppTrackingReport from './AppTrackingReport';
+import AppAlertToast from './AppAlertToast';
 
 const AdminPanel: React.FC = () => {
     const { user } = useAuth();
@@ -21,6 +22,22 @@ const AdminPanel: React.FC = () => {
     const [activeTab, setActiveTab] = useState('users');
     const [selectedTeamIdForSchedule, setSelectedTeamIdForSchedule] = useState('');
     const [selectedTeamIdForReports, setSelectedTeamIdForReports] = useState('');
+    const [alertQueue, setAlertQueue] = useState<AppAlert[]>([]);
+    const sessionStart = useRef(Date.now());
+    const dismissAlert = useCallback((id: string) => setAlertQueue(q => q.filter(a => a.id !== id)), []);
+
+    // Subscribe to real-time red flag alerts
+    useEffect(() => {
+        const unsub = streamRecentAppAlerts((alerts) => {
+            setAlertQueue(prev => {
+                const existingIds = new Set(prev.map(a => a.id));
+                const newAlerts = alerts.filter(a => !existingIds.has(a.id));
+                if (!newAlerts.length) return prev;
+                return [...newAlerts, ...prev].slice(0, 20);
+            });
+        }, undefined, sessionStart.current);
+        return () => unsub();
+    }, []);
 
     // Use streaming for teams
     useEffect(() => {
@@ -81,6 +98,7 @@ const AdminPanel: React.FC = () => {
 
     return (
         <div>
+            <AppAlertToast alerts={alertQueue} onDismiss={dismissAlert} />
             <h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-200 mb-4">Admin Controls</h2>
 
             <TeamStatusView canControlRecording={true} />
@@ -91,9 +109,9 @@ const AdminPanel: React.FC = () => {
                     <TabButton tabName="teams" title="Team Management" />
                     <TabButton tabName="scheduling" title="Scheduling" />
                     <TabButton tabName="reports" title="Reports" />
-                    <TabButton tabName="recordingLogs" title="Recording Logs" />
                     <TabButton tabName="appSettings" title="Application Settings" />
                     <TabButton tabName="monitoring" title="Detailed Monitoring" />
+                    <TabButton tabName="appTracking" title="App Tracking" />
                 </nav>
             </div>
 
@@ -195,7 +213,7 @@ const AdminPanel: React.FC = () => {
 
                 {activeTab === 'appSettings' && <AdminSettings />}
 
-                {activeTab === 'recordingLogs' && <RecordingLogsPanel />}
+                {activeTab === 'appTracking' && <AppTrackingReport />}
 
             </div>
         </div>

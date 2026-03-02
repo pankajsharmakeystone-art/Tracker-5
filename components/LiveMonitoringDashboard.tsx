@@ -4,7 +4,8 @@ import { Timestamp } from 'firebase/firestore';
 import { hasRole } from '../utils/roles';
 import { DateTime } from 'luxon';
 import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses, streamGlobalAdminSettings, streamUsersByTeam, streamScheduleForMonth, streamAllUsers, getScheduleForMonth } from '../services/db';
-import { streamAllPresence, isPresenceFresh } from '../services/presence';
+import { streamAllPresence, isPresenceFresh, streamAllAppTracking } from '../services/presence';
+import type { AppTrackingMap } from '../services/presence';
 import { useAuth } from '../hooks/useAuth';
 import type { WorkLog, AdminSettingsType, UserData, MonthlySchedule } from '../types';
 import Spinner from './Spinner';
@@ -315,6 +316,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [isShiftBreakdownOpen, setIsShiftBreakdownOpen] = useState(false);
     const reconnectRequestRef = React.useRef<{ uid: string; requestId: string } | null>(null);
     const reconnectTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [appTracking, setAppTracking] = useState<AppTrackingMap>({});
 
     const [selectedDate, setSelectedDate] = useState(() => {
         const d = new Date();
@@ -432,6 +434,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         let unsubscribe;
         const unsubscribeStatuses = streamAllAgentStatuses((statuses) => setAgentStatuses(statuses || {}));
         const unsubscribePresence = streamAllPresence((p) => setPresence(p || {}));
+        const unsubscribeAppTracking = streamAllAppTracking((t) => setAppTracking(t || {}));
 
         if (isToday) {
             // Queries for: Today's logs + ANY active logs (including yesterday's)
@@ -451,6 +454,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             if (unsubscribe) unsubscribe();
             if (unsubscribeStatuses) unsubscribeStatuses();
             if (unsubscribePresence) unsubscribePresence();
+            if (unsubscribeAppTracking) unsubscribeAppTracking();
         };
     }, [teamId, selectedDate, isToday]);
 
@@ -683,9 +687,19 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         return false;
     };
 
+    const getPrimaryHttpUploadUrl = () => {
+        const raw = String(adminSettings?.httpUploadUrl || '').trim();
+        if (!raw) return '';
+        const urls = raw
+            .split(/[\r\n,;]+/)
+            .map((u) => u.trim())
+            .filter(Boolean);
+        return urls[0] || '';
+    };
+
     const handleMergeRecordings = async (log: WorkLog) => {
         if (!log) return;
-        const uploadUrl = (adminSettings?.httpUploadUrl || '').trim();
+        const uploadUrl = getPrimaryHttpUploadUrl();
         if (!uploadUrl) {
             alert('HTTP upload URL is not configured.');
             return;
@@ -731,7 +745,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
 
     const handleRepairRecordings = async (log: WorkLog) => {
         if (!log) return;
-        const uploadUrl = (adminSettings?.httpUploadUrl || '').trim();
+        const uploadUrl = getPrimaryHttpUploadUrl();
         if (!uploadUrl) {
             alert('HTTP upload URL is not configured.');
             return;
@@ -1031,6 +1045,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                             <th scope="col" className="py-3 px-6">Manual Break</th>
                             <th scope="col" className="py-3 px-6">Idle Break</th>
                             <th scope="col" className="py-3 px-6 text-center">Recorder</th>
+                            <th scope="col" className="py-3 px-6">Current App</th>
                             <th scope="col" className="py-3 px-6">Actions</th>
                         </tr>
                     </thead>
@@ -1064,7 +1079,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                     const isOnManualBreak = agent.status === 'on_break' && !desktopStatus?.isIdle && !desktopStatus?.isAway;
                                     const isIdle = desktopStatus?.isIdle === true;
                                     const isAway = desktopStatus?.isAway === true;
-                                    const isIdleOrAway = isIdle || isAway;  // Both should highlight idle break column
+                                    const isIdleOrAway = isIdle || isAway;
                                     const isWorking = agent.status === 'working' && !isIdleOrAway && !isOnManualBreak;
                                     return (
                                         <>
@@ -1087,6 +1102,31 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                         status: agent.status,
                                         isStale: agent.__desktop?.isStale
                                     })}
+                                </td>
+                                <td className="py-4 px-6">
+                                    {(() => {
+                                        const track = appTracking[agent.userId];
+                                        if (!track?.app || agent.status === 'clocked_out') {
+                                            return <span className="text-xs text-gray-400 dark:text-gray-500">—</span>;
+                                        }
+                                        const catColors: Record<string, string> = {
+                                            productive: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+                                            development: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
+                                            communication: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+                                            design: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
+                                            social: 'bg-pink-100 text-pink-800 dark:bg-pink-900 dark:text-pink-200',
+                                            entertainment: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+                                            uncategorized: 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200',
+                                        };
+                                        const colorCls = catColors[track.category || ''] || catColors.uncategorized;
+                                        return (
+                                            <div className="flex flex-col gap-0.5">
+                                                <span className="text-xs font-medium text-gray-900 dark:text-white truncate max-w-[140px]" title={track.app}>{track.app}</span>
+                                                {track.title && <span className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-[140px]" title={track.title}>{track.title}</span>}
+                                                <span className={`inline-flex w-fit text-[10px] leading-4 px-1.5 rounded-full font-medium ${colorCls}`}>{track.category}</span>
+                                            </div>
+                                        );
+                                    })()}
                                 </td>
                                 <td className="py-4 px-6 flex gap-2 items-center">
                                     <button
@@ -1159,7 +1199,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                             </tr>
                         )) : (
                             <tr>
-                                <td colSpan={10} className="py-4 px-6 text-center text-gray-500 dark:text-gray-400">
+                                <td colSpan={11} className="py-4 px-6 text-center text-gray-500 dark:text-gray-400">
                                     No activity found.
                                 </td>
                             </tr>

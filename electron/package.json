@@ -1,6 +1,6 @@
 {
   "name": "electron-app",
-  "version": "0.5.82",
+  "version": "0.5.83",
   "description": "",
   "main": "main.js",
   "scripts": {
@@ -12,6 +12,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "active-win": "^8.2.1",
     "electron-updater": "^6.6.2",
     "firebase-admin": "^13.6.0",
     "fix-webm-duration": "^1.0.6",

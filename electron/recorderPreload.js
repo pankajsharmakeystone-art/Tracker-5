@@ -235,6 +235,8 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
 
   const monitorCaptureHealth = () => {
     if (!analysisCtx) return;
+    const supportsFrameCallback = typeof video.requestVideoFrameCallback === 'function';
+    const msSinceLastFrame = Date.now() - lastFrameCallbackAt;
     try {
       analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height);
       runtimeConsecutiveDrawFailures = 0;
@@ -268,9 +270,18 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
         // Detect long-running frozen image (not necessarily black).
         // Runs every ~2s; threshold 90 ~= 3 minutes.
         if (sameFingerprintChecks >= 90) {
-          reportSourceFailure('runtime-stale-frame-detected', {
-            staleForApproxSeconds: sameFingerprintChecks * 2
-          }).catch(() => { });
+          // Dual-signal guard:
+          // 1) visual fingerprint is stale for a long period
+          // 2) frame callbacks also stalled (when supported)
+          const framePipelineStalled = supportsFrameCallback
+            ? msSinceLastFrame > 20000
+            : sameFingerprintChecks >= 180; // fallback for engines without frame callback support
+          if (framePipelineStalled) {
+            reportSourceFailure('runtime-stale-frame-detected', {
+              staleForApproxSeconds: sameFingerprintChecks * 2,
+              msSinceLastFrame: supportsFrameCallback ? msSinceLastFrame : null
+            }).catch(() => { });
+          }
         }
       }
     } catch (e) {
@@ -285,8 +296,7 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     }
 
     // Detect frozen capture pipeline even when pixels are unchanged.
-    if (typeof video.requestVideoFrameCallback === 'function') {
-      const msSinceLastFrame = Date.now() - lastFrameCallbackAt;
+    if (supportsFrameCallback) {
       if (msSinceLastFrame > 20000) {
         reportSourceFailure('runtime-frame-callback-timeout', {
           msSinceLastFrame

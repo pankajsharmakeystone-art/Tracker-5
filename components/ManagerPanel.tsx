@@ -1,13 +1,14 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import LiveMonitoringDashboard from './LiveMonitoringDashboard';
 import SchedulingPanel from './SchedulingPanel';
 import { useAuth } from '../hooks/useAuth';
 import TeamStatusView from './TeamStatusView';
 import ReportsPanel from './ReportsPanel';
-import RecordingLogsPanel from './RecordingLogsPanel';
-import { getTeamById } from '../services/db';
-import type { Team } from '../types';
+import AppTrackingReport from './AppTrackingReport';
+import AppAlertToast from './AppAlertToast';
+import { getTeamById, streamRecentAppAlerts } from '../services/db';
+import type { Team, AppAlert } from '../types';
 
 
 const ManagerPanel: React.FC = () => {
@@ -18,6 +19,27 @@ const ManagerPanel: React.FC = () => {
     const [availableTeams, setAvailableTeams] = useState<Team[]>([]);
     const [currentTeamId, setCurrentTeamId] = useState<string>('');
     const [loadingTeams, setLoadingTeams] = useState(true);
+    const [alertQueue, setAlertQueue] = useState<AppAlert[]>([]);
+    const sessionStart = useRef(Date.now());
+    const dismissAlert = useCallback((id: string) => setAlertQueue(q => q.filter(a => a.id !== id)), []);
+
+    // Subscribe to red flag alerts from ALL of the manager's teams at once
+    useEffect(() => {
+        if (!availableTeams.length) return;
+        const merge = (alerts: AppAlert[]) => {
+            setAlertQueue(prev => {
+                const existingIds = new Set(prev.map(a => a.id));
+                const newAlerts = alerts.filter(a => !existingIds.has(a.id));
+                if (!newAlerts.length) return prev;
+                return [...newAlerts, ...prev].slice(0, 20);
+            });
+        };
+        // One listener per team — all merged into the same alert queue
+        const unsubs = availableTeams.map(team =>
+            streamRecentAppAlerts(merge, team.id, sessionStart.current)
+        );
+        return () => unsubs.forEach(u => u());
+    }, [availableTeams]);
 
     useEffect(() => {
         const fetchTeams = async () => {
@@ -64,6 +86,7 @@ const ManagerPanel: React.FC = () => {
 
     return (
         <div>
+            <AppAlertToast alerts={alertQueue} onDismiss={dismissAlert} />
             <h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-200 mb-6">Manager Dashboard</h2>
 
             {/* Live Status Section - Shows ALL assigned teams */}
@@ -114,8 +137,8 @@ const ManagerPanel: React.FC = () => {
                 <nav className="flex flex-wrap gap-2" aria-label="Tabs">
                     <TabButton tabName="scheduling" title="Team Schedule" />
                     <TabButton tabName="reports" title="Reports" />
-                    <TabButton tabName="recordingLogs" title="Recording Logs" />
                     <TabButton tabName="monitoring" title="Detailed Agent Monitoring" />
+                    <TabButton tabName="appTracking" title="App Tracking" />
                 </nav>
             </div>
 
@@ -125,7 +148,7 @@ const ManagerPanel: React.FC = () => {
                         {activeTab === 'monitoring' && <LiveMonitoringDashboard teamId={currentTeamId} />}
                         {activeTab === 'scheduling' && <SchedulingPanel teamId={currentTeamId} />}
                         {activeTab === 'reports' && <ReportsPanel teamId={currentTeamId} />}
-                        {activeTab === 'recordingLogs' && <RecordingLogsPanel teamId={currentTeamId} />}
+                        {activeTab === 'appTracking' && <AppTrackingReport teamId={currentTeamId} />}
                     </>
                 ) : (
                     <p className="text-gray-500">Please select a team to manage.</p>

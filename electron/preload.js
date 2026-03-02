@@ -3,25 +3,25 @@ const { contextBridge, ipcRenderer } = require("electron");
 // Listen for main instructing to clear local desktop UID (prevent auto-register on restart)
 try {
   ipcRenderer.on("clear-desktop-uid", () => {
-    try { localStorage.removeItem("desktop-uid"); } catch(e) {}
+    try { localStorage.removeItem("desktop-uid"); } catch (e) { }
   });
-} catch(e) {}
+} catch (e) { }
 
 // Watchdog: respond to main-process health pings even if the renderer JS is stuck.
 try {
   ipcRenderer.on("health-ping", (_event, payload) => {
     try {
       ipcRenderer.send("health-pong", { ts: Date.now(), id: payload?.id || null });
-    } catch (_) {}
+    } catch (_) { }
   });
-} catch (e) {}
+} catch (e) { }
 
 contextBridge.exposeInMainWorld("desktopAPI", {
   // handshake
   onReady: (cb) => ipcRenderer.on("desktop-ready", (e, data) => cb(data)),
   onRegistered: (cb) => ipcRenderer.on("desktop-registered", (e, data) => cb(data)),
   onAuthRequired: (cb) => {
-    if (typeof cb !== "function") return () => {};
+    if (typeof cb !== "function") return () => { };
     const handler = (_event, data) => cb(data);
     ipcRenderer.on("desktop-auth-required", handler);
     return () => ipcRenderer.removeListener("desktop-auth-required", handler);
@@ -68,7 +68,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   onCommandForceBreak: (cb) => ipcRenderer.on("command-force-break", (e, data) => cb(data)),
   onSettingsUpdated: (cb) => ipcRenderer.on("settings-updated", (e, data) => cb(data)),
   onDesktopRequestEndBreak: (cb) => {
-    if (typeof cb !== "function") return () => {};
+    if (typeof cb !== "function") return () => { };
     const handler = (_event, data) => cb(data);
     ipcRenderer.on("desktop-request-end-break", handler);
     return () => ipcRenderer.removeListener("desktop-request-end-break", handler);
@@ -76,7 +76,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
 
   // auto-clocked-out notification
   onAutoClockOut: (cb) => {
-    if (typeof cb !== "function") return () => {};
+    if (typeof cb !== "function") return () => { };
     const handler = (_event, data) => cb(data);
     ipcRenderer.on("auto-clocked-out", handler);
     return () => ipcRenderer.removeListener("auto-clocked-out", handler);
@@ -84,7 +84,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
 
   // signed-out notification (desktop forced logout / manual sign-out)
   onSignedOut: (cb) => {
-    if (typeof cb !== "function") return () => {};
+    if (typeof cb !== "function") return () => { };
     const handler = (_event, data) => cb(data);
     ipcRenderer.on("signed-out", handler);
     return () => ipcRenderer.removeListener("signed-out", handler);
@@ -105,14 +105,23 @@ contextBridge.exposeInMainWorld("desktopAPI", {
 
   // Live streaming helpers
   getLiveStreamSources: () => ipcRenderer.invoke("live-stream-get-sources")
-,
+  ,
   // Auto-update bridge
   onAutoUpdateStatus: (cb) => {
-    if (typeof cb !== "function") return () => {};
+    if (typeof cb !== "function") return () => { };
     const handler = (_event, data) => cb(data);
     ipcRenderer.on("auto-update-status", handler);
     return () => ipcRenderer.removeListener("auto-update-status", handler);
   },
   requestImmediateUpdateCheck: () => ipcRenderer.invoke("auto-check-updates"),
-  installPendingUpdate: () => ipcRenderer.invoke("auto-install-update")
+  installPendingUpdate: () => ipcRenderer.invoke("auto-install-update"),
+
+  // App & Website Tracking
+  getAppTrackingStatus: () => ipcRenderer.invoke("get-app-tracking-status"),
+  onAppTrackingUpdate: (cb) => {
+    if (typeof cb !== "function") return () => { };
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("app-tracking-update", handler);
+    return () => ipcRenderer.removeListener("app-tracking-update", handler);
+  }
 });

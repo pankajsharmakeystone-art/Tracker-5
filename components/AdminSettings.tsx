@@ -90,7 +90,7 @@ const AdminSettings: React.FC = () => {
         organizationTimezone: 'Asia/Kolkata',
         showLiveTeamStatusToAgents: true,
     };
-    
+
     const [settings, setSettings] = useState<AdminSettingsType>(defaultSettings);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
@@ -137,7 +137,7 @@ const AdminSettings: React.FC = () => {
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value, type } = e.target;
-        
+
         let finalValue: string | number = value;
         if (type === 'number') {
             finalValue = value === '' ? 0 : parseInt(value, 10);
@@ -224,7 +224,7 @@ const AdminSettings: React.FC = () => {
             </p>
 
             {error && <p className="text-sm text-red-500 mb-4 p-3 bg-red-100 dark:bg-red-900/50 rounded-md">{error}</p>}
-            
+
             <form onSubmit={handleSave}>
                 <SectionHeading
                     title="Screen Recording"
@@ -490,14 +490,14 @@ const AdminSettings: React.FC = () => {
 
                 {settings.autoUpload && settings.uploadToHttp && (
                     <>
-                        <FormField label="HTTP Upload URL" description="Endpoint that receives raw binary uploads. Example: https://your-server.example.com/upload">
+                        <FormField label="HTTP Upload URL(s)" description="One or more endpoints that receive raw binary uploads. Enter multiple URLs separated by comma or semicolon (for example LAN + public URL fallback).">
                             <input
                                 type="text"
                                 name="httpUploadUrl"
                                 value={settings.httpUploadUrl || ''}
                                 onChange={handleInputChange}
                                 className="bg-gray-50 border border-gray-300 text-gray-900 sm:text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
-                                placeholder="https://your-server.example.com/upload"
+                                placeholder="http://office-pc:5055/upload, https://uploads.yourdomain.com/upload"
                             />
                         </FormField>
 
@@ -631,7 +631,153 @@ const AdminSettings: React.FC = () => {
                 </FormField>
 
                 <SectionHeading
-                    title="Scheduling & Time"
+                    title="App & Website Tracking"
+                    description="Monitor which applications and websites agents use during work. Data is visible to admins and managers only."
+                />
+
+                <FormField label="Enable App Tracking" description="Track foreground applications and browser page titles on agent desktops. Data is collected locally and written to Firestore at clock-out.">
+                    <ToggleSwitch
+                        id="enableAppTracking"
+                        checked={settings.enableAppTracking ?? false}
+                        onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, enableAppTracking: e.target.checked }))}
+                    />
+                </FormField>
+
+                {settings.enableAppTracking && (
+                    <FormField label="Tracking Interval (seconds)" description="How often the desktop app checks which application is in the foreground. Lower values are more precise but use slightly more CPU.">
+                        <input
+                            type="number"
+                            name="appTrackingIntervalSeconds"
+                            min={5}
+                            max={60}
+                            value={settings.appTrackingIntervalSeconds ?? 10}
+                            onChange={handleInputChange}
+                            className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        />
+                    </FormField>
+                )}
+
+                {settings.enableAppTracking && (
+                    <div className="py-4 border-b border-gray-200 dark:border-gray-700">
+                        <div className="mb-3">
+                            <label className="text-sm font-medium text-gray-900 dark:text-white">Custom Category Rules</label>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                Map specific app names or window title keywords to a category. Rules are checked before built-in defaults.
+                            </p>
+                        </div>
+                        <div className="space-y-2 mb-3">
+                            {(settings.appCategoryRules ?? []).map((rule, idx) => (
+                                <div key={idx} className="flex items-center gap-2">
+                                    <select
+                                        value={rule.type}
+                                        onChange={(e) => {
+                                            const rules = [...(settings.appCategoryRules ?? [])];
+                                            rules[idx] = { ...rules[idx], type: e.target.value as 'app' | 'title' };
+                                            setSettings((prev: AdminSettingsType) => ({ ...prev, appCategoryRules: rules }));
+                                        }}
+                                        className="text-sm border border-gray-300 rounded-lg p-2 bg-gray-50 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                                    >
+                                        <option value="app">App name</option>
+                                        <option value="title">Window title</option>
+                                    </select>
+                                    <input
+                                        type="text"
+                                        placeholder="Pattern (e.g. Immix)"
+                                        value={rule.pattern}
+                                        onChange={(e) => {
+                                            const rules = [...(settings.appCategoryRules ?? [])];
+                                            rules[idx] = { ...rules[idx], pattern: e.target.value };
+                                            setSettings((prev: AdminSettingsType) => ({ ...prev, appCategoryRules: rules }));
+                                        }}
+                                        className="flex-1 text-sm border border-gray-300 rounded-lg p-2 bg-gray-50 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                                    />
+                                    <select
+                                        value={rule.category}
+                                        onChange={(e) => {
+                                            const rules = [...(settings.appCategoryRules ?? [])];
+                                            rules[idx] = { ...rules[idx], category: e.target.value as any };
+                                            setSettings((prev: AdminSettingsType) => ({ ...prev, appCategoryRules: rules }));
+                                        }}
+                                        className="text-sm border border-gray-300 rounded-lg p-2 bg-gray-50 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                                    >
+                                        <option value="productive">Productive</option>
+                                        <option value="development">Development</option>
+                                        <option value="communication">Communication</option>
+                                        <option value="design">Design</option>
+                                        <option value="social">Social</option>
+                                        <option value="entertainment">Entertainment</option>
+                                        <option value="uncategorized">Uncategorized</option>
+                                    </select>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const rules = (settings.appCategoryRules ?? []).filter((_, i) => i !== idx);
+                                            setSettings((prev: AdminSettingsType) => ({ ...prev, appCategoryRules: rules }));
+                                        }}
+                                        className="text-red-500 hover:text-red-700 text-lg font-bold px-1"
+                                        title="Remove rule"
+                                    >×</button>
+                                </div>
+                            ))}
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const newRule = { type: 'title' as const, pattern: '', category: 'productive' as const };
+                                setSettings((prev: AdminSettingsType) => ({ ...prev, appCategoryRules: [...(prev.appCategoryRules ?? []), newRule] }));
+                            }}
+                            className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 font-medium"
+                        >
+                            + Add Rule
+                        </button>
+                    </div>
+                )}
+
+                {settings.enableAppTracking && (
+                    <div className="py-4 border-b border-gray-200 dark:border-gray-700">
+                        <div className="mb-3">
+                            <label className="text-sm font-medium text-gray-900 dark:text-white">
+                                🚨 Red Flag Categories
+                            </label>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                When an agent opens an app in any of these categories, an instant alert is sent to all open Admin and Manager panels.
+                            </p>
+                        </div>
+                        <div className="flex flex-wrap gap-4">
+                            {([
+                                { value: 'social', label: '💬 Social' },
+                                { value: 'entertainment', label: '🎮 Entertainment' },
+                                { value: 'design', label: '🎨 Design' },
+                                { value: 'communication', label: '📧 Communication' },
+                                { value: 'development', label: '💻 Development' },
+                                { value: 'productive', label: '✅ Productive' },
+                                { value: 'uncategorized', label: '❓ Uncategorized' },
+                            ] as const).map(({ value, label }) => {
+                                const checked = (settings.redFlagCategories ?? []).includes(value as any);
+                                return (
+                                    <label key={value} className="flex items-center gap-2 cursor-pointer select-none text-sm text-gray-700 dark:text-gray-300">
+                                        <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={() => {
+                                                const current = settings.redFlagCategories ?? [];
+                                                const next = checked
+                                                    ? current.filter((c: string) => c !== value)
+                                                    : [...current, value as any];
+                                                setSettings((prev: AdminSettingsType) => ({ ...prev, redFlagCategories: next }));
+                                            }}
+                                            className="rounded border-gray-300 text-red-600 focus:ring-red-500"
+                                        />
+                                        {label}
+                                    </label>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+
+                <SectionHeading
+                    title="Scheduling &amp; Time"
                     description="Keep desktop automation aligned with your company timezone and shift plans."
                 />
 
@@ -660,8 +806,8 @@ const AdminSettings: React.FC = () => {
                         />
                     </div>
                 </FormField>
-                
-                 <div className="mt-8 flex items-center gap-4">
+
+                <div className="mt-8 flex items-center gap-4">
                     <button type="submit" disabled={saving} className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800 disabled:opacity-50">
                         {saving ? 'Saving...' : 'Save Settings'}
                     </button>
