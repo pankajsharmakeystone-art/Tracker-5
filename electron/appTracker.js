@@ -104,6 +104,7 @@ let spans = [];
 let currentSpan = null;
 let paused = false;
 let flushInFlight = null;
+let backupRecovered = false;
 
 // These are injected from main.js via init()
 let ctx = {
@@ -257,7 +258,8 @@ function loadBackup() {
         if (!fs.existsSync(APP_TRACKER_BACKUP_PATH)) return null;
         const raw = fs.readFileSync(APP_TRACKER_BACKUP_PATH, 'utf8');
         const data = JSON.parse(raw);
-        return (data && data.uid === ctx.getUid()) ? data : null;
+        const today = new Date().toISOString().slice(0, 10);
+        return (data && data.uid === ctx.getUid() && data.date === today) ? data : null;
     } catch (_) { return null; }
 }
 
@@ -284,14 +286,23 @@ function start() {
     // Prevent overlapping intervals
     stop();
 
-    // Crash recovery
-    const backup = loadBackup();
-    if (backup && backup.spans && backup.spans.length > 0) {
-        ctx.log(`[app-tracker] recovered ${backup.spans.length} spans from backup`);
-
-        // Merge instead of purely overwriting, just in case we already have in-memory spans
-        const existingSpans = spans || [];
-        spans = [...backup.spans, ...existingSpans];
+    // Crash recovery (once per tracker session, with de-dup)
+    if (!backupRecovered) {
+        const backup = loadBackup();
+        if (backup && backup.spans && backup.spans.length > 0) {
+            ctx.log(`[app-tracker] recovered ${backup.spans.length} spans from backup`);
+            const existingSpans = spans || [];
+            const mergedRaw = [...backup.spans, ...existingSpans];
+            const seen = new Set();
+            spans = [];
+            for (const item of mergedRaw) {
+                const fp = getEntryFingerprint(item);
+                if (seen.has(fp)) continue;
+                seen.add(fp);
+                spans.push(item);
+            }
+        }
+        backupRecovered = true;
     }
 
     paused = false;
@@ -495,6 +506,7 @@ function reset() {
     spans = [];
     currentSpan = null;
     paused = false;
+    backupRecovered = false;
 }
 
 // --- IPC ---
