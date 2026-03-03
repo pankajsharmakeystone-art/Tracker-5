@@ -110,7 +110,9 @@ let backupRecovered = false;
 let ctx = {
     log: console.log,
     getUid: () => null,
+    getDateKey: () => new Date().toISOString().slice(0, 10),
     isClockedIn: () => false,
+    isOnBreak: () => false,
     isIdle: () => false,
     isScreenLocked: () => false,
     getAdminSettings: () => ({}),
@@ -119,6 +121,14 @@ let ctx = {
     getDb: () => null,
     ensureAuth: async () => false,
 };
+
+function getTrackingDateKey() {
+    try {
+        const key = ctx.getDateKey ? ctx.getDateKey() : null;
+        if (typeof key === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(key)) return key;
+    } catch (_) { }
+    return new Date().toISOString().slice(0, 10);
+}
 
 // --- Classification ---
 function classifyApp(appName, title) {
@@ -155,6 +165,7 @@ function isBrowserApp(appName) {
 // --- Polling ---
 async function tick() {
     if (!activeWin || !ctx.getUid() || !ctx.isClockedIn() || paused) return;
+    if (ctx.isOnBreak && ctx.isOnBreak()) return;
     if (ctx.isIdle() || ctx.isScreenLocked()) return;
 
     try {
@@ -242,7 +253,7 @@ function saveBackup() {
     try {
         const data = {
             uid: ctx.getUid(),
-            date: new Date().toISOString().slice(0, 10),
+            date: getTrackingDateKey(),
             spans,
             currentSpan,
             savedAt: Date.now()
@@ -258,7 +269,7 @@ function loadBackup() {
         if (!fs.existsSync(APP_TRACKER_BACKUP_PATH)) return null;
         const raw = fs.readFileSync(APP_TRACKER_BACKUP_PATH, 'utf8');
         const data = JSON.parse(raw);
-        const today = new Date().toISOString().slice(0, 10);
+        const today = getTrackingDateKey();
         return (data && data.uid === ctx.getUid() && data.date === today) ? data : null;
     } catch (_) { return null; }
 }
@@ -267,7 +278,7 @@ function clearBackup() {
     try {
         if (fs.existsSync(APP_TRACKER_BACKUP_PATH)) {
             // First, overwrite with empty state in case unlink fails due to file locks (common on Windows)
-            fs.writeFileSync(APP_TRACKER_BACKUP_PATH, JSON.stringify({ uid: ctx.getUid(), date: new Date().toISOString().slice(0, 10), spans: [], currentSpan: null, savedAt: Date.now() }), 'utf8');
+            fs.writeFileSync(APP_TRACKER_BACKUP_PATH, JSON.stringify({ uid: ctx.getUid(), date: getTrackingDateKey(), spans: [], currentSpan: null, savedAt: Date.now() }), 'utf8');
             // Then attempt to delete
             fs.unlinkSync(APP_TRACKER_BACKUP_PATH);
         }
@@ -395,7 +406,7 @@ async function flush() {
     const uid = ctx.getUid();
     if (!uid) { ctx.log('[app-tracker] no uid, cannot flush'); return; }
 
-    const date = new Date().toISOString().slice(0, 10);
+    const date = getTrackingDateKey();
     const spansToFlush = spans.map((s) => ({ ...s }));
     // Clear in-memory queue now so a second flush invocation cannot re-use the same spans.
     spans = [];

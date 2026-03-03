@@ -352,7 +352,9 @@ const DEFAULT_ORGANIZATION_TIMEZONE = "Asia/Kolkata";
 appTracker.init({
   log: log,
   getUid: () => currentUid,
+  getDateKey: () => toScheduleDateKey(),
   isClockedIn: () => agentClockedIn,
+  isOnBreak: () => manualBreakActive,
   isIdle: () => lastIdleState,
   isScreenLocked: () => isAway,
   getAdminSettings: () => cachedAdminSettings,
@@ -947,33 +949,21 @@ function startRtdbPresence(uid) {
 
 function getIsoDateFromMs(ms) {
   try {
-    const d = new Date(ms);
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
+    const timezone = getOrganizationTimezone();
+    return DateTime.fromMillis(Number(ms)).setZone(timezone).toFormat('yyyy-MM-dd');
   } catch (_) {
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
+    const timezone = getOrganizationTimezone();
+    return DateTime.now().setZone(timezone).toFormat('yyyy-MM-dd');
   }
 }
 
 function getIsoTimeFromMs(ms) {
   try {
-    const d = new Date(ms);
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    const ss = String(d.getSeconds()).padStart(2, '0');
-    return `${hh}-${mm}-${ss}`;
+    const timezone = getOrganizationTimezone();
+    return DateTime.fromMillis(Number(ms)).setZone(timezone).toFormat('HH-mm-ss');
   } catch (_) {
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    const ss = String(now.getSeconds()).padStart(2, '0');
-    return `${hh}-${mm}-${ss}`;
+    const timezone = getOrganizationTimezone();
+    return DateTime.now().setZone(timezone).toFormat('HH-mm-ss');
   }
 }
 
@@ -4012,6 +4002,8 @@ async function hydrateClockedInStateFromWorklogs(uid) {
     agentClockedIn = true;
     startAgentStatusLoop(uid);
     appTracker.start();
+    if (isOnBreak) appTracker.pause();
+    else appTracker.resume();
 
     // Start auto-recording only when actively working.
     const safeSettings = cachedAdminSettings || {};
@@ -4054,8 +4046,10 @@ function startAgentStatusWatch(uid) {
         manualBreakActive = nextManualBreak;
         manualBreakStartedAtMs = nextManualBreak && startedAtMs ? startedAtMs : null;
         if (manualBreakActive) {
+          appTracker.pause();
           scheduleManualBreakReminderIfNeeded();
         } else {
+          appTracker.resume();
           clearManualBreakReminderTimer();
           closeManualBreakReminderWindow();
         }
@@ -4595,6 +4589,7 @@ async function applyAgentStatus(status) {
     manualBreakActive = true;
     manualBreakStartedAtMs = Date.now();
     scheduleManualBreakReminderIfNeeded();
+    appTracker.pause();
 
     const wasRecording = isRecordingActive;
     // NOTE: We defer setting isRecordingActive = false until AFTER the flush completes.
@@ -4709,6 +4704,7 @@ async function applyAgentStatus(status) {
     }
     startAgentStatusLoop(currentUid);
     appTracker.start(); // Start app/website tracking on clock-in
+    appTracker.resume();
 
     const safeSettings = cachedAdminSettings || {};
     const allowRecording = safeSettings.allowRecording !== false;
@@ -4765,6 +4761,7 @@ async function applyAgentStatus(status) {
     manualBreakActive = false;
     manualBreakStartedAtMs = null;
     clearManualBreakReminderTimer();
+    appTracker.pause();
 
     const wasRecording = isRecordingActive;
     isRecordingActive = false;
