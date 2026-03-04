@@ -89,6 +89,9 @@ const APP_USER_MODEL_ID = 'com.trackerfive.desktop';
 // Online-only force logout: ignore pending force-logout commands/requests older than this TTL.
 const FORCE_LOGOUT_TTL_MS = 5 * 1000;
 const RECONNECT_TTL_MS = 60 * 1000;
+// Initialize debug flags early so startup logs cannot hit TDZ errors.
+let machineDebugEnabled = false;
+let envDevtoolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
 
 electronLog.initialize?.();
 if (electronLog?.transports?.file) {
@@ -221,8 +224,6 @@ if (disableHardwareAcceleration) {
 }
 
 const desktopMachineName = String(os.hostname() || '').trim().toLowerCase();
-let machineDebugEnabled = false;
-const envDevtoolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
 
 function parseDebugMachineList(settings = {}) {
   const raw = settings?.desktopDebugMachines
