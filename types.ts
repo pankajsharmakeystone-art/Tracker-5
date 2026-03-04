@@ -27,6 +27,8 @@ export interface AppActivityEntry {
     endTime: any;
     durationSeconds: number;
     url?: string;
+    source?: 'idle_avoid';
+    detectionReason?: string;
 }
 
 export interface AppActivitySummary {
@@ -53,6 +55,9 @@ export interface AppAlert {
     category: AppCategory;
     timestamp: number;
     teamId?: string;
+    alertType?: 'red_flag' | 'idle_avoid';
+    durationSeconds?: number;
+    detectionReason?: string;
 }
 
 export interface WorkLog {
@@ -168,6 +173,7 @@ export interface AdminSettingsType {
     recordingQuality?: "480p" | "720p" | "1080p";
     recordingFps?: 30 | 60 | 120;
     recordingSegmentMinutes?: number;
+    desktopDebugMachines?: string[];
     organizationTimezone?: string;
     showLiveTeamStatusToAgents?: boolean;
     enableAppTracking?: boolean;

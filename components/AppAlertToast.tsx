@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef } from 'react';
 import type { AppAlert } from '../types';
 
@@ -7,14 +6,14 @@ interface Props {
     onDismiss: (id: string) => void;
 }
 
-const CATEGORY_EMOJI: Record<string, string> = {
-    social: '💬',
-    entertainment: '🎮',
-    design: '🎨',
-    development: '💻',
-    communication: '📧',
-    productive: '✅',
-    uncategorized: '❓',
+const CATEGORY_BADGE: Record<string, string> = {
+    social: '[S]',
+    entertainment: '[E]',
+    design: '[D]',
+    development: '[DEV]',
+    communication: '[C]',
+    productive: '[P]',
+    uncategorized: '[?]',
 };
 
 const AppAlertToast: React.FC<Props> = ({ alerts, onDismiss }) => {
@@ -30,7 +29,6 @@ const AppAlertToast: React.FC<Props> = ({ alerts, onDismiss }) => {
                 }, 8000);
             }
         });
-        // Clean up timers for dismissed alerts
         return () => {
             Object.keys(timers.current).forEach(id => {
                 if (!alerts.find(a => a.id === id)) {
@@ -44,7 +42,6 @@ const AppAlertToast: React.FC<Props> = ({ alerts, onDismiss }) => {
     useEffect(() => {
         if (typeof window === 'undefined' || typeof Notification === 'undefined') return;
 
-        // Request permission once when first alert arrives.
         if (alerts.length > 0 && Notification.permission === 'default') {
             Notification.requestPermission().catch(() => { });
         }
@@ -55,10 +52,12 @@ const AppAlertToast: React.FC<Props> = ({ alerts, onDismiss }) => {
             if (notified.current.has(alert.id)) return;
             notified.current.add(alert.id);
             try {
-                const title = 'Red Flag Alert';
+                const title = alert.alertType === 'idle_avoid' ? 'Idle Avoid Alert' : 'Red Flag Alert';
                 const actor = alert.userDisplayName || 'Agent';
                 const target = alert.title || alert.app || 'a flagged app';
-                const body = `${actor} opened ${target}`;
+                const body = alert.alertType === 'idle_avoid'
+                    ? `${actor} showed possible jiggler/idle-avoid activity (${alert.durationSeconds || 0}s)`
+                    : `${actor} opened ${target}`;
                 const n = new Notification(title, { body, tag: `app-alert-${alert.id}` });
                 n.onclick = () => {
                     try { window.focus(); } catch (_) { }
@@ -78,16 +77,20 @@ const AppAlertToast: React.FC<Props> = ({ alerts, onDismiss }) => {
                     className="pointer-events-auto bg-white dark:bg-gray-900 border-l-4 border-red-500 rounded-lg shadow-xl flex items-start gap-3 p-4 animate-slide-in"
                     role="alert"
                 >
-                    <span className="text-2xl flex-shrink-0">{CATEGORY_EMOJI[alert.category] ?? '🚨'}</span>
+                    <span className="text-xs flex-shrink-0 font-semibold text-gray-500">
+                        {CATEGORY_BADGE[alert.category] ?? '[!]'}
+                    </span>
                     <div className="flex-1 min-w-0">
                         <p className="text-sm font-bold text-red-600 dark:text-red-400 mb-0.5">
-                            🚨 Red Flag Alert
+                            {alert.alertType === 'idle_avoid' ? 'Idle Avoid Alert' : 'Red Flag Alert'}
                         </p>
                         <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">
                             {alert.userDisplayName}
                         </p>
                         <p className="text-xs text-gray-600 dark:text-gray-400 truncate">
-                            opened <span className="font-medium">{alert.title || alert.app}</span>
+                            {alert.alertType === 'idle_avoid'
+                                ? <>possible jiggler activity on <span className="font-medium">{alert.title || alert.app}</span></>
+                                : <>opened <span className="font-medium">{alert.title || alert.app}</span></>}
                         </p>
                         <p className="text-xs text-gray-400 capitalize mt-0.5">{alert.category}</p>
                     </div>
@@ -96,7 +99,7 @@ const AppAlertToast: React.FC<Props> = ({ alerts, onDismiss }) => {
                         className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 flex-shrink-0 text-lg leading-none"
                         aria-label="Dismiss"
                     >
-                        ×
+                        x
                     </button>
                 </div>
             ))}

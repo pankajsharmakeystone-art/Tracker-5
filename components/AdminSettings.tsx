@@ -12,6 +12,23 @@ const resolveDropboxSessionEndpoint = () => {
     return '/api/create-dropbox-session';
 };
 
+const parseDesktopDebugMachines = (value: string): string[] => {
+    return String(value || '')
+        .split(/[,\n;]/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+};
+
+const stringifyDesktopDebugMachines = (value: unknown): string => {
+    if (Array.isArray(value)) {
+        return value
+            .map((v) => String(v || '').trim())
+            .filter(Boolean)
+            .join(', ');
+    }
+    return '';
+};
+
 interface FormFieldProps {
     label: string;
     description: string;
@@ -85,6 +102,7 @@ const AdminSettings: React.FC = () => {
         recordingQuality: '720p',
         recordingFps: 30,
         recordingSegmentMinutes: 5,
+        desktopDebugMachines: [],
         autoClockOutEnabled: false,
         manualBreakTimeoutMinutes: 30,
         organizationTimezone: 'Asia/Kolkata',
@@ -100,6 +118,7 @@ const AdminSettings: React.FC = () => {
     const [tokenMessage, setTokenMessage] = useState<string | null>(null);
     const [showDropboxChecklist, setShowDropboxChecklist] = useState(false);
     const [showGoogleSheetsChecklist, setShowGoogleSheetsChecklist] = useState(false);
+    const [desktopDebugMachinesText, setDesktopDebugMachinesText] = useState('');
     const dropboxSessionEndpoint = useMemo(() => resolveDropboxSessionEndpoint(), []);
     const dropboxCallbackHint = useMemo(() => {
         if (typeof window !== 'undefined' && window.location) {
@@ -125,9 +144,12 @@ const AdminSettings: React.FC = () => {
         const unsubscribe = streamGlobalAdminSettings((data) => {
             if (data) {
                 // Merge with default settings to ensure all fields exist
-                setSettings((prev: AdminSettingsType) => ({ ...defaultSettings, ...data }));
+                const merged = { ...defaultSettings, ...data };
+                setSettings(merged);
+                setDesktopDebugMachinesText(stringifyDesktopDebugMachines(merged.desktopDebugMachines));
             } else {
                 setSettings(defaultSettings);
+                setDesktopDebugMachinesText('');
             }
             setLoading(false);
         });
@@ -152,7 +174,13 @@ const AdminSettings: React.FC = () => {
         setError(null);
         setSuccess(null);
         try {
-            await updateGlobalAdminSettings(settings);
+            const normalizedDesktopDebugMachines = parseDesktopDebugMachines(desktopDebugMachinesText);
+            const payload: AdminSettingsType = {
+                ...settings,
+                desktopDebugMachines: normalizedDesktopDebugMachines
+            };
+            await updateGlobalAdminSettings(payload);
+            setSettings(payload);
             setSuccess('Settings saved successfully!');
             setTimeout(() => setSuccess(null), 3000);
         } catch (err) {
@@ -290,6 +318,24 @@ const AdminSettings: React.FC = () => {
                         onChange={handleInputChange}
                         className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
                     />
+                </FormField>
+
+                <FormField
+                    label="Desktop Debug Machines"
+                    description="Enable desktop debug/devtools only for selected machine names (comma or new line separated)."
+                >
+                    <div className="space-y-2">
+                        <textarea
+                            value={desktopDebugMachinesText}
+                            onChange={(e) => setDesktopDebugMachinesText(e.target.value)}
+                            rows={3}
+                            className="w-full max-w-xl rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                            placeholder="DESKTOP-32BDQQU, DESKTOP-1MQCKB3"
+                        />
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                            Leave empty to keep debug disabled on all machines.
+                        </p>
+                    </div>
                 </FormField>
 
                 <FormField label="Show Recording Notification" description="Show a desktop notification when screen recording starts or stops.">

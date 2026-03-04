@@ -105,6 +105,16 @@ let currentSpan = null;
 let paused = false;
 let flushInFlight = null;
 let backupRecovered = false;
+let previousIdleSeconds = null;
+let lastWindowFingerprint = '';
+let keepAliveResetEvents = [];
+let idleAvoidState = {
+    active: false,
+    startedAt: 0,
+    lastTriggerAt: 0,
+    alertSent: false,
+    reason: null,
+};
 
 // These are injected from main.js via init()
 let ctx = {
@@ -114,6 +124,7 @@ let ctx = {
     isClockedIn: () => false,
     isOnBreak: () => false,
     isIdle: () => false,
+    getIdleSeconds: () => 0,
     isScreenLocked: () => false,
     getAdminSettings: () => ({}),
     getMainWindow: () => null,
@@ -162,6 +173,100 @@ function isBrowserApp(appName) {
         .some(b => lower.includes(b));
 }
 
+function nowMs() {
+    return Date.now();
+}
+
+function pruneOldResetEvents(now) {
+    const windowMs = 15 * 60 * 1000;
+    keepAliveResetEvents = keepAliveResetEvents.filter((ts) => (now - ts) <= windowMs);
+}
+
+function resetIdleAvoidState() {
+    keepAliveResetEvents = [];
+    idleAvoidState = {
+        active: false,
+        startedAt: 0,
+        lastTriggerAt: 0,
+        alertSent: false,
+        reason: null,
+    };
+}
+
+function evaluateIdleAvoidDetection({ appName, pageTitle, idleSecs, idleLimit, now }) {
+    const fingerprint = `${String(appName || '').toLowerCase()}||${String(pageTitle || '').toLowerCase()}`;
+    const sameWindow = fingerprint === lastWindowFingerprint;
+
+    if (!sameWindow) {
+        keepAliveResetEvents = [];
+        if (idleAvoidState.active) {
+            idleAvoidState.active = false;
+            idleAvoidState.reason = null;
+        }
+    }
+
+    if (Number.isFinite(previousIdleSeconds) && Number.isFinite(idleSecs) && sameWindow && idleLimit >= 30) {
+        const nearThreshold = previousIdleSeconds >= Math.max(10, idleLimit - 8);
+        const suddenReset = idleSecs <= 2;
+        if (nearThreshold && suddenReset) {
+            keepAliveResetEvents.push(now);
+            idleAvoidState.lastTriggerAt = now;
+        }
+    }
+
+    pruneOldResetEvents(now);
+
+    if (!idleAvoidState.active && keepAliveResetEvents.length >= 3) {
+        const intervals = [];
+        for (let i = 1; i < keepAliveResetEvents.length; i += 1) {
+            intervals.push(keepAliveResetEvents[i] - keepAliveResetEvents[i - 1]);
+        }
+        const minInterval = Math.min(...intervals);
+        const maxInterval = Math.max(...intervals);
+        const stablePattern = intervals.length >= 2 && (maxInterval - minInterval) <= 20000;
+        if (stablePattern) {
+            idleAvoidState.active = true;
+            idleAvoidState.startedAt = now;
+            idleAvoidState.lastTriggerAt = now;
+            idleAvoidState.alertSent = false;
+            idleAvoidState.reason = 'repeating-idle-reset-pattern';
+            ctx.log('[app-tracker] idle-avoid pattern detected');
+        }
+    }
+
+    if (idleAvoidState.active) {
+        const staleForMs = now - (idleAvoidState.lastTriggerAt || idleAvoidState.startedAt || now);
+        if (!sameWindow || staleForMs > Math.max(90000, idleLimit * 2000)) {
+            idleAvoidState.active = false;
+            idleAvoidState.reason = null;
+            keepAliveResetEvents = [];
+        }
+    }
+
+    previousIdleSeconds = Number.isFinite(idleSecs) ? idleSecs : null;
+    lastWindowFingerprint = fingerprint;
+    return idleAvoidState.active;
+}
+
+async function writeAppAlert(payload) {
+    try {
+        const firestoreDb = ctx.getDb();
+        if (!firestoreDb) return false;
+        const uid = ctx.getUid();
+        await firestoreDb.collection('appAlerts').add({
+            userId: uid,
+            userDisplayName: ctx.getUserDisplayName ? ctx.getUserDisplayName() : uid,
+            teamId: ctx.getUserTeamId ? ctx.getUserTeamId() : null,
+            timestamp: nowMs(),
+            ...payload,
+        });
+        return true;
+    } catch (e) {
+        ctx.log('[app-tracker] app alert write failed:', e?.message || e);
+        return false;
+    }
+}
+
 // --- Polling ---
 async function tick() {
     if (!activeWin || !ctx.getUid() || !ctx.isClockedIn() || paused) return;
@@ -176,62 +281,61 @@ async function tick() {
         const rawTitle = win.title || '';
         const browser = isBrowserApp(appName);
         const pageTitle = browser ? parseBrowserTitle(rawTitle) : rawTitle;
-        const category = classifyApp(appName, rawTitle);
-        const now = Date.now();
+        const realCategory = classifyApp(appName, rawTitle);
+        const now = nowMs();
+        const settings = ctx.getAdminSettings() || {};
+        const idleLimit = Math.max(0, Number(settings?.idleTimeout) || 0);
+        const idleSecs = Number(ctx.getIdleSeconds?.() ?? 0);
+        const idleAvoidActive = evaluateIdleAvoidDetection({ appName, pageTitle, idleSecs, idleLimit, now });
 
-        // Same app+title → extend current span
-        if (currentSpan && currentSpan.app === appName && currentSpan.title === pageTitle) {
+        const effectiveApp = idleAvoidActive ? 'Idle Avoid Activity' : appName;
+        const effectiveTitle = idleAvoidActive
+            ? `Likely jiggler on ${appName}${pageTitle ? ` - ${String(pageTitle).substring(0, 120)}` : ''}`
+            : pageTitle;
+        const category = idleAvoidActive ? 'uncategorized' : realCategory;
+
+        if (currentSpan && currentSpan.app === effectiveApp && currentSpan.title === effectiveTitle) {
             currentSpan.endTime = now;
             return;
         }
 
-        // Close previous span
         if (currentSpan) {
             currentSpan.endTime = now;
             currentSpan.durationSeconds = Math.round((currentSpan.endTime - currentSpan.startTime) / 1000);
             if (currentSpan.durationSeconds > 0) {
-                // ctx.log(`[app-tracker] closed span: ${currentSpan.app} (${currentSpan.durationSeconds}s)`);
                 spans.push({ ...currentSpan });
             }
         }
 
-        // Start new span
         currentSpan = {
-            app: appName,
-            title: pageTitle,
+            app: effectiveApp,
+            title: effectiveTitle,
             category,
             startTime: now,
             endTime: now,
             durationSeconds: 0,
-            ...(browser ? { url: pageTitle } : {})
+            ...(browser && !idleAvoidActive ? { url: pageTitle } : {}),
+            ...(idleAvoidActive ? { source: 'idle_avoid', detectionReason: idleAvoidState.reason } : {})
         };
 
-        // Update RTDB for live dashboard (only on window change, very cheap)
         try {
             const rtdb = ctx.getRtdb();
             if (rtdb) {
                 const ref = rtdb.ref(`appTracking/${ctx.getUid()}`);
-                await ref.set({ app: appName, title: pageTitle, category, since: now });
+                await ref.set({ app: effectiveApp, title: effectiveTitle, category, since: now });
             }
-        } catch (_) { /* best-effort */ }
+        } catch (_) { }
 
-        // Red flag alert — fire-and-forget to Firestore appAlerts
         try {
-            const settings = ctx.getAdminSettings() || {};
             const redFlags = settings.redFlagCategories || [];
-            if (redFlags.includes(category)) {
-                const firestoreDb = ctx.getDb();
-                if (firestoreDb) {
-                    const uid = ctx.getUid();
-                    await firestoreDb.collection('appAlerts').add({
-                        userId: uid,
-                        userDisplayName: ctx.getUserDisplayName ? ctx.getUserDisplayName() : uid,
-                        app: appName,
-                        title: (pageTitle || '').substring(0, 200),
-                        category,
-                        timestamp: now,
-                        teamId: ctx.getUserTeamId ? ctx.getUserTeamId() : null,
-                    });
+            if (!idleAvoidActive && redFlags.includes(category)) {
+                const wrote = await writeAppAlert({
+                    app: appName,
+                    title: (pageTitle || '').substring(0, 200),
+                    category,
+                    alertType: 'red_flag',
+                });
+                if (wrote) {
                     ctx.log(`[app-tracker] red flag alert fired: ${appName} (${category})`);
                 }
             }
@@ -239,15 +343,35 @@ async function tick() {
             ctx.log('[app-tracker] red flag alert write failed:', e?.message || e);
         }
 
-        // Emit to renderer
+        try {
+            if (idleAvoidActive && !idleAvoidState.alertSent) {
+                const activeMs = now - (idleAvoidState.startedAt || now);
+                if (activeMs >= 30000) {
+                    idleAvoidState.alertSent = true;
+                    const wrote = await writeAppAlert({
+                        app: 'Idle Avoid Activity',
+                        title: `Likely jiggler detected on ${appName}`.substring(0, 200),
+                        category: 'uncategorized',
+                        alertType: 'idle_avoid',
+                        durationSeconds: Math.round(activeMs / 1000),
+                        detectionReason: idleAvoidState.reason || 'repeating-idle-reset-pattern',
+                    });
+                    if (wrote) {
+                        ctx.log('[app-tracker] idle-avoid alert fired');
+                    }
+                }
+            }
+        } catch (e) {
+            ctx.log('[app-tracker] idle-avoid alert write failed:', e?.message || e);
+        }
+
         try {
             const mw = ctx.getMainWindow();
-            mw?.webContents?.send?.('app-tracking-update', { app: appName, title: pageTitle, category });
+            mw?.webContents?.send?.('app-tracking-update', { app: effectiveApp, title: effectiveTitle, category });
         } catch (_) { }
 
-    } catch (_) { /* silently ignore tick failures */ }
+    } catch (_) { }
 }
-
 // --- Backup ---
 function saveBackup() {
     try {
@@ -341,7 +465,9 @@ function getEntryFingerprint(entry) {
         Number(entry?.startTime) || 0,
         Number(entry?.endTime) || 0,
         Number(entry?.durationSeconds) || 0,
-        entry?.url || ''
+        entry?.url || '',
+        entry?.source || '',
+        entry?.detectionReason || ''
     ].join('|');
 }
 
@@ -428,7 +554,9 @@ async function flush() {
         startTime: s.startTime,
         endTime: s.endTime,
         durationSeconds: s.durationSeconds,
-        ...(s.url ? { url: s.url.substring(0, 200) } : {})
+        ...(s.url ? { url: s.url.substring(0, 200) } : {}),
+        ...(s.source ? { source: s.source } : {}),
+        ...(s.detectionReason ? { detectionReason: s.detectionReason } : {})
     }));
     const topApps = buildTopAppsFromEntries(entries);
 
@@ -518,6 +646,9 @@ function reset() {
     currentSpan = null;
     paused = false;
     backupRecovered = false;
+    previousIdleSeconds = null;
+    lastWindowFingerprint = '';
+    resetIdleAvoidState();
 }
 
 // --- IPC ---

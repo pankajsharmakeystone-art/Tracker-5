@@ -115,7 +115,13 @@ if (!gotTheLock) {
 }
 
 // ---------- HELPER FUNCTIONS ----------
-function log(...args) { console.log("[electron]", ...args); }
+function log(...args) {
+  console.log("[electron]", ...args);
+  // Mirror logs to electron-log only when desktop debug is enabled for this machine.
+  if (isDesktopDebugEnabled()) {
+    try { electronLog.info("[electron]", ...args); } catch (_) { }
+  }
+}
 
 function emitAutoUpdateStatus(event, payload = {}) {
   const safePayload = payload || {};
@@ -214,7 +220,37 @@ if (disableHardwareAcceleration) {
   log(`[gpu] Hardware acceleration disabled (${source})`);
 }
 
-const devToolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
+const desktopMachineName = String(os.hostname() || '').trim().toLowerCase();
+let machineDebugEnabled = false;
+const envDevtoolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
+
+function parseDebugMachineList(settings = {}) {
+  const raw = settings?.desktopDebugMachines
+    ?? settings?.desktopDebugMachineNames
+    ?? settings?.debugMachines
+    ?? settings?.debugMachineNames
+    ?? null;
+
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw
+      .map((v) => String(v || '').trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return String(raw)
+    .split(/[,\n;]/)
+    .map((v) => v.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function refreshMachineDebugFlag(settings = {}) {
+  const machines = parseDebugMachineList(settings);
+  machineDebugEnabled = machines.includes(desktopMachineName);
+}
+
+function isDesktopDebugEnabled() {
+  return envDevtoolsEnabled || machineDebugEnabled;
+}
 
 const envOr = (...keys) => {
   for (const key of keys) {
@@ -356,6 +392,9 @@ appTracker.init({
   isClockedIn: () => agentClockedIn,
   isOnBreak: () => manualBreakActive,
   isIdle: () => lastIdleState,
+  getIdleSeconds: () => {
+    try { return powerMonitor.getSystemIdleTime(); } catch (_) { return 0; }
+  },
   isScreenLocked: () => isAway,
   getAdminSettings: () => cachedAdminSettings,
   getMainWindow: () => mainWindow,
@@ -1596,6 +1635,7 @@ function hydrateAdminSettingsFromDisk() {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
       cachedAdminSettings = parsed;
+      refreshMachineDebugFlag(cachedAdminSettings);
       adminSettingsReady = true;
       log("[adminSettings] hydrated cached settings from disk");
     }
@@ -1623,7 +1663,10 @@ const AUTO_RESUME_BASE_DELAY_MS = 5000;
 const AUTO_RESUME_MAX_DELAY_MS = 60000;
 let autoResumeRetryDelayMs = AUTO_RESUME_BASE_DELAY_MS;
 let autoResumeRetryTimer = null;
+const PARTIAL_CAPTURE_RECOVERY_COOLDOWN_MS = 2 * 60 * 1000;
+let lastPartialCaptureRecoveryAtMs = 0;
 let lastStatusWriteMs = Date.now();
+let lastStatusReconcileWriteMs = 0;
 let statusHealthInterval = null;
 let lastDesktopToken = null;
 let lastAuthRequiredEmitMs = 0;
@@ -2584,8 +2627,9 @@ function guessRecordingMimeType(fileName = "") {
 
 // ---------- CREATE MAIN WINDOW ----------
 function registerDevtoolsShortcuts(windowInstance) {
-  if (!devToolsEnabled || !windowInstance) return;
+  if (!windowInstance) return;
   const toggleDevtools = () => {
+    if (!isDesktopDebugEnabled()) return;
     const target = windowInstance?.webContents;
     if (!target) return;
     if (target.isDevToolsOpened()) {
@@ -2697,7 +2741,7 @@ function createMainWindow() {
     if (!cachedAdminSettings?.requireLoginOnBoot) {
       mainWindow.show();
     }
-    if (devToolsEnabled) {
+    if (isDesktopDebugEnabled()) {
       try {
         mainWindow.webContents.openDevTools({ mode: "detach" });
       } catch (devtoolsError) {
@@ -3322,6 +3366,7 @@ function applyAdminSettings(next) {
     ...next,
     autoClockOutEnabled: normalizedAutoClockOutEnabled
   };
+  refreshMachineDebugFlag(cachedAdminSettings);
   adminSettingsReady = true;
   log("adminSettings updated:", cachedAdminSettings);
   persistAdminSettingsCache(cachedAdminSettings);
@@ -3923,6 +3968,44 @@ function startAgentStatusLoop(uid) {
       // If screen is locked, keep Away status and do NOT apply idle logic.
       if (isAway) {
         return;
+      }
+
+      // Self-heal stale/offline status docs without reverting to periodic heartbeats.
+      // This only writes when status is clearly stale/mismatched for an active agent.
+      try {
+        const remoteStatus = String(agentData.status || '').toLowerCase();
+        const remoteIsRecording = agentData.isRecording === true;
+        const shouldAutoRecordNow = !shouldForceIdle && isAutoRecordingEnabled();
+
+        if (shouldAutoRecordNow && !isRecordingActive) {
+          scheduleAutoResumeRecording({ force: true, reason: 'status_loop_reconcile' });
+        }
+
+        const needsOnlineStatus =
+          !shouldForceIdle &&
+          (remoteStatus === 'offline' || remoteStatus === 'clocked_out' || remoteStatus === '');
+        const needsRecordingFlag = isRecordingActive && !remoteIsRecording;
+
+        if (needsOnlineStatus || needsRecordingFlag) {
+          const nowMs = Date.now();
+          if (nowMs - lastStatusReconcileWriteMs >= 15000) {
+            const payload = {
+              ...(needsOnlineStatus ? {
+                status: 'online',
+                isIdle: false,
+                manualBreak: false,
+                breakStartedAt: FieldValue.delete()
+              } : {}),
+              ...(needsRecordingFlag ? { isRecording: true } : {}),
+              lastUpdate: FieldValue.serverTimestamp()
+            };
+            await db.collection('agentStatus').doc(uid).set(payload, { merge: true });
+            lastStatusReconcileWriteMs = nowMs;
+            recordStatusWriteSuccess();
+          }
+        }
+      } catch (e) {
+        log('[statusLoop] reconcile write skipped:', e?.message || e);
       }
 
       closeManualBreakReminderWindow();
@@ -4940,10 +5023,46 @@ ipcMain.handle("stop-recording", async (_, meta = {}) => {
 
 ipcMain.on("recorder-state-event", (_event, payload = {}) => {
   const state = String(payload?.state || '').toLowerCase();
+  if (state !== 'recording') {
+    // Allow quick retry again after full stop/failure transitions.
+    lastPartialCaptureRecoveryAtMs = 0;
+  }
   if (state === 'recording') {
     recorderFailureStreak = 0;
     recorderInstabilityStreak = 0;
     setRecorderState(RECORDER_STATES.RECORDING, { sourceCount: payload?.sourceCount || null });
+
+    const sourceCount = Number(payload?.sourceCount || 0);
+    const failedSourceCount = Number(payload?.failedSourceCount || 0);
+    if (failedSourceCount > 0) {
+      log('[recorder] partial start detected', { sourceCount, failedSourceCount });
+      recordHealthEvent('recorder_partial_source_start', {
+        sourceCount,
+        failedSourceCount
+      }).catch(() => { });
+
+      // Partial start means one or more displays failed. Do a guarded restart to
+      // re-enumerate sources and attempt to recover full multi-screen capture.
+      const nowMs = Date.now();
+      if (nowMs - lastPartialCaptureRecoveryAtMs >= PARTIAL_CAPTURE_RECOVERY_COOLDOWN_MS) {
+        lastPartialCaptureRecoveryAtMs = nowMs;
+        setTimeout(async () => {
+          try {
+            if (!currentUid || !agentClockedIn || !isRecordingActive) return;
+            if (recorderState !== RECORDER_STATES.RECORDING) return;
+            await stopBackgroundRecordingAndFlush({
+              payload: {
+                stopReason: 'partial_source_recovery',
+                suppressAutoResume: true
+              }
+            });
+            scheduleAutoResumeRecording({ force: true, reason: 'partial-source-recovery' });
+          } catch (e) {
+            log('[recorder] partial-source recovery failed', e?.message || e);
+          }
+        }, 8000);
+      }
+    }
     return;
   }
   if (state === 'idle') {
