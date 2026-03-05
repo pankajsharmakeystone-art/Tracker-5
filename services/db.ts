@@ -1095,14 +1095,23 @@ export const streamAllAgentStatuses = (callback: (statuses: Record<string, any>)
 
 const createForceLogoutRequestId = () => `flr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 const createReconnectRequestId = () => `rcr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+const createRestartRecordingRequestId = () => `rrr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
 export const sendCommandToDesktop = async (
     uid: string,
-    command: 'startRecording' | 'stopRecording' | 'forceLogout',
+    command: 'startRecording' | 'stopRecording' | 'restartRecording' | 'forceLogout',
     extraData: Record<string, any> = {}
 ) => {
     const docRef = doc(db, 'desktopCommands', uid);
     await setDoc(docRef, { [command]: true, timestamp: serverTimestamp(), ...extraData }, { merge: true });
+};
+
+export const restartDesktopRecording = async (uid: string) => {
+    if (!uid) return;
+    const restartRecordingRequestId = createRestartRecordingRequestId();
+    const docRef = doc(db, 'desktopCommands', uid);
+    await setDoc(docRef, { restartRecording: true, restartRecordingRequestId, timestamp: serverTimestamp() }, { merge: true });
+    return restartRecordingRequestId;
 };
 
 export const requestDesktopReconnect = async (uid: string) => {

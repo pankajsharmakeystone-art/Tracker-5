@@ -107,6 +107,8 @@ const AdminSettings: React.FC = () => {
         manualBreakTimeoutMinutes: 30,
         organizationTimezone: 'Asia/Kolkata',
         showLiveTeamStatusToAgents: true,
+        idleAvoidEnabled: true,
+        idleAvoidDurationSeconds: 120,
     };
 
     const [settings, setSettings] = useState<AdminSettingsType>(defaultSettings);
@@ -697,6 +699,30 @@ const AdminSettings: React.FC = () => {
                             min={5}
                             max={60}
                             value={settings.appTrackingIntervalSeconds ?? 10}
+                            onChange={handleInputChange}
+                            className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
+                        />
+                    </FormField>
+                )}
+
+                {settings.enableAppTracking && (
+                    <FormField label="Idle Avoid Detection" description="Detect likely keep-alive/jiggler behavior in app tracking.">
+                        <ToggleSwitch
+                            id="idleAvoidEnabled"
+                            checked={settings.idleAvoidEnabled ?? true}
+                            onChange={(e) => setSettings((prev: AdminSettingsType) => ({ ...prev, idleAvoidEnabled: e.target.checked }))}
+                        />
+                    </FormField>
+                )}
+
+                {settings.enableAppTracking && (settings.idleAvoidEnabled ?? true) && (
+                    <FormField label="Idle Avoid Duration (seconds)" description="How long uninterrupted zero-idle activity on the same window must continue before alerting.">
+                        <input
+                            type="number"
+                            name="idleAvoidDurationSeconds"
+                            min={30}
+                            max={600}
+                            value={settings.idleAvoidDurationSeconds ?? 120}
                             onChange={handleInputChange}
                             className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full max-w-xs p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white"
                         />

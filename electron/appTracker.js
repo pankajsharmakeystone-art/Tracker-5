@@ -105,9 +105,7 @@ let currentSpan = null;
 let paused = false;
 let flushInFlight = null;
 let backupRecovered = false;
-let previousIdleSeconds = null;
 let lastWindowFingerprint = '';
-let keepAliveResetEvents = [];
 let idleAvoidState = {
     active: false,
     startedAt: 0,
@@ -115,6 +113,14 @@ let idleAvoidState = {
     alertSent: false,
     reason: null,
 };
+let lowIdleSameWindowStartedAt = 0;
+let lowIdleSameWindowFingerprint = '';
+// Strict idle-avoid detection defaults to reduce false positives during real typing:
+// require uninterrupted zero-idle streak on the same exact window.
+const DEFAULT_IDLE_AVOID_HELD_ACTIVITY_MS = 120000;
+const IDLE_AVOID_MAX_SECS_DURING_STREAK = 0;
+const MIN_IDLE_AVOID_DURATION_SECONDS = 30;
+const MAX_IDLE_AVOID_DURATION_SECONDS = 600;
 
 // These are injected from main.js via init()
 let ctx = {
@@ -177,13 +183,7 @@ function nowMs() {
     return Date.now();
 }
 
-function pruneOldResetEvents(now) {
-    const windowMs = 15 * 60 * 1000;
-    keepAliveResetEvents = keepAliveResetEvents.filter((ts) => (now - ts) <= windowMs);
-}
-
 function resetIdleAvoidState() {
-    keepAliveResetEvents = [];
     idleAvoidState = {
         active: false,
         startedAt: 0,
@@ -191,46 +191,76 @@ function resetIdleAvoidState() {
         alertSent: false,
         reason: null,
     };
+    lowIdleSameWindowStartedAt = 0;
+    lowIdleSameWindowFingerprint = '';
 }
 
-function evaluateIdleAvoidDetection({ appName, pageTitle, idleSecs, idleLimit, now }) {
+function getIdleAvoidConfig(settings = {}) {
+    const enabled = settings?.idleAvoidEnabled !== false;
+    const rawDurationSeconds = Number(settings?.idleAvoidDurationSeconds);
+    let durationSeconds = Math.round(DEFAULT_IDLE_AVOID_HELD_ACTIVITY_MS / 1000);
+    if (Number.isFinite(rawDurationSeconds)) {
+        durationSeconds = Math.max(
+            MIN_IDLE_AVOID_DURATION_SECONDS,
+            Math.min(MAX_IDLE_AVOID_DURATION_SECONDS, Math.round(rawDurationSeconds))
+        );
+    }
+    return {
+        enabled,
+        durationSeconds,
+        durationMs: durationSeconds * 1000,
+    };
+}
+
+function evaluateIdleAvoidDetection({ appName, pageTitle, idleSecs, idleLimit, now, idleAvoidConfig }) {
     const fingerprint = `${String(appName || '').toLowerCase()}||${String(pageTitle || '').toLowerCase()}`;
     const sameWindow = fingerprint === lastWindowFingerprint;
 
+    if (!idleAvoidConfig?.enabled) {
+        if (idleAvoidState.active || lowIdleSameWindowStartedAt) {
+            resetIdleAvoidState();
+        }
+        lastWindowFingerprint = fingerprint;
+        return false;
+    }
+
     if (!sameWindow) {
-        keepAliveResetEvents = [];
+        lowIdleSameWindowStartedAt = 0;
+        lowIdleSameWindowFingerprint = '';
         if (idleAvoidState.active) {
             idleAvoidState.active = false;
             idleAvoidState.reason = null;
         }
     }
 
-    if (Number.isFinite(previousIdleSeconds) && Number.isFinite(idleSecs) && sameWindow && idleLimit >= 30) {
-        const nearThreshold = previousIdleSeconds >= Math.max(10, idleLimit - 8);
-        const suddenReset = idleSecs <= 2;
-        if (nearThreshold && suddenReset) {
-            keepAliveResetEvents.push(now);
-            idleAvoidState.lastTriggerAt = now;
+    // Secondary heuristic: suspicious constant zero-idle while staying on the exact same window/title.
+    // This is intentionally strict to avoid firing during normal multi-key keyboard activity.
+    if (sameWindow && idleLimit >= 30) {
+        if (idleSecs <= IDLE_AVOID_MAX_SECS_DURING_STREAK) {
+            if (lowIdleSameWindowFingerprint !== fingerprint || !lowIdleSameWindowStartedAt) {
+                lowIdleSameWindowFingerprint = fingerprint;
+                lowIdleSameWindowStartedAt = now;
+            }
+        } else {
+            lowIdleSameWindowStartedAt = 0;
+            lowIdleSameWindowFingerprint = '';
         }
+    } else {
+        lowIdleSameWindowStartedAt = 0;
+        lowIdleSameWindowFingerprint = '';
     }
 
-    pruneOldResetEvents(now);
-
-    if (!idleAvoidState.active && keepAliveResetEvents.length >= 3) {
-        const intervals = [];
-        for (let i = 1; i < keepAliveResetEvents.length; i += 1) {
-            intervals.push(keepAliveResetEvents[i] - keepAliveResetEvents[i - 1]);
-        }
-        const minInterval = Math.min(...intervals);
-        const maxInterval = Math.max(...intervals);
-        const stablePattern = intervals.length >= 2 && (maxInterval - minInterval) <= 20000;
-        if (stablePattern) {
+    // If window never changed and idle stays near-zero for 2+ minutes, treat as idle-avoid.
+    if (!idleAvoidState.active && lowIdleSameWindowStartedAt) {
+        const lowIdleDurationMs = now - lowIdleSameWindowStartedAt;
+        // Rule 1: sustained zero-idle streak (likely keep-alive) for configured duration.
+        if (lowIdleDurationMs >= idleAvoidConfig.durationMs) {
             idleAvoidState.active = true;
-            idleAvoidState.startedAt = now;
+            idleAvoidState.startedAt = lowIdleSameWindowStartedAt;
             idleAvoidState.lastTriggerAt = now;
             idleAvoidState.alertSent = false;
-            idleAvoidState.reason = 'repeating-idle-reset-pattern';
-            ctx.log('[app-tracker] idle-avoid pattern detected');
+            idleAvoidState.reason = `sustained-zero-idle-${idleAvoidConfig.durationSeconds}s`;
+            ctx.log('[app-tracker] idle-avoid sustained input detected');
         }
     }
 
@@ -239,11 +269,9 @@ function evaluateIdleAvoidDetection({ appName, pageTitle, idleSecs, idleLimit, n
         if (!sameWindow || staleForMs > Math.max(90000, idleLimit * 2000)) {
             idleAvoidState.active = false;
             idleAvoidState.reason = null;
-            keepAliveResetEvents = [];
         }
     }
 
-    previousIdleSeconds = Number.isFinite(idleSecs) ? idleSecs : null;
     lastWindowFingerprint = fingerprint;
     return idleAvoidState.active;
 }
@@ -286,7 +314,8 @@ async function tick() {
         const settings = ctx.getAdminSettings() || {};
         const idleLimit = Math.max(0, Number(settings?.idleTimeout) || 0);
         const idleSecs = Number(ctx.getIdleSeconds?.() ?? 0);
-        const idleAvoidActive = evaluateIdleAvoidDetection({ appName, pageTitle, idleSecs, idleLimit, now });
+        const idleAvoidConfig = getIdleAvoidConfig(settings);
+        const idleAvoidActive = evaluateIdleAvoidDetection({ appName, pageTitle, idleSecs, idleLimit, now, idleAvoidConfig });
 
         const effectiveApp = idleAvoidActive ? 'Idle Avoid Activity' : appName;
         const effectiveTitle = idleAvoidActive
@@ -346,7 +375,7 @@ async function tick() {
         try {
             if (idleAvoidActive && !idleAvoidState.alertSent) {
                 const activeMs = now - (idleAvoidState.startedAt || now);
-                if (activeMs >= 30000) {
+                if (activeMs >= idleAvoidConfig.durationMs) {
                     idleAvoidState.alertSent = true;
                     const wrote = await writeAppAlert({
                         app: 'Idle Avoid Activity',
@@ -646,7 +675,6 @@ function reset() {
     currentSpan = null;
     paused = false;
     backupRecovered = false;
-    previousIdleSeconds = null;
     lastWindowFingerprint = '';
     resetIdleAvoidState();
 }

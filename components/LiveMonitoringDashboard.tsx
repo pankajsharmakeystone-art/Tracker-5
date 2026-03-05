@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Timestamp } from 'firebase/firestore';
 import { hasRole } from '../utils/roles';
 import { DateTime } from 'luxon';
-import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, streamAllAgentStatuses, streamGlobalAdminSettings, streamUsersByTeam, streamScheduleForMonth, streamAllUsers, getScheduleForMonth } from '../services/db';
+import { streamTodayWorkLogs, streamWorkLogsForDate, isSessionStale, closeStaleSession, updateWorkLog, readOrganizationTimezone, forceLogoutAgent, requestDesktopReconnect, restartDesktopRecording, streamAllAgentStatuses, streamGlobalAdminSettings, streamUsersByTeam, streamScheduleForMonth, streamAllUsers, getScheduleForMonth } from '../services/db';
 import { streamAllPresence, isPresenceFresh, streamAllAppTracking } from '../services/presence';
 import type { AppTrackingMap } from '../services/presence';
 import { useAuth } from '../hooks/useAuth';
@@ -305,6 +305,7 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [isLiveModalOpen, setIsLiveModalOpen] = useState(false);
     const [organizationTimezone, setOrganizationTimezone] = useState<string>('UTC');
     const [forceLogoutPending, setForceLogoutPending] = useState<string | null>(null);
+    const [restartRecordingPending, setRestartRecordingPending] = useState<string | null>(null);
     const [reconnectPending, setReconnectPending] = useState<string | null>(null);
     const [adminSettings, setAdminSettings] = useState<AdminSettingsType | null>(null);
     const [mergePending, setMergePending] = useState<string | null>(null);
@@ -316,6 +317,8 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
     const [isShiftBreakdownOpen, setIsShiftBreakdownOpen] = useState(false);
     const reconnectRequestRef = React.useRef<{ uid: string; requestId: string } | null>(null);
     const reconnectTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const restartRequestRef = React.useRef<{ uid: string; requestId: string } | null>(null);
+    const restartTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const [appTracking, setAppTracking] = useState<AppTrackingMap>({});
 
     const [selectedDate, setSelectedDate] = useState(() => {
@@ -803,6 +806,19 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         return false;
     };
 
+    const getRestartRecorderBlockReason = (log: WorkLog): string | null => {
+        if (!canForceLogoutAgent(log)) return 'Not allowed';
+        if (!log?.userId) return 'Agent not found';
+        const desktopMeta = (log as any)?.__desktop;
+        if (!desktopMeta?.isConnected) return 'Desktop not connected';
+        if (log.status === 'clocked_out') return 'Agent is clocked out';
+
+        const desktopStatus = agentStatuses?.[log.userId];
+        if (desktopStatus?.manualBreak === true) return 'Blocked during manual break';
+        if (desktopStatus?.isAway === true) return 'Blocked during away break';
+        return null;
+    };
+
     const handleLiveStream = (log: WorkLog) => {
         if (!log?.userId || !canRequestStreamForAgent(log)) return;
         setLiveStreamAgent({ uid: log.userId, displayName: log.userDisplayName, teamId: log.teamId });
@@ -856,6 +872,40 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         }
     };
 
+    const handleRestartRecorder = async (log: WorkLog) => {
+        if (!canForceLogoutAgent(log)) return;
+        if (!log?.userId) return;
+        const blockReason = getRestartRecorderBlockReason(log);
+        if (blockReason) {
+            alert(`Restart recorder blocked: ${blockReason}.`);
+            return;
+        }
+        setRestartRecordingPending(log.userId);
+        try {
+            const requestId = await restartDesktopRecording(log.userId);
+            if (!requestId) return;
+            restartRequestRef.current = { uid: log.userId, requestId };
+
+            if (restartTimeoutRef.current) {
+                clearTimeout(restartTimeoutRef.current);
+                restartTimeoutRef.current = null;
+            }
+            restartTimeoutRef.current = setTimeout(() => {
+                const pending = restartRequestRef.current;
+                if (!pending || pending.uid !== log.userId || pending.requestId !== requestId) return;
+                setRestartRecordingPending(null);
+                restartRequestRef.current = null;
+                restartTimeoutRef.current = null;
+                alert('Recorder restart request timed out. Desktop may be offline or unresponsive.');
+            }, 20000);
+        } catch (error) {
+            console.error('[LiveMonitoringDashboard] Failed to restart recorder', error);
+            alert('Failed to restart recorder. Please try again.');
+        } finally {
+            // Cleared when ack arrives or timeout triggers.
+        }
+    };
+
     useEffect(() => {
         const pending = reconnectRequestRef.current;
         if (!pending) return;
@@ -872,6 +922,27 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
         }
     }, [agentStatuses, reconnectPending]);
 
+    useEffect(() => {
+        const pending = restartRequestRef.current;
+        if (!pending) return;
+        if (restartRecordingPending !== pending.uid) return;
+        const status = agentStatuses?.[pending.uid];
+        if (status?.restartRecordingAckId && status.restartRecordingAckId === pending.requestId) {
+            if (restartTimeoutRef.current) {
+                clearTimeout(restartTimeoutRef.current);
+                restartTimeoutRef.current = null;
+            }
+            const err = String(status?.restartRecordingError || '').trim();
+            restartRequestRef.current = null;
+            setRestartRecordingPending(null);
+            if (err) {
+                alert(`Restart recorder failed: ${err}`);
+            } else {
+                alert('Recorder restart successful.');
+            }
+        }
+    }, [agentStatuses, restartRecordingPending]);
+
     const closeLiveStreamModal = () => {
         setIsLiveModalOpen(false);
         setLiveStreamAgent(null);
@@ -882,6 +953,10 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200 animate-pulse">Stale / Zombie</span>;
         }
         const desktopStatus = agentStatuses?.[agent.userId];
+        const desktopState = String(desktopStatus?.status || '').toLowerCase();
+        if (desktopState === 'offline' || desktopState === 'clocked_out') {
+            return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">Offline</span>;
+        }
         // Priority: Idle break takes precedence over Away (since idle counts as break hours)
         if (desktopStatus?.isIdle) {
             return <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200">Idle Break</span>;
@@ -1182,6 +1257,16 @@ const LiveMonitoringDashboard: React.FC<Props> = ({ teamId }) => {
                                             title="Ask the desktop app to re-connect if it's stuck"
                                         >
                                             Reconnect
+                                        </button>
+                                    )}
+                                    {canForceLogoutAgent(agent) && (
+                                        <button
+                                            onClick={() => handleRestartRecorder(agent)}
+                                            disabled={restartRecordingPending === agent.userId || !!getRestartRecorderBlockReason(agent)}
+                                            className="font-medium text-indigo-600 dark:text-indigo-400 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                                            title={getRestartRecorderBlockReason(agent) || "Stop and restart recorder for this agent"}
+                                        >
+                                            Restart Rec
                                         </button>
                                     )}
                                     {canForceLogoutAgent(agent) && agent.status !== 'clocked_out' && (

@@ -141,11 +141,16 @@ service cloud.firestore {
     }
 
     match /agentStatus/{uid} {
-      allow read, write: if isAdmin() || (isSignedIn() && request.auth.uid == uid) || isManagerOfUser(uid);
+      // Desktop listeners can transiently re-subscribe during auth/session transitions.
+      // Keep writes restricted, but allow authenticated reads to avoid noisy permission drops.
+      allow read: if isAdmin() || isSignedIn() || isManagerOfUser(uid);
+      allow write: if isAdmin() || (isSignedIn() && request.auth.uid == uid) || isManagerOfUser(uid);
     }
 
     match /desktopCommands/{uid} {
-      allow read, write: if isAdmin() || (isSignedIn() && request.auth.uid == uid) || isManagerOfUser(uid);
+      // Authenticated reads are allowed to prevent listener failures during uid/session churn.
+      allow read: if isAdmin() || isSignedIn() || isManagerOfUser(uid);
+      allow write: if isAdmin() || (isSignedIn() && request.auth.uid == uid) || isManagerOfUser(uid);
     }
 
     match /recordingLogs/{logId} {
@@ -178,7 +183,8 @@ service cloud.firestore {
     }
 
     match /autoClockConfigs/{uid} {
-      allow read, write: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
+      allow read: if isAdmin() || isSignedIn();
+      allow write: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
     }
 
     match /liveSessions/{agentUid} {

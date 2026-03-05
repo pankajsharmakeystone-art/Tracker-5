@@ -7,6 +7,21 @@ const sessions = new Map();
 let nextSaveMeta = null;
 let fatalRecorderFailureInFlight = false;
 
+function parseCommandPayload(payload = {}) {
+  const raw = payload && typeof payload === 'object' ? payload : {};
+  const commandId = raw.__commandId ? String(raw.__commandId) : null;
+  const data = { ...raw };
+  delete data.__commandId;
+  return { commandId, data };
+}
+
+function ackCommand(commandId, phase, extra = {}) {
+  if (!commandId) return;
+  try {
+    ipcRenderer.send('recorder-command-ack', { commandId, phase, ...extra });
+  } catch (_) { }
+}
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const sanitizeName = (name) => (name || 'screen').replace(/[^a-z0-9_\-]/gi, '_');
@@ -463,22 +478,69 @@ async function stopAllRecorders() {
   });
 }
 
-async function stopAndFlushAllRecorders() {
+async function forceFinalizeRemainingSessions(saveMeta = {}) {
+  const remaining = Array.from(sessions.entries());
+  for (const [id, sessionRecord] of remaining) {
+    try {
+      if (sessionRecord?.tempFileReady) {
+        await ipcRenderer.invoke('recorder-finalize', id, {
+          ...(saveMeta || {}),
+          stopReason: saveMeta?.stopReason || 'forced_flush_timeout'
+        });
+      } else if (sessionRecord?.pendingChunks && sessionRecord.pendingChunks.length > 0) {
+        const blob = new Blob(sessionRecord.pendingChunks, { type: 'video/webm' });
+        const arrayBuffer = await blob.arrayBuffer();
+        const safeName = sanitizeName(sessionRecord.sourceName || 'screen');
+        const fileName = `recording-${safeName}-${Date.now()}.webm`;
+        await ipcRenderer.invoke('recorder-save', fileName, arrayBuffer, {
+          ...(saveMeta || {}),
+          stopReason: saveMeta?.stopReason || 'forced_flush_timeout'
+        });
+      }
+    } catch (err) {
+      console.warn('[recorder] forced finalize failed', id, err);
+    } finally {
+      try {
+        if (sessionRecord?.monitorTimer) clearInterval(sessionRecord.monitorTimer);
+        if (sessionRecord?.video) sessionRecord.video.srcObject = null;
+        sessionRecord?.stream?.getTracks()?.forEach((t) => t.stop());
+      } catch (_) { }
+      sessions.delete(id);
+      try { sessionRecord?.finalizeResolve?.(); } catch (_) { }
+    }
+  }
+}
+
+async function stopAndFlushAllRecorders(options = {}) {
   if (sessions.size === 0) return;
+  const saveMeta = (options?.saveMeta && typeof options.saveMeta === 'object') ? options.saveMeta : {};
+  const timeoutMs = Number.isFinite(options?.timeoutMs) ? Number(options.timeoutMs) : 60000;
   const finalizePromises = Array.from(sessions.values()).map((s) => s.finalizePromise);
   await stopAllRecorders();
   try {
-    await Promise.allSettled(finalizePromises);
+    const flushRace = await Promise.race([
+      Promise.allSettled(finalizePromises).then(() => 'done'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), Math.max(10000, timeoutMs)))
+    ]);
+    if (flushRace === 'timeout' && sessions.size > 0) {
+      console.warn('[recorder] flush wait timed out; forcing finalize for remaining sessions', sessions.size);
+      await forceFinalizeRemainingSessions(saveMeta);
+    }
   } catch (err) {
     console.warn('[recorder] flush wait failed', err);
+    if (sessions.size > 0) {
+      await forceFinalizeRemainingSessions(saveMeta);
+    }
   }
 }
 
 ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
+  const cmd = parseCommandPayload(payload);
+  ackCommand(cmd.commandId, 'received');
   try {
     fatalRecorderFailureInFlight = false;
-    const quality = String(payload.recordingQuality || '720p');
-    const fps = Number(payload.recordingFps || 30);
+    const quality = String(cmd.data.recordingQuality || '720p');
+    const fps = Number(cmd.data.recordingFps || 30);
     const mapping = {
       '480p': { width: 640, height: 480 },
       '720p': { width: 1280, height: 720 },
@@ -567,6 +629,10 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
     if (startFailures.length > 0) {
       console.warn('[recorder] some display sources failed to start', startFailures);
     }
+    ackCommand(cmd.commandId, 'completed', {
+      sourceCount: startedCount,
+      failedSourceCount: startFailures.length
+    });
   } catch (error) {
     console.error('[recorder] failed to start', error);
     await stopAllRecorders();
@@ -574,25 +640,37 @@ ipcRenderer.on('recorder-start', async (_event, payload = {}) => {
       ipcRenderer.send('recorder-state-event', { state: 'idle', reason: 'start_failed' });
     } catch (_) { }
     ipcRenderer.invoke('recorder-failed', { error: error?.message || String(error) }).catch(() => { });
+    ackCommand(cmd.commandId, 'failed', { error: error?.message || String(error) });
   }
 });
 
-ipcRenderer.on('recorder-stop', async () => {
+ipcRenderer.on('recorder-stop', async (_event, payload = {}) => {
+  const cmd = parseCommandPayload(payload);
+  ackCommand(cmd.commandId, 'received');
   try {
     fatalRecorderFailureInFlight = false;
     await stopAllRecorders();
+    ackCommand(cmd.commandId, 'completed', { activeSessions: sessions.size });
   } catch (err) {
     console.warn('[recorder] stopAll failed', err);
+    ackCommand(cmd.commandId, 'failed', { error: err?.message || String(err) });
   }
 });
 
 ipcRenderer.on('recorder-stop-and-flush', async (_event, payload = {}) => {
+  const cmd = parseCommandPayload(payload);
+  ackCommand(cmd.commandId, 'received');
   try {
     fatalRecorderFailureInFlight = false;
-    nextSaveMeta = payload || null;
-    await stopAndFlushAllRecorders();
+    nextSaveMeta = cmd.data || null;
+    await stopAndFlushAllRecorders({
+      timeoutMs: Number.isFinite(cmd.data?.timeoutMs) ? Number(cmd.data.timeoutMs) : 60000,
+      saveMeta: cmd.data || {}
+    });
+    ackCommand(cmd.commandId, 'completed', { activeSessions: sessions.size });
   } catch (err) {
     console.warn('[recorder] stop-and-flush failed', err);
+    ackCommand(cmd.commandId, 'failed', { error: err?.message || String(err) });
   } finally {
     nextSaveMeta = null;
     if (sessions.size === 0) {
@@ -601,7 +679,7 @@ ipcRenderer.on('recorder-stop-and-flush', async (_event, payload = {}) => {
       } catch (_) { }
     }
     try {
-      ipcRenderer.send('recorder-flushed');
+      ipcRenderer.send('recorder-flushed', { commandId: cmd.commandId || null });
     } catch (e) {
       console.warn('[recorder] failed to notify flushed', e);
     }

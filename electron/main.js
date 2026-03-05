@@ -9,6 +9,7 @@ const { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, Tray, Menu, 
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const { spawn } = require("child_process");
 const fetch = require("node-fetch");
 const electronLog = require("electron-log");
 const { DateTime } = require("luxon");
@@ -441,6 +442,7 @@ function purgeOldRecordings(maxAgeHours = 24) {
 }
 
 const UPLOAD_MANIFEST_PATH = path.join(app.getPath("userData"), "uploaded-recordings.json");
+const DEFERRED_UPLOAD_QUEUE_PATH = path.join(app.getPath("userData"), "deferred-upload-queue.json");
 
 // Upload manifest v2: tracks per-target success to prevent duplicate uploads and allow retry on next login.
 // Backward compatible with the older array-of-filenames format.
@@ -567,10 +569,17 @@ function hasPendingHttpUploadsForMerge(agentName, date) {
       let owner = String(entry.ownerName || entry.ownerUid || '').trim().toLowerCase();
       if (targetName && owner && owner !== targetName) continue;
 
+      const filePath = path.join(RECORDINGS_DIR, fileName);
+      const existsOnDisk = fs.existsSync(filePath);
+      const inActiveUpload = activeUploads.has(fileName);
+      const inDeferredQueue = deferredUploadQueue?.has?.(fileName) === true;
+      // Don't let stale manifest leftovers block merge forever.
+      if (!existsOnDisk && !inActiveUpload && !inDeferredQueue) continue;
+
       let mtimeMs = Number(entry.mtimeMs) || 0;
-      if (!mtimeMs) {
+      if (!mtimeMs && existsOnDisk) {
         try {
-          const stat = fs.statSync(path.join(RECORDINGS_DIR, fileName));
+          const stat = fs.statSync(filePath);
           mtimeMs = Number(stat?.mtimeMs) || 0;
         } catch (_) { }
       }
@@ -579,11 +588,148 @@ function hasPendingHttpUploadsForMerge(agentName, date) {
       if (getIsoDateFromMs(mtimeMs) !== date) continue;
       return true;
     }
+
+    // Also block merge for queue-only items that may not yet have manifest rows.
+    for (const [fileName, queueEntry] of (deferredUploadQueue || new Map()).entries()) {
+      const filePath = path.join(RECORDINGS_DIR, fileName);
+      if (!fs.existsSync(filePath)) continue;
+
+      const manifestEntry = (uploadManifest?.files && uploadManifest.files[fileName]) || {};
+      const owner = String(manifestEntry.ownerName || manifestEntry.ownerUid || '').trim().toLowerCase();
+      if (targetName && owner && owner !== targetName) continue;
+
+      let mtimeMs = Number(manifestEntry.mtimeMs) || 0;
+      if (!mtimeMs) {
+        try {
+          const stat = fs.statSync(filePath);
+          mtimeMs = Number(stat?.mtimeMs) || 0;
+        } catch (_) { }
+      }
+      if (!mtimeMs) continue;
+      if (getIsoDateFromMs(mtimeMs) !== date) continue;
+      if (queueEntry) return true;
+    }
   } catch (_) { }
   return false;
 }
 
 loadUploadedManifest();
+
+// ---------- DEFERRED UPLOAD QUEUE (durable local queue) ----------
+let deferredUploadQueue = new Map(); // fileName -> { fileName, queuedAt, reason, attempts, lastAttemptAt, lastError }
+let deferredUploadWorkerTimer = null;
+let deferredUploadInFlight = false;
+
+function persistDeferredUploadQueue() {
+  try {
+    const rows = Array.from(deferredUploadQueue.values());
+    fs.writeFileSync(DEFERRED_UPLOAD_QUEUE_PATH, JSON.stringify(rows, null, 2), 'utf8');
+  } catch (e) {
+    log('[uploads] failed to persist deferred queue', e?.message || e);
+  }
+}
+
+function loadDeferredUploadQueue() {
+  try {
+    if (!fs.existsSync(DEFERRED_UPLOAD_QUEUE_PATH)) return;
+    const raw = fs.readFileSync(DEFERRED_UPLOAD_QUEUE_PATH, 'utf8');
+    const rows = JSON.parse(raw);
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+      const fileName = String(row?.fileName || '').trim();
+      if (!fileName) continue;
+      deferredUploadQueue.set(fileName, {
+        fileName,
+        queuedAt: row?.queuedAt || new Date().toISOString(),
+        reason: row?.reason || 'unknown',
+        attempts: Number(row?.attempts || 0),
+        lastAttemptAt: row?.lastAttemptAt || null,
+        lastError: row?.lastError || null
+      });
+    }
+    if (deferredUploadQueue.size > 0) {
+      log(`[uploads] restored deferred upload queue (${deferredUploadQueue.size} items)`);
+    }
+  } catch (e) {
+    log('[uploads] failed to load deferred queue', e?.message || e);
+  }
+}
+
+function enqueueDeferredUpload(fileName, reason = 'upload-failed') {
+  try {
+    const safeName = String(fileName || '').trim();
+    if (!safeName) return;
+    const existing = deferredUploadQueue.get(safeName);
+    deferredUploadQueue.set(safeName, {
+      fileName: safeName,
+      queuedAt: existing?.queuedAt || new Date().toISOString(),
+      reason: existing?.reason || reason,
+      attempts: Number(existing?.attempts || 0),
+      lastAttemptAt: existing?.lastAttemptAt || null,
+      lastError: existing?.lastError || null
+    });
+    persistDeferredUploadQueue();
+  } catch (_) { }
+}
+
+function dequeueDeferredUpload(fileName) {
+  if (!fileName) return;
+  if (deferredUploadQueue.delete(fileName)) {
+    persistDeferredUploadQueue();
+  }
+}
+
+async function processDeferredUploadQueue() {
+  if (deferredUploadInFlight) return;
+  if (deferredUploadQueue.size === 0) return;
+  deferredUploadInFlight = true;
+  try {
+    for (const [fileName, entry] of Array.from(deferredUploadQueue.entries())) {
+      const filePath = path.join(RECORDINGS_DIR, fileName);
+      if (!fs.existsSync(filePath)) {
+        dequeueDeferredUpload(fileName);
+        continue;
+      }
+
+      const nextEntry = {
+        ...entry,
+        attempts: Number(entry?.attempts || 0) + 1,
+        lastAttemptAt: new Date().toISOString()
+      };
+      deferredUploadQueue.set(fileName, nextEntry);
+      persistDeferredUploadQueue();
+
+      const res = await retrySpecificRecordingUpload(fileName);
+      if (res?.success) {
+        dequeueDeferredUpload(fileName);
+        continue;
+      }
+
+      deferredUploadQueue.set(fileName, {
+        ...nextEntry,
+        lastError: res?.error || 'retry-failed'
+      });
+      persistDeferredUploadQueue();
+    }
+  } catch (e) {
+    log('[uploads] deferred queue worker failed', e?.message || e);
+  } finally {
+    deferredUploadInFlight = false;
+  }
+}
+
+function startDeferredUploadWorker() {
+  if (deferredUploadWorkerTimer) return;
+  deferredUploadWorkerTimer = setInterval(() => {
+    processDeferredUploadQueue().catch(() => { });
+  }, 45000);
+  setTimeout(() => {
+    processDeferredUploadQueue().catch(() => { });
+  }, 5000);
+}
+
+// Load persisted queue only after queue state/functions are initialized.
+loadDeferredUploadQueue();
 
 // ---------- RECORDING LOGS (Firestore) ----------
 // Recording logs are disabled by product decision to reduce Firestore costs.
@@ -837,7 +983,9 @@ function shouldCountAsCaptureInstability(errorText = '') {
     text.includes('runtime-frame-callback-timeout') ||
     text.includes('runtime-draw-failed') ||
     text.includes('input-track-ended') ||
-    text.includes('mediarecorder-error')
+    text.includes('mediarecorder-error') ||
+    text.includes('wgc_capturer_win') ||
+    text.includes('failed to start capture')
   );
 }
 
@@ -1035,6 +1183,8 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
         log(`[uploads] skipping retry for ${fileName} - currently active`);
         continue;
       }
+      activeUploads.add(fileName);
+      try {
 
       const filePath = path.join(RECORDINGS_DIR, fileName);
       let stat;
@@ -1133,6 +1283,9 @@ async function retryPendingRecordingUploadsOnLogin(options = {}) {
       if (allSucceededAfter) {
         markRecordingCompleted(fileName);
         try { await fs.promises.unlink(filePath); } catch (_) { }
+      }
+      } finally {
+        activeUploads.delete(fileName);
       }
     }
   } catch (err) {
@@ -1286,10 +1439,567 @@ const RECORDER_STATES = Object.freeze({
 });
 let recorderState = RECORDER_STATES.IDLE;
 let recorderTransitionQueue = Promise.resolve();
+let recorderCommandSeq = 0;
+const recorderCommandWaiters = new Map(); // commandId -> { resolve, reject, timer }
+let recorderServiceProcess = null;
+let recorderServiceReady = false;
+let recorderServiceReadyAtMs = 0;
+let recorderServiceCommandSeq = 0;
+const recorderServiceWaiters = new Map(); // commandId -> { resolve, reject, timer }
+const recorderServiceCommandMeta = new Map(); // commandId -> { action, sentAt, timeoutMs, generation }
+const recorderServiceActionInFlight = new Map(); // action -> Promise
+let recorderServiceRuntimeFallbackActive = false;
+let recorderServicePlannedExitUntilMs = 0;
+let recorderServiceGeneration = 0;
 let recorderFailureStreak = 0;
 let recorderInstabilityStreak = 0;
 const RECORDER_RECREATE_AFTER_FAILURES = 3;
 const RECORDER_PROFILE_FALLBACK_TRIGGER = 2;
+const RECORDER_INPUT_TRACK_ENDED_RETRY_DELAY_MS = 15000;
+const RECORDER_WGC_FAILURE_WINDOW_MS = 5 * 60 * 1000;
+const RECORDER_WGC_FAILURE_THRESHOLD = 3;
+const RECORDER_WGC_FALLBACK_COOLDOWN_MS = 10 * 60 * 1000;
+let recorderWgcFailureTimestamps = [];
+let lastWgcFallbackAtMs = 0;
+let recorderSupervisorInterval = null;
+let recorderLastHealthyAtMs = Date.now();
+const RECORDER_SUPERVISOR_INTERVAL_MS = 15000;
+const RECORDER_SUPERVISOR_STALL_MS = 30000;
+
+function nextRecorderCommandId(kind = 'cmd') {
+  recorderCommandSeq += 1;
+  return `rcr_${kind}_${Date.now()}_${recorderCommandSeq}`;
+}
+
+function waitForRecorderCommand(commandId, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      recorderCommandWaiters.delete(commandId);
+      reject(new Error(`recorder-command-timeout:${commandId}`));
+    }, timeoutMs);
+    recorderCommandWaiters.set(commandId, { resolve, reject, timer });
+  });
+}
+
+function clearRecorderCommandWaiters(reason = 'recorder-window-reset') {
+  for (const [commandId, waiter] of recorderCommandWaiters.entries()) {
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error(`${reason}:${commandId}`));
+    recorderCommandWaiters.delete(commandId);
+  }
+}
+
+function isRecorderServiceEnabled() {
+  try {
+    const envToggle = String(process.env.RECORDER_SERVICE_ENABLED || '').toLowerCase();
+    if (envToggle === 'false') return false;
+    if (cachedAdminSettings?.recorderServiceEnabled === false) return false;
+    if (recorderServiceRuntimeFallbackActive) return false;
+    // Default mode is service-first.
+    return true;
+  } catch (_) { }
+  return !recorderServiceRuntimeFallbackActive;
+}
+
+function nextRecorderServiceCommandId(kind = 'cmd') {
+  recorderServiceCommandSeq += 1;
+  return `svc_${kind}_${Date.now()}_${recorderServiceCommandSeq}`;
+}
+
+function clearRecorderServiceWaiters(reason = 'recorder-service-reset') {
+  for (const [commandId, waiter] of recorderServiceWaiters.entries()) {
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error(`${reason}:${commandId}`));
+    recorderServiceWaiters.delete(commandId);
+    recorderServiceCommandMeta.delete(commandId);
+  }
+}
+
+function sendRecorderServiceMessage(msg) {
+  if (!recorderServiceProcess || recorderServiceProcess.killed) {
+    throw new Error('recorder-service-not-running');
+  }
+  const isStartCmd = msg?.type === 'cmd' && msg?.action === 'start';
+  if (typeof recorderServiceProcess.send === 'function') {
+    recorderServiceProcess.send(msg, (err) => {
+      if (isStartCmd && err) {
+        log('[recorder-service][debug] start ipc send callback error', {
+          id: msg?.id || null,
+          error: err?.message || String(err)
+        });
+      }
+    });
+    if (isStartCmd) {
+      log('[recorder-service][debug] start ipc send', {
+        id: msg?.id || null,
+        pid: recorderServiceProcess?.pid || null
+      });
+    }
+    return;
+  }
+  if (!recorderServiceProcess.stdin) {
+    throw new Error('recorder-service-stdin-unavailable');
+  }
+  const line = `${JSON.stringify(msg)}\n`;
+  const writable = Boolean(recorderServiceProcess.stdin.writable && !recorderServiceProcess.stdin.destroyed);
+  const ok = recorderServiceProcess.stdin.write(line, (err) => {
+    if (isStartCmd && err) {
+      log('[recorder-service][debug] start stdin write callback error', {
+        id: msg?.id || null,
+        error: err?.message || String(err)
+      });
+    }
+  });
+  if (isStartCmd) {
+    log('[recorder-service][debug] start stdin write', {
+      id: msg?.id || null,
+      ok,
+      writable,
+      pid: recorderServiceProcess?.pid || null
+    });
+    if (!ok) {
+      recorderServiceProcess.stdin.once('drain', () => {
+        log('[recorder-service][debug] start stdin drain', {
+          id: msg?.id || null,
+          pid: recorderServiceProcess?.pid || null
+        });
+      });
+    }
+  }
+}
+
+function sendRecorderServiceCommand(action, payload = {}, timeoutMs = 30000) {
+  if (!recorderServiceProcess || !recorderServiceReady) {
+    return Promise.reject(new Error('recorder-service-not-ready'));
+  }
+  const id = nextRecorderServiceCommandId(action);
+  const sentAt = Date.now();
+  recorderServiceCommandMeta.set(id, { action, sentAt, timeoutMs, generation: recorderServiceGeneration });
+  if (action === 'start') {
+    log('[recorder-service][debug] start dispatch', {
+      id,
+      timeoutMs,
+      generation: recorderServiceGeneration,
+      ready: recorderServiceReady,
+      recorderState
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      recorderServiceWaiters.delete(id);
+      const meta = recorderServiceCommandMeta.get(id);
+      recorderServiceCommandMeta.delete(id);
+      if (action === 'start') {
+        log('[recorder-service][debug] start timeout', {
+          id,
+          elapsedMs: meta?.sentAt ? (Date.now() - meta.sentAt) : null,
+          timeoutMs: meta?.timeoutMs || timeoutMs,
+          generation: meta?.generation || recorderServiceGeneration,
+          ready: recorderServiceReady,
+          recorderState
+        });
+      }
+      reject(new Error(`recorder-service-timeout:${action}`));
+    }, timeoutMs);
+    recorderServiceWaiters.set(id, { resolve, reject, timer });
+    try {
+      sendRecorderServiceMessage({ type: 'cmd', id, action, payload });
+    } catch (e) {
+      clearTimeout(timer);
+      recorderServiceWaiters.delete(id);
+      recorderServiceCommandMeta.delete(id);
+      if (action === 'start') {
+        log('[recorder-service][debug] start send failed', { id, error: e?.message || e });
+      }
+      reject(e);
+    }
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForRecorderState(targetState, timeoutMs = 15000, pollMs = 200) {
+  const target = String(targetState || '').toLowerCase();
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (String(recorderState || '').toLowerCase() === target) {
+        clearInterval(timer);
+        resolve(true);
+        return;
+      }
+      if ((Date.now() - startedAt) >= timeoutMs) {
+        clearInterval(timer);
+        reject(new Error(`recorder-state-timeout:${target}`));
+      }
+    }, Math.max(100, Number(pollMs) || 200));
+  });
+}
+
+async function ensureRecorderServiceReady(timeoutMs = 20000) {
+  const startAt = Date.now();
+  while (Date.now() - startAt < timeoutMs) {
+    if (recorderServiceProcess && !recorderServiceProcess.killed && recorderServiceReady) {
+      const warmupMs = Date.now() - Number(recorderServiceReadyAtMs || 0);
+      if (warmupMs < 1500) {
+        await sleep(1500 - warmupMs);
+      }
+      return true;
+    }
+    await sleep(150);
+  }
+  return Boolean(recorderServiceProcess && !recorderServiceProcess.killed && recorderServiceReady);
+}
+
+async function sendRecorderServiceCommandWithRecovery(action, payload = {}, options = {}) {
+  const run = async () => {
+    const timeoutMs = Number.isFinite(options?.timeoutMs) ? Number(options.timeoutMs) : 30000;
+    const retries = Number.isFinite(options?.retries) ? Number(options.retries) : 1;
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        if (!recorderServiceProcess || recorderServiceProcess.killed) {
+          startRecorderServiceProcess();
+        }
+        const ready = await ensureRecorderServiceReady(Math.max(8000, Math.min(timeoutMs, 20000)));
+        if (!ready) {
+          throw new Error('recorder-service-not-ready');
+        }
+        if (action === 'start') {
+          // Keep start ACK timeout tighter; service emits async state events after this.
+          const startTimeoutMs = Math.max(8000, Math.min(timeoutMs, 15000));
+          return await sendRecorderServiceCommand(action, payload, startTimeoutMs);
+        }
+        return await sendRecorderServiceCommand(action, payload, timeoutMs);
+      } catch (e) {
+        lastError = e;
+        const message = String(e?.message || e || '');
+        const retryable = (
+          message.includes('not-ready') ||
+          message.includes('timeout') ||
+          message.includes('recorder-service-not-running')
+        );
+        if (!retryable || attempt >= retries) break;
+        log(`[recorder-service] ${action} failed (attempt ${attempt + 1}/${retries + 1}), restarting service and retrying`, message);
+        stopRecorderServiceProcess();
+        await sleep(500);
+        startRecorderServiceProcess();
+        await sleep(800);
+      }
+    }
+    throw lastError || new Error(`recorder-service-${action}-failed`);
+  };
+
+  // Dedupe concurrent start requests to avoid service queue overload and
+  // duplicate command waiters during status races.
+  if (action === 'start') {
+    const existing = recorderServiceActionInFlight.get(action);
+    if (existing) {
+      log('[recorder-service] start already in-flight, joining existing request');
+      return existing;
+    }
+    const inFlight = run().finally(() => {
+      if (recorderServiceActionInFlight.get(action) === inFlight) {
+        recorderServiceActionInFlight.delete(action);
+      }
+    });
+    recorderServiceActionInFlight.set(action, inFlight);
+    return inFlight;
+  }
+
+  return run();
+}
+
+async function handleRecorderServiceEvent(name, payload = {}) {
+  try {
+    if (name === 'command-ack') {
+      const commandId = String(payload?.commandId || '');
+      const phase = String(payload?.phase || '').toLowerCase();
+      if (!commandId) return;
+
+      if (phase === 'completed' && recorderState === RECORDER_STATES.STARTING) {
+        setRecorderState(RECORDER_STATES.RECORDING, {
+          via: 'service-command-ack',
+          sourceCount: payload?.sourceCount || null,
+          failedSourceCount: payload?.failedSourceCount || null
+        });
+      }
+
+      // Fallback completion path: if direct service ack is lost but renderer
+      // emits command-ack, settle the corresponding waiter here.
+      const waiter = recorderServiceWaiters.get(commandId);
+      if (!waiter || phase === 'received') return;
+      const meta = recorderServiceCommandMeta.get(commandId);
+      recorderServiceCommandMeta.delete(commandId);
+      recorderServiceWaiters.delete(commandId);
+      clearTimeout(waiter.timer);
+
+      if (meta?.action === 'start') {
+        log('[recorder-service][debug] start settled via command-ack-event', {
+          id: commandId,
+          phase,
+          elapsedMs: meta?.sentAt ? (Date.now() - meta.sentAt) : null,
+          recorderState
+        });
+      }
+
+      if (phase === 'failed') {
+        waiter.reject(new Error(String(payload?.error || `recorder-command-failed:${commandId}`)));
+      } else {
+        waiter.resolve({ ok: true, via: 'command-ack-event', payload });
+      }
+      return;
+    }
+
+    if (name === 'segment-finalized') {
+      const fileName = String(payload?.fileName || '').trim();
+      let filePath = String(payload?.filePath || '').trim();
+      if (!fileName || !filePath) return;
+      log('[recorder-service] segment finalized', { fileName, filePath, bytes: payload?.bytes || null });
+
+      // Service process may persist segments under its isolated user-data-dir.
+      // Normalize to main RECORDINGS_DIR so existing retry/upload pipeline can find files.
+      const canonicalPath = path.join(RECORDINGS_DIR, fileName);
+      if (path.resolve(filePath) !== path.resolve(canonicalPath)) {
+        try {
+          await fs.promises.mkdir(RECORDINGS_DIR, { recursive: true });
+          await fs.promises.rename(filePath, canonicalPath);
+          filePath = canonicalPath;
+          log('[recorder-service] segment moved to canonical recordings path', { fileName, filePath });
+        } catch (moveErr) {
+          // Cross-volume/device moves can fail; fall back to copy + delete.
+          try {
+            await fs.promises.copyFile(filePath, canonicalPath);
+            await fs.promises.unlink(filePath).catch(() => { });
+            filePath = canonicalPath;
+            log('[recorder-service] segment copied to canonical recordings path', { fileName, filePath });
+          } catch (copyErr) {
+            log('[recorder-service] failed to normalize segment path', {
+              fileName,
+              from: filePath,
+              to: canonicalPath,
+              error: copyErr?.message || copyErr
+            });
+          }
+        }
+      }
+
+      let stat = null;
+      try { stat = await fs.promises.stat(filePath); } catch (_) { }
+      const mtimeMs = Number(stat?.mtimeMs || Date.now());
+      const size = Number(stat?.size || payload?.bytes || 0);
+      const ownerUid = currentUid || null;
+      const ownerName = cachedDisplayName || null;
+      upsertManifestEntry(fileName, { size, mtimeMs, ownerUid, ownerName });
+      const retryRes = await retrySpecificRecordingUpload(fileName);
+      if (!retryRes?.success) {
+        log('[recorder-service] upload failed after finalize', { fileName, error: retryRes?.error || 'retry-failed' });
+        enqueueDeferredUpload(fileName, retryRes?.error || 'service-segment-upload-failed');
+        processDeferredUploadQueue().catch(() => { });
+      } else {
+        log('[recorder-service] upload success after finalize', { fileName });
+        dequeueDeferredUpload(fileName);
+        if (!agentClockedIn) {
+          try {
+            const safeOwnerName = String(ownerName || cachedDisplayName || '').trim();
+            const mergeDate = getIsoDateFromMs(mtimeMs);
+            if (safeOwnerName && mergeDate) {
+              requestSegmentMerge(safeOwnerName, mergeDate, true)
+                .catch((e) => log('[merge] post-finalize merge trigger failed:', e?.message || e));
+            }
+          } catch (_) { }
+        }
+      }
+      return;
+    }
+    if (name === 'state') {
+      const state = String(payload?.state || '').toLowerCase();
+      if (state === 'recording') {
+        setRecorderState(RECORDER_STATES.RECORDING, { sourceCount: payload?.sourceCount || null, via: 'service' });
+      } else if (state === 'idle') {
+        setRecorderState(RECORDER_STATES.IDLE, { reason: payload?.reason || 'service_idle', via: 'service' });
+      }
+      return;
+    }
+    if (name === 'failed') {
+      log('[recorder-service] failed event', payload?.error || payload);
+      await handleRecorderFailure(payload || {}, { origin: 'service' });
+      return;
+    }
+    if (name === 'diagnostic') {
+      await recordHealthEvent(`recorder_${payload?.type || 'diagnostic'}`, payload || {});
+      return;
+    }
+  } catch (e) {
+    log('[recorder-service] event handler failed', e?.message || e);
+  }
+}
+
+function startRecorderServiceProcess() {
+  if (!isRecorderServiceEnabled()) return false;
+  if (recorderServiceProcess && !recorderServiceProcess.killed) return true;
+  try {
+    const serviceScript = path.join(__dirname, 'recorderServiceMain.js');
+    const isolatedUserData = path.join(app.getPath("userData"), "recorder_service_profile");
+    const child = spawn(process.execPath, [
+      `--user-data-dir=${isolatedUserData}`,
+      '--disable-http-cache',
+      '--disable-gpu-shader-disk-cache',
+      '--disk-cache-size=1',
+      '--media-cache-size=1',
+      serviceScript
+    ], {
+      env: {
+        ...process.env,
+        RECORDER_RECORDINGS_DIR: RECORDINGS_DIR,
+        RECORDER_TEMP_RECORDINGS_DIR: TEMP_RECORDINGS_DIR
+      },
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      windowsHide: true
+    });
+    recorderServiceProcess = child;
+    recorderServiceReady = false;
+    recorderServiceReadyAtMs = 0;
+    recorderServiceGeneration += 1;
+    const generation = recorderServiceGeneration;
+
+    let stdoutBuffer = '';
+    const handleServiceMsg = (msg) => {
+      if (msg?.type === 'ready') {
+        recorderServiceReady = true;
+        recorderServiceReadyAtMs = Date.now();
+        recorderServiceRuntimeFallbackActive = false;
+        log('[recorder-service] ready', { generation });
+        return;
+      }
+      if (msg?.type === 'ack') {
+        const ackId = String(msg.id || '');
+        const waiter = recorderServiceWaiters.get(ackId);
+        if (!waiter) return;
+        const meta = recorderServiceCommandMeta.get(ackId);
+        recorderServiceCommandMeta.delete(ackId);
+        recorderServiceWaiters.delete(ackId);
+        clearTimeout(waiter.timer);
+        if (meta?.action === 'start') {
+          log('[recorder-service][debug] start ack', {
+            id: ackId,
+            ok: Boolean(msg.ok),
+            error: msg.ok ? null : String(msg.error || 'recorder-service-command-failed'),
+            elapsedMs: meta?.sentAt ? (Date.now() - meta.sentAt) : null,
+            generation: meta?.generation || generation,
+            ready: recorderServiceReady,
+            recorderState
+          });
+        }
+        if (msg.ok) waiter.resolve(msg);
+        else waiter.reject(new Error(String(msg.error || 'recorder-service-command-failed')));
+        return;
+      }
+      if (msg?.type === 'event') {
+        handleRecorderServiceEvent(String(msg.name || ''), msg.payload || {}).catch(() => { });
+        return;
+      }
+      if (msg?.type === 'log') {
+        log('[recorder-service]', ...(Array.isArray(msg.args) ? msg.args : [msg.args]));
+      }
+    };
+
+    child.stdout.on('data', (chunk) => {
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = String(line || '').trim();
+        if (!trimmed) continue;
+        try {
+          handleServiceMsg(JSON.parse(trimmed));
+        } catch (_) {
+          log('[recorder-service] stdout', trimmed);
+        }
+      }
+    });
+
+    child.on('message', (msg) => {
+      try {
+        handleServiceMsg(msg || {});
+      } catch (e) {
+        log('[recorder-service] ipc message handling failed', e?.message || e);
+      }
+    });
+
+    child.stderr.on('data', (chunk) => {
+      log('[recorder-service][stderr]', chunk.toString().trim());
+    });
+
+    child.on('exit', (code, signal) => {
+      log('[recorder-service] exited', { code, signal });
+      recorderServiceReady = false;
+      recorderServiceReadyAtMs = 0;
+      recorderServiceProcess = null;
+      clearRecorderServiceWaiters('recorder-service-exit');
+      const plannedExit = Date.now() <= Number(recorderServicePlannedExitUntilMs || 0);
+      if (plannedExit) return;
+      if (isRecordingActive && currentUid && agentClockedIn && isRecorderServiceEnabled()) {
+        setTimeout(() => {
+          startRecorderServiceProcess();
+          scheduleAutoResumeRecording({ force: true, reason: 'recorder-service-exit' });
+        }, 3000);
+      }
+    });
+
+    return true;
+  } catch (e) {
+    log('[recorder-service] failed to start', e?.message || e);
+    recorderServiceProcess = null;
+    recorderServiceReady = false;
+    recorderServiceRuntimeFallbackActive = true;
+    return false;
+  }
+}
+
+function stopRecorderServiceProcess(options = {}) {
+  const planned = options?.planned !== false;
+  const procToStop = recorderServiceProcess;
+  if (planned) {
+    recorderServicePlannedExitUntilMs = Date.now() + 8000;
+  }
+  try {
+    if (procToStop && !procToStop.killed) {
+      try {
+        if (recorderServiceProcess === procToStop) {
+          sendRecorderServiceMessage({ type: 'shutdown' });
+        } else {
+          procToStop.stdin?.write(`${JSON.stringify({ type: 'shutdown' })}\n`);
+        }
+      } catch (_) { }
+      setTimeout(() => {
+        try {
+          // Kill only the originally targeted process. Do not touch a newer replacement.
+          if (procToStop && !procToStop.killed) procToStop.kill();
+        } catch (_) { }
+      }, 1200);
+    }
+  } catch (_) { }
+  if (recorderServiceProcess === procToStop) {
+    recorderServiceReady = false;
+    recorderServiceReadyAtMs = 0;
+  }
+  clearRecorderServiceWaiters('recorder-service-stop');
+}
+
+async function sendRecorderCommand(channel, payload = {}, options = {}) {
+  const timeoutMs = Number.isFinite(options?.timeoutMs) ? Number(options.timeoutMs) : 15000;
+  if (!recorderWindow || recorderWindow.isDestroyed()) {
+    throw new Error('recorder-window-not-ready');
+  }
+  const commandId = nextRecorderCommandId(channel);
+  const waiter = waitForRecorderCommand(commandId, timeoutMs);
+  recorderWindow.webContents.send(channel, { ...payload, __commandId: commandId });
+  return waiter;
+}
 
 let recordingSegmentInterval = null;
 let recordingSegmentInFlight = false;
@@ -1567,6 +2277,17 @@ app.on("child-process-gone", (_event, details) => {
   recordHealthEvent("child_process_gone", details || {});
 });
 
+app.on("before-quit", () => {
+  stopRecorderSupervisor();
+  stopRecorderServiceProcess();
+  clearRecorderCommandWaiters('app-before-quit');
+  if (deferredUploadWorkerTimer) {
+    clearInterval(deferredUploadWorkerTimer);
+    deferredUploadWorkerTimer = null;
+  }
+  persistDeferredUploadQueue();
+});
+
 ipcMain.on("health-pong", (_event, payload) => {
   lastRendererPongMs = Date.now();
   // If we were in a recovery loop, this acts as a good sign.
@@ -1649,6 +2370,8 @@ hydrateAdminSettingsFromDisk();
 
 let lastForceLogoutRequestId = null;
 let forceLogoutRequestInFlight = false;
+let clockOutInFlight = false;
+let hasRegisteredUidAtLeastOnce = false;
 
 let autoClockOutInterval = null;
 let lastAutoClockOutTargetKey = null;
@@ -1826,6 +2549,18 @@ configureGoogleIntegrations();
 
 const pendingAgentStatuses = [];
 let pendingStatusRetryTimer = null;
+
+function enqueuePendingAgentStatus(status) {
+  const normalized = String(status || '').trim();
+  if (!normalized) return;
+  // Keep only the latest pending status to avoid stale replay churn
+  // (e.g. queued clocked_out followed by working during startup registration).
+  if (pendingAgentStatuses.length > 0) {
+    pendingAgentStatuses[pendingAgentStatuses.length - 1] = normalized;
+  } else {
+    pendingAgentStatuses.push(normalized);
+  }
+}
 
 function schedulePendingStatusFlush(delayMs = 3000) {
   if (pendingStatusRetryTimer) return;
@@ -2011,7 +2746,13 @@ function scheduleAutoResumeRetry(reason = "retry") {
 }
 
 async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", options = {}) {
+  if (clockOutInFlight) {
+    log("[clockOutAndSignOutDesktop] already in progress, skipping duplicate trigger");
+    return false;
+  }
   if (!currentUid) return false;
+  clockOutInFlight = true;
+  try {
 
   const notifyRenderer = options?.notifyRenderer !== false;
   const uid = currentUid;
@@ -2225,6 +2966,9 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
   forceLogoutRequestInFlight = false;
 
   return true;
+  } finally {
+    clockOutInFlight = false;
+  }
 }
 
 async function pushIdleStatus(uid, { idleSecs, reason } = {}) {
@@ -2263,8 +3007,11 @@ async function pushActiveStatus(uid, { idleSecs } = {}) {
       .set({
         status: "online",
         isIdle: false,
+        isAway: false,
         idleSecs,
         idleReason: FieldValue.delete(),
+        awayReason: FieldValue.delete(),
+        awayStartedAt: FieldValue.delete(),
         lockedBySystem: false,
         lastUpdate: FieldValue.serverTimestamp()
       }, { merge: true });
@@ -2789,9 +3536,25 @@ function createRecorderWindow() {
     });
     ensureMediaPermissions(recorderWindow.webContents);
     recorderWindow.loadFile(path.join(__dirname, 'recorder.html'));
+    recorderWindow.webContents.on('render-process-gone', (_event, details) => {
+      log('[recorderWindow] render-process-gone', details);
+      setRecorderState(RECORDER_STATES.IDLE, { reason: 'recorder_render_process_gone' });
+      if (isRecorderExpectedToRun()) {
+        scheduleAutoResumeRecording({ force: true, reason: 'recorder-render-process-gone' });
+      }
+    });
+    recorderWindow.webContents.on('unresponsive', () => {
+      log('[recorderWindow] unresponsive');
+      if (isRecorderExpectedToRun()) {
+        scheduleAutoResumeRecording({ force: true, reason: 'recorder-window-unresponsive' });
+      }
+    });
     recorderWindow.on('closed', () => {
       recorderWindow = null;
       setRecorderState(RECORDER_STATES.IDLE, { reason: 'window_closed' });
+      if (isRecorderExpectedToRun()) {
+        scheduleAutoResumeRecording({ force: true, reason: 'recorder-window-closed' });
+      }
     });
   } catch (error) {
     log("[recorderWindow] failed to create", error?.message || error);
@@ -2802,12 +3565,71 @@ function setRecorderState(nextState, context = {}) {
   if (!nextState || recorderState === nextState) return;
   const previous = recorderState;
   recorderState = nextState;
+  if (nextState === RECORDER_STATES.RECORDING || nextState === RECORDER_STATES.STARTING) {
+    recorderLastHealthyAtMs = Date.now();
+  }
   log(`[recorder] state ${previous} -> ${nextState}`, context);
   recordHealthEvent('recorder_state_transition', {
     from: previous,
     to: nextState,
     ...context
   }).catch(() => { });
+}
+
+function isRecorderExpectedToRun() {
+  if (!currentUid || !agentClockedIn) return false;
+  if (manualBreakActive || isAway) return false;
+  const allowRecording = cachedAdminSettings?.allowRecording !== false;
+  const mode = String(cachedAdminSettings?.recordingMode || 'auto').toLowerCase();
+  if (!allowRecording) return false;
+  if (mode !== 'auto') return false;
+  return isRecordingActive === true;
+}
+
+function stopRecorderSupervisor() {
+  if (recorderSupervisorInterval) {
+    clearInterval(recorderSupervisorInterval);
+    recorderSupervisorInterval = null;
+  }
+}
+
+function startRecorderSupervisor() {
+  stopRecorderSupervisor();
+  recorderSupervisorInterval = setInterval(async () => {
+    try {
+      if (!isRecorderExpectedToRun()) return;
+      // Never force recovery while an intentional flush/stop is in progress.
+      // This avoids racing stopAndFlush and creating false "service not ready" fallbacks.
+      if (recorderFlushWait || recorderState === RECORDER_STATES.STOPPING) return;
+      const nowMs = Date.now();
+      const usingService = isRecorderServiceEnabled();
+      // In service mode, STARTING is an expected transitional state; don't let
+      // supervisor recovery interrupt it. Give startup a grace window.
+      if (usingService && recorderState === RECORDER_STATES.STARTING) {
+        const startingForMs = nowMs - recorderLastHealthyAtMs;
+        if (startingForMs < 90000) return;
+      }
+      const windowMissing = usingService
+        ? (!recorderServiceProcess || recorderServiceProcess.killed || !recorderServiceReady)
+        : (!recorderWindow || recorderWindow.isDestroyed());
+      const stalled = (
+        recorderState !== RECORDER_STATES.RECORDING &&
+        recorderState !== RECORDER_STATES.STARTING &&
+        (nowMs - recorderLastHealthyAtMs) > RECORDER_SUPERVISOR_STALL_MS
+      );
+      if (!windowMissing && !stalled) return;
+
+      log('[recorder-supervisor] recovery triggered', {
+        windowMissing,
+        recorderState,
+        stalledForMs: nowMs - recorderLastHealthyAtMs
+      });
+      await recreateRecorderWindow(windowMissing ? 'supervisor-window-missing' : 'supervisor-stalled');
+      scheduleAutoResumeRecording({ force: true, reason: 'recorder-supervisor-recovery' });
+    } catch (e) {
+      log('[recorder-supervisor] recovery failed', e?.message || e);
+    }
+  }, RECORDER_SUPERVISOR_INTERVAL_MS);
 }
 
 function enqueueRecorderTransition(fn) {
@@ -2848,7 +3670,13 @@ function waitForRecorderWindowReady(timeoutMs = 10000) {
 }
 
 async function recreateRecorderWindow(reason = 'recovery') {
+  if (isRecorderServiceEnabled()) {
+    stopRecorderServiceProcess();
+    startRecorderServiceProcess();
+    return;
+  }
   setRecorderState(RECORDER_STATES.RECOVERING, { reason });
+  clearRecorderCommandWaiters('recorder-window-recreate');
   try {
     if (recorderWindow && !recorderWindow.isDestroyed()) {
       try { recorderWindow.webContents.send('recorder-stop'); } catch (_) { }
@@ -2864,6 +3692,9 @@ async function recreateRecorderWindow(reason = 'recovery') {
 function startBackgroundRecording(reason = 'unspecified') {
   return enqueueRecorderTransition(async () => {
     try {
+      const { profile, baseIndex, overrideIndex, effectiveIndex } = getEffectiveCaptureProfile();
+      const quality = profile.quality;
+      const fps = profile.fps;
       if (!isRecordingActive) {
         return false;
       }
@@ -2873,6 +3704,67 @@ function startBackgroundRecording(reason = 'unspecified') {
       if (recorderFlushWait) {
         await recorderFlushWait.catch(() => { });
       }
+      if (isRecorderServiceEnabled()) {
+        try {
+          if (!startRecorderServiceProcess()) {
+            throw new Error('recorder-service-start-failed');
+          }
+          setRecorderState(RECORDER_STATES.STARTING, { reason, quality, fps, via: 'service', baseIndex, overrideIndex, effectiveIndex });
+          const ack = await sendRecorderServiceCommandWithRecovery(
+            'start',
+            { recordingQuality: quality, recordingFps: fps, reason },
+            { timeoutMs: 45000, retries: 1 }
+          );
+          setRecorderState(RECORDER_STATES.RECORDING, { reason: 'service_start_ack', via: 'service', sourceCount: ack?.sourceCount || null });
+          log('[recorder] start command sent', { quality, fps, reason, via: 'service', baseIndex, overrideIndex, effectiveIndex });
+          return true;
+        } catch (serviceErr) {
+          const serviceMsg = String(serviceErr?.message || serviceErr || '');
+          const softStartFailure = (
+            serviceMsg.includes('recorder-service-timeout:start') ||
+            serviceMsg.includes('recorder-state-timeout:recording') ||
+            serviceMsg.includes('recorder-service-not-ready')
+          );
+          if (softStartFailure) {
+            // Keep service as default for reliability testing; do not force legacy fallback
+            // on transient start handoff races.
+            log('[recorder-service] start soft-failed; keeping service active and re-dispatching start', serviceMsg);
+            if (!recorderServiceProcess || recorderServiceProcess.killed) {
+              startRecorderServiceProcess();
+            }
+            await ensureRecorderServiceReady(12000).catch(() => false);
+            try {
+              const commandId = nextRecorderServiceCommandId('start_retry_dispatch');
+              sendRecorderServiceMessage({
+                type: 'cmd',
+                id: commandId,
+                action: 'start',
+                payload: {
+                  recordingQuality: quality,
+                  recordingFps: fps,
+                  reason: `${reason}_soft_retry`
+                }
+              });
+              setRecorderState(RECORDER_STATES.STARTING, {
+                reason: 'service_start_soft_retry_dispatched',
+                via: 'service',
+                quality,
+                fps,
+                baseIndex,
+                overrideIndex,
+                effectiveIndex
+              });
+              return true;
+            } catch (dispatchErr) {
+              log('[recorder-service] soft retry dispatch failed, falling back to legacy recorder path', dispatchErr?.message || dispatchErr);
+            }
+          } else {
+            log('[recorder-service] start failed, falling back to legacy recorder path', serviceMsg);
+          }
+          recorderServiceRuntimeFallbackActive = true;
+          stopRecorderServiceProcess();
+        }
+      }
       if (!recorderWindow || recorderWindow.isDestroyed()) {
         createRecorderWindow();
       }
@@ -2880,11 +3772,12 @@ function startBackgroundRecording(reason = 'unspecified') {
       if (!ready || !recorderWindow || recorderWindow.isDestroyed()) {
         throw new Error('recorder-window-not-ready');
       }
-      const { profile, baseIndex, overrideIndex, effectiveIndex } = getEffectiveCaptureProfile();
-      const quality = profile.quality;
-      const fps = profile.fps;
       setRecorderState(RECORDER_STATES.STARTING, { reason, quality, fps, baseIndex, overrideIndex, effectiveIndex });
-      recorderWindow.webContents.send('recorder-start', { recordingQuality: quality, recordingFps: fps });
+      await sendRecorderCommand(
+        'recorder-start',
+        { recordingQuality: quality, recordingFps: fps, reason },
+        { timeoutMs: 25000 }
+      );
       log('[recorder] start command sent', { quality, fps, reason, baseIndex, overrideIndex, effectiveIndex });
       return true;
     } catch (error) {
@@ -2904,14 +3797,29 @@ function startBackgroundRecording(reason = 'unspecified') {
 function stopBackgroundRecording() {
   return enqueueRecorderTransition(async () => {
     try {
+      if (isRecorderServiceEnabled()) {
+        setRecorderState(RECORDER_STATES.STOPPING, { reason: 'stop', via: 'service' });
+        try {
+          await sendRecorderServiceCommandWithRecovery(
+            'stop',
+            { reason: 'stop' },
+            { timeoutMs: 25000, retries: 1 }
+          );
+          setRecorderState(RECORDER_STATES.IDLE, { reason: 'stop_service_ack', via: 'service' });
+          return;
+        } catch (serviceErr) {
+          log('[recorder-service] stop failed, falling back to legacy recorder path', serviceErr?.message || serviceErr);
+          recorderServiceRuntimeFallbackActive = true;
+          stopRecorderServiceProcess();
+        }
+      }
       if (!recorderWindow || recorderWindow.isDestroyed()) {
         setRecorderState(RECORDER_STATES.IDLE, { reason: 'stop_no_window' });
         return;
       }
       setRecorderState(RECORDER_STATES.STOPPING, { reason: 'stop' });
-      recorderWindow.webContents.send('recorder-stop');
-      // Non-flush stop has no ACK; use a short grace period before declaring idle.
-      setTimeout(() => setRecorderState(RECORDER_STATES.IDLE, { reason: 'stop_grace_elapsed' }), 2500);
+      await sendRecorderCommand('recorder-stop', { reason: 'stop' }, { timeoutMs: 12000 });
+      setRecorderState(RECORDER_STATES.IDLE, { reason: 'stop_command_ack' });
     } catch (error) {
       log('[recorder] failed to stop background recording', error?.message || error);
       setRecorderState(RECORDER_STATES.IDLE, { reason: 'stop_failed' });
@@ -2919,19 +3827,16 @@ function stopBackgroundRecording() {
   });
 }
 
-function stopBackgroundRecordingAndFlush(options = {}) {
+function performLegacyFlushDirect(options = {}) {
   if (!recorderWindow || recorderWindow.isDestroyed()) return Promise.resolve();
-  if (recorderFlushWait) return recorderFlushWait;
-  // Default to 60s (was 7s) to handle large 12hr+ recordings roughly 2-5GB
   const timeoutMs = Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 60000;
   const payload = options?.payload || {};
-  recorderFlushWait = enqueueRecorderTransition(async () => new Promise((resolve) => {
+  return new Promise((resolve) => {
     let settled = false;
     setRecorderState(RECORDER_STATES.STOPPING, { reason: 'flush', timeoutMs });
     const done = () => {
       if (settled) return;
       settled = true;
-      recorderFlushWait = null;
       setRecorderState(RECORDER_STATES.IDLE, { reason: 'flush_complete' });
       resolve();
     };
@@ -2940,7 +3845,8 @@ function stopBackgroundRecordingAndFlush(options = {}) {
       done();
     }, timeoutMs);
 
-    const handler = () => {
+    const handler = (eventPayload = {}) => {
+      if (eventPayload?.commandId && eventPayload.commandId !== payload.__commandId) return;
       clearTimeout(timer);
       ipcMain.removeListener('recorder-flushed', handler);
       done();
@@ -2948,6 +3854,8 @@ function stopBackgroundRecordingAndFlush(options = {}) {
 
     ipcMain.on('recorder-flushed', handler);
     try {
+      const commandId = nextRecorderCommandId('stop_and_flush');
+      payload.__commandId = commandId;
       recorderWindow.webContents.send('recorder-stop-and-flush', payload);
     } catch (err) {
       log('[recorder] failed to request flush', err?.message || err);
@@ -2955,8 +3863,65 @@ function stopBackgroundRecordingAndFlush(options = {}) {
       ipcMain.removeListener('recorder-flushed', handler);
       done();
     }
-  }));
+  });
+}
+
+function stopBackgroundRecordingAndFlushLegacy(options = {}) {
+  if (!recorderWindow || recorderWindow.isDestroyed()) return Promise.resolve();
+  if (recorderFlushWait) return recorderFlushWait;
+  recorderFlushWait = enqueueRecorderTransition(async () => {
+    await performLegacyFlushDirect(options);
+  }).finally(() => {
+    recorderFlushWait = null;
+  });
   return recorderFlushWait;
+}
+
+function stopBackgroundRecordingAndFlush(options = {}) {
+  if (isRecorderServiceEnabled()) {
+    if (recorderFlushWait) return recorderFlushWait;
+    const timeoutMs = Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 60000;
+    const payload = options?.payload || {};
+    const localState = String(recorderState || '').toLowerCase();
+    const locallyIdle = !isRecordingActive && (localState === RECORDER_STATES.IDLE || localState === RECORDER_STATES.STOPPING);
+
+    // If recorder is already locally idle, don't issue a service stopAndFlush command.
+    // This avoids unnecessary service timeouts during clocked_out/offline transitions.
+    if (locallyIdle) {
+      setRecorderState(RECORDER_STATES.IDLE, { reason: 'flush_skipped_already_idle', via: 'service' });
+      return Promise.resolve();
+    }
+
+    // Use explicit transition chaining here (instead of enqueueRecorderTransition) so
+    // errors are not swallowed and fallback can run deterministically in-band.
+    const run = async () => {
+      setRecorderState(RECORDER_STATES.STOPPING, { reason: 'flush', timeoutMs, via: 'service' });
+      try {
+        await sendRecorderServiceCommandWithRecovery(
+          'stopAndFlush',
+          { ...payload, timeoutMs },
+          { timeoutMs: timeoutMs + 15000, retries: 1 }
+        );
+        setRecorderState(RECORDER_STATES.IDLE, { reason: 'flush_complete_service', via: 'service' });
+      } catch (serviceErr) {
+        log('[recorder-service] stopAndFlush failed, falling back to legacy recorder path', serviceErr?.message || serviceErr);
+        recorderServiceRuntimeFallbackActive = true;
+        stopRecorderServiceProcess();
+        // Fallback path in same transition to avoid stale STOPPING state and queue deadlocks.
+        await performLegacyFlushDirect(options);
+      }
+    };
+    recorderTransitionQueue = recorderTransitionQueue
+      .then(() => run())
+      .catch((err) => {
+        log('[recorder] transition failed', err?.message || err);
+      });
+    recorderFlushWait = recorderTransitionQueue.finally(() => {
+      recorderFlushWait = null;
+    });
+    return recorderFlushWait;
+  }
+  return stopBackgroundRecordingAndFlushLegacy(options);
 }
 
 // ---------- LOCK WINDOW ----------
@@ -3417,6 +4382,26 @@ function applyAdminSettings(next) {
     stopAutoClockOutWatcher();
   }
 
+  // Admin can explicitly re-enable service after a runtime fallback.
+  if (cachedAdminSettings?.recorderServiceEnabled === true) {
+    recorderServiceRuntimeFallbackActive = false;
+  }
+
+  // Optional phase-2 alpha: dedicated recorder service process.
+  if (isRecorderServiceEnabled()) {
+    if (!startRecorderServiceProcess()) {
+      recorderServiceRuntimeFallbackActive = true;
+      if (!recorderWindow || recorderWindow.isDestroyed()) {
+        createRecorderWindow();
+      }
+    }
+  } else {
+    stopRecorderServiceProcess();
+    if (!recorderWindow || recorderWindow.isDestroyed()) {
+      createRecorderWindow();
+    }
+  }
+
   restartRecordingSegmentLoop();
 
 }
@@ -3497,6 +4482,64 @@ function startCommandsWatch(uid) {
       showRecordingPopup("Recording stopped by admin");
       stopBackgroundRecording();
       await db.collection("desktopCommands").doc(uid).update({ stopRecording: false }).catch(() => { });
+    }
+
+    if (cmd.restartRecording) {
+      log("command restartRecording received");
+      const requestId = cmd.restartRecordingRequestId ? String(cmd.restartRecordingRequestId) : null;
+      try {
+        const restartBlockedReason = (!currentUid || !agentClockedIn)
+          ? 'agent-not-active'
+          : (manualBreakActive ? 'manual-break-active' : (isAway ? 'away-break-active' : null));
+        if (restartBlockedReason) {
+          if (requestId) {
+            await db.collection('agentStatus').doc(uid).set({
+              restartRecordingAckId: requestId,
+              restartRecordingAckAt: FieldValue.serverTimestamp(),
+              restartRecordingError: restartBlockedReason,
+              lastUpdate: FieldValue.serverTimestamp()
+            }, { merge: true }).catch(() => { });
+          }
+          await db.collection("desktopCommands").doc(uid).update({
+            restartRecording: false,
+            restartRecordingRequestId: FieldValue.delete()
+          }).catch(() => { });
+          return;
+        }
+        // Explicit restart: stop current recorder safely, then start again.
+        isRecordingActive = false;
+        resetAutoResumeRetry();
+        if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
+        await stopBackgroundRecordingAndFlush({ payload: { stopReason: 'admin_restart', suppressAutoResume: true } });
+        await recreateRecorderWindow('admin-restart');
+        isRecordingActive = true;
+        if (currentUid) await db.collection('agentStatus').doc(currentUid).set({ isRecording: true, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
+        showRecordingPopup("Recording restarted by admin");
+        startBackgroundRecording('admin-restart');
+        if (requestId) {
+          await db.collection('agentStatus').doc(uid).set({
+            restartRecordingAckId: requestId,
+            restartRecordingAckAt: FieldValue.serverTimestamp(),
+            restartRecordingError: FieldValue.delete(),
+            lastUpdate: FieldValue.serverTimestamp()
+          }, { merge: true }).catch(() => { });
+        }
+      } catch (e) {
+        if (requestId) {
+          await db.collection('agentStatus').doc(uid).set({
+            restartRecordingAckId: requestId,
+            restartRecordingAckAt: FieldValue.serverTimestamp(),
+            restartRecordingError: e?.message || String(e),
+            lastUpdate: FieldValue.serverTimestamp()
+          }, { merge: true }).catch(() => { });
+        }
+        throw e;
+      } finally {
+        await db.collection("desktopCommands").doc(uid).update({
+          restartRecording: false,
+          restartRecordingRequestId: FieldValue.delete()
+        }).catch(() => { });
+      }
     }
 
     if (cmd.forceLogout) {
@@ -4398,6 +5441,10 @@ async function performAutoClockOut(shiftEndDate) {
     await db.collection('agentStatus').doc(currentUid).set({
       status: 'offline',
       isIdle: false,
+      isAway: false,
+      awayReason: FieldValue.delete(),
+      awayStartedAt: FieldValue.delete(),
+      lockedBySystem: false,
       lastUpdate: shiftEndTs
     }, { merge: true }).catch(() => { });
 
@@ -4553,6 +5600,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
       // best-effort: only retry after the app is fully up and admin settings likely synced.
       // 15s delay helps avoid racing with active recordings starting up.
       retryPendingRecordingUploadsOnLogin().catch(() => { });
+      processDeferredUploadQueue().catch(() => { });
     }, 15 * 1000);
 
     // Upload the latest locally persisted health event (if any) so crashes that couldn't
@@ -4588,6 +5636,7 @@ ipcMain.handle("register-uid", async (_, payload) => {
     }
 
     if (mainWindow) mainWindow.webContents.send("desktop-registered", { uid });
+    hasRegisteredUidAtLeastOnce = true;
     log("Registered uid:", uid);
     return { success: true };
   } catch (e) {
@@ -4605,7 +5654,15 @@ ipcMain.handle("unregister-uid", async () => {
     stopRtdbPresence();
     pendingAgentStatuses.length = 0;
     if (currentUid) {
-      await db.collection("agentStatus").doc(currentUid).set({ status: 'offline', lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
+      await db.collection("agentStatus").doc(currentUid).set({
+        status: 'offline',
+        isIdle: false,
+        isAway: false,
+        awayReason: FieldValue.delete(),
+        awayStartedAt: FieldValue.delete(),
+        lockedBySystem: false,
+        lastUpdate: FieldValue.serverTimestamp()
+      }, { merge: true }).catch(() => { });
     }
 
     // ensure renderer clears local desktop uid to prevent auto login
@@ -4635,8 +5692,13 @@ ipcMain.handle("unregister-uid", async () => {
 
 // New IPC: allow web to tell desktop about agent status changes
 async function applyAgentStatus(status) {
-  if (!currentUid) {
+  const uidForStatus = currentUid;
+  if (!uidForStatus) {
     throw new Error('no-uid');
+  }
+  if (clockOutInFlight && (status === 'clocked_out' || status === 'offline')) {
+    log('[applyAgentStatus] clock-out already in progress, ignoring duplicate offline status');
+    return { success: true, skipped: 'clockout-in-flight' };
   }
 
   const authed = await ensureDesktopAuth();
@@ -4655,7 +5717,7 @@ async function applyAgentStatus(status) {
 
   const writeAgentStatusOrThrow = async (payload, label = "agentStatus_write") => {
     try {
-      await db.collection('agentStatus').doc(currentUid).set(payload, { merge: true });
+      await db.collection('agentStatus').doc(uidForStatus).set(payload, { merge: true });
       recordStatusWriteSuccess();
       return true;
     } catch (e) {
@@ -4739,7 +5801,7 @@ async function applyAgentStatus(status) {
       // Fetch user display name from Firestore
       let agentName = 'Unknown';
       try {
-        const userDoc = await db.collection('users').doc(currentUid).get();
+        const userDoc = await db.collection('users').doc(uidForStatus).get();
         if (userDoc.exists) {
           const data = userDoc.data();
           agentName = (data.displayName || data.name || data.email || 'Unknown')
@@ -4770,6 +5832,10 @@ async function applyAgentStatus(status) {
     await writeAgentStatusOrThrow({
       status: 'offline',
       isIdle: false,
+      isAway: false,
+      awayReason: FieldValue.delete(),
+      awayStartedAt: FieldValue.delete(),
+      lockedBySystem: false,
       lastUpdate: FieldValue.serverTimestamp(),
       isRecording: false
     }, "clocked_out");
@@ -4786,7 +5852,7 @@ async function applyAgentStatus(status) {
       currentShiftDate = dateKey;
       lastAutoClockOutTargetKey = null;
     }
-    startAgentStatusLoop(currentUid);
+    startAgentStatusLoop(uidForStatus);
     appTracker.start(); // Start app/website tracking on clock-in
     appTracker.resume();
 
@@ -4808,8 +5874,8 @@ async function applyAgentStatus(status) {
         startBackgroundRecording();
         willRecord = true;
         // Immediately set isRecording in Firestore to prevent race conditions with stale statuses
-        if (currentUid) {
-          db.collection('agentStatus').doc(currentUid).set({
+        if (uidForStatus) {
+          db.collection('agentStatus').doc(uidForStatus).set({
             isRecording: true,
             lastUpdate: FieldValue.serverTimestamp()
           }, { merge: true }).catch(() => { });
@@ -4818,8 +5884,8 @@ async function applyAgentStatus(status) {
         log('Online signal received, but recording is already active (ignoring)');
         willRecord = true;
         // Re-assert isRecording in Firestore in case it was cleared by a prior restart/clock-out
-        if (currentUid) {
-          db.collection('agentStatus').doc(currentUid).set({
+        if (uidForStatus) {
+          db.collection('agentStatus').doc(uidForStatus).set({
             isRecording: true,
             lastUpdate: FieldValue.serverTimestamp()
           }, { merge: true }).catch(() => { });
@@ -4830,9 +5896,13 @@ async function applyAgentStatus(status) {
     await writeAgentStatusOrThrow({
       status: 'online',
       isIdle: false,
+      isAway: false,
+      awayReason: FieldValue.delete(),
+      awayStartedAt: FieldValue.delete(),
       lastUpdate: FieldValue.serverTimestamp(),
       manualBreak: false,
       breakStartedAt: FieldValue.delete(),
+      lockedBySystem: false,
       isRecording: Boolean(willRecord || isRecordingActive)
     }, "working_online");
 
@@ -4898,24 +5968,33 @@ ipcMain.handle("set-agent-status", async (_, status) => {
   try {
     log("set-agent-status received:", status);
     if (!currentUid) {
+      if (hasRegisteredUidAtLeastOnce || clockOutInFlight) {
+        log('Ignoring set-agent-status after logout/no active uid:', status);
+        return { success: true, ignored: true };
+      }
       log('Desktop not registered yet. Queuing status:', status);
-      pendingAgentStatuses.push(status);
+      enqueuePendingAgentStatus(status);
       schedulePendingStatusFlush();
       return { success: true, queued: true };
     }
 
     const result = await applyAgentStatus(status);
     if (result?.success === false) {
-      pendingAgentStatuses.push(status);
+      enqueuePendingAgentStatus(status);
       schedulePendingStatusFlush();
       return { success: false, queued: true, error: result?.error || "failed" };
     }
     return result;
   } catch (e) {
-    log('[set-agent-status] failed, queuing for retry', e?.message || e);
-    pendingAgentStatuses.push(status);
+    const msg = String(e?.message || e || '');
+    if (!currentUid || clockOutInFlight || msg.includes('empty path') || msg === 'no-uid') {
+      log('[set-agent-status] ignored post-logout/status-race error:', msg);
+      return { success: true, ignored: true };
+    }
+    log('[set-agent-status] failed, queuing for retry', msg);
+    enqueuePendingAgentStatus(status);
     schedulePendingStatusFlush();
-    return { success: false, queued: true, error: e.message };
+    return { success: false, queued: true, error: msg };
   }
 });
 
@@ -5031,6 +6110,7 @@ ipcMain.on("recorder-state-event", (_event, payload = {}) => {
   if (state === 'recording') {
     recorderFailureStreak = 0;
     recorderInstabilityStreak = 0;
+    recorderWgcFailureTimestamps = [];
     setRecorderState(RECORDER_STATES.RECORDING, { sourceCount: payload?.sourceCount || null });
 
     const sourceCount = Number(payload?.sourceCount || 0);
@@ -5071,11 +6151,16 @@ ipcMain.on("recorder-state-event", (_event, payload = {}) => {
   }
 });
 
-ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
-  log("[recorder] background recorder failed", payload?.error || payload);
-  await recordHealthEvent("recorder_failed", payload || {});
+async function handleRecorderFailure(payload = {}, options = {}) {
+  const origin = options?.origin || 'renderer';
+  log("[recorder] background recorder failed", { origin, error: payload?.error || payload });
+  await recordHealthEvent("recorder_failed", { ...(payload || {}), origin });
   const errorText = String(payload?.error || "").toLowerCase();
   const isBlackScreenFailure = errorText.includes("black-screen-detected");
+  const isInputTrackEndedFailure = errorText.includes("input-track-ended");
+  const isWgcStartCaptureFailure =
+    errorText.includes("wgc_capturer_win") ||
+    errorText.includes("failed to start capture");
   if (isBlackScreenFailure && !disableHardwareAcceleration) {
     const saved = saveGpuFallbackState({
       disableHardwareAcceleration: true,
@@ -5113,6 +6198,40 @@ ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
   if (currentUid) {
     await db.collection('agentStatus').doc(currentUid).set({ isRecording: false, lastUpdate: FieldValue.serverTimestamp() }, { merge: true }).catch(() => { });
   }
+
+  // Repeated WGC/start-capture failures: auto-downgrade capture profile for this machine.
+  if (isWgcStartCaptureFailure || isInputTrackEndedFailure) {
+    const nowMs = Date.now();
+    recorderWgcFailureTimestamps = recorderWgcFailureTimestamps.filter((ts) => (nowMs - ts) <= RECORDER_WGC_FAILURE_WINDOW_MS);
+    recorderWgcFailureTimestamps.push(nowMs);
+
+    const withinCooldown = (nowMs - lastWgcFallbackAtMs) < RECORDER_WGC_FALLBACK_COOLDOWN_MS;
+    if (!withinCooldown && recorderWgcFailureTimestamps.length >= RECORDER_WGC_FAILURE_THRESHOLD) {
+      const changed = applyNextDeviceProfileFallback('wgc-repeated-failures');
+      if (changed) {
+        lastWgcFallbackAtMs = nowMs;
+        recorderWgcFailureTimestamps = [];
+        await recordHealthEvent('recorder_wgc_repeated_failures_fallback', {
+          threshold: RECORDER_WGC_FAILURE_THRESHOLD,
+          windowMs: RECORDER_WGC_FAILURE_WINDOW_MS
+        }).catch(() => { });
+      }
+    }
+  }
+
+  // WGC/input-track-ended failures are often recoverable only after recreating the
+  // hidden recorder window and waiting briefly before the next capture attempt.
+  if (isInputTrackEndedFailure) {
+    try {
+      await recreateRecorderWindow('input-track-ended');
+    } catch (_) { }
+    clearAutoResumeRetryTimer();
+    setTimeout(() => {
+      scheduleAutoResumeRecording({ force: true, reason: 'input-track-ended-retry' });
+    }, RECORDER_INPUT_TRACK_ENDED_RETRY_DELAY_MS);
+    return { success: true, delayedRetryMs: RECORDER_INPUT_TRACK_ENDED_RETRY_DELAY_MS };
+  }
+
   if (recorderFailureStreak >= RECORDER_RECREATE_AFTER_FAILURES) {
     await recreateRecorderWindow('failure-streak');
     recorderFailureStreak = 0;
@@ -5129,6 +6248,10 @@ ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
   }
   scheduleAutoResumeRetry(payload?.error || "recorder-failed");
   return { success: true };
+}
+
+ipcMain.handle("recorder-failed", async (_event, payload = {}) => {
+  return handleRecorderFailure(payload, { origin: 'renderer' });
 });
 
 ipcMain.handle("recorder-diagnostic", async (_event, payload = {}) => {
@@ -5302,11 +6425,17 @@ const handleRecordingSaved = async (fileName, arrayBuffer, meta = {}) => {
       } catch (unlinkErr) {
         log("[uploads] failed to delete uploaded file", unlinkErr?.message || unlinkErr);
       }
+      dequeueDeferredUpload(fileName);
+    } else {
+      enqueueDeferredUpload(fileName, 'partial-or-failed-upload');
+      processDeferredUploadQueue().catch(() => { });
     }
 
     return { success: true, filePath, uploads: uploadResults };
   } catch (e) {
     console.error("[notify-recording-saved] error", e);
+    enqueueDeferredUpload(fileName, e?.message || 'notify-recording-saved-error');
+    processDeferredUploadQueue().catch(() => { });
     return { success: false, error: e.message };
   } finally {
     activeUploads.delete(fileName);
@@ -5614,6 +6743,10 @@ ipcMain.handle("recorder-finalize", async (_event, sourceId, meta = {}) => {
         markRecordingCompleted(finalFileName);
         try { await fs.promises.unlink(finalPath); } catch (_) { }
         log("[recorder] All uploads successful, file deleted:", finalFileName);
+        dequeueDeferredUpload(finalFileName);
+      } else {
+        enqueueDeferredUpload(finalFileName, 'finalize-partial-upload');
+        processDeferredUploadQueue().catch(() => { });
       }
 
       activeUploads.delete(finalFileName);
@@ -5625,6 +6758,8 @@ ipcMain.handle("recorder-finalize", async (_event, sourceId, meta = {}) => {
 
     } catch (uploadErr) {
       log("[recorder] Upload error:", uploadErr?.message || uploadErr);
+      enqueueDeferredUpload(finalFileName, uploadErr?.message || 'finalize-upload-error');
+      processDeferredUploadQueue().catch(() => { });
       activeUploads.delete(finalFileName);
       if (shouldEvaluateAutoResume) {
         scheduleAutoResumeRecording();
@@ -6059,7 +7194,15 @@ function scheduleAutoUpdateCheck() {
 
 // ---------- APP INIT ----------
 app.whenReady().then(() => {
-  createRecorderWindow();
+  if (!isRecorderServiceEnabled()) {
+    createRecorderWindow();
+  } else {
+    if (!startRecorderServiceProcess()) {
+      recorderServiceRuntimeFallbackActive = true;
+      createRecorderWindow();
+    }
+  }
+  startRecorderSupervisor();
   createMainWindow();
   createTray();
   buildAppMenu();
@@ -6239,6 +7382,8 @@ app.whenReady().then(() => {
   startRecordingSegmentLoop();
   startUploadRetryLoop();
   startRecordingRetryCommandsListener();
+  startDeferredUploadWorker();
+  processDeferredUploadQueue().catch(() => { });
 
   scheduleAutoUpdateCheck();
 });
@@ -6264,4 +7409,24 @@ app.on("will-quit", () => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+ipcMain.on("recorder-command-ack", (_event, payload = {}) => {
+  try {
+    const commandId = String(payload?.commandId || '');
+    if (!commandId) return;
+    const waiter = recorderCommandWaiters.get(commandId);
+    if (!waiter) return;
+
+    const phase = String(payload?.phase || '').toLowerCase();
+    if (phase === 'received') return;
+
+    recorderCommandWaiters.delete(commandId);
+    clearTimeout(waiter.timer);
+    if (phase === 'failed') {
+      waiter.reject(new Error(String(payload?.error || `recorder-command-failed:${commandId}`)));
+      return;
+    }
+    waiter.resolve(payload || {});
+  } catch (_) { }
 });

@@ -178,6 +178,8 @@ export interface AdminSettingsType {
     showLiveTeamStatusToAgents?: boolean;
     enableAppTracking?: boolean;
     appTrackingIntervalSeconds?: number;
+    idleAvoidEnabled?: boolean;
+    idleAvoidDurationSeconds?: number;
     appCategoryRules?: AppCategoryRule[];
     redFlagCategories?: AppCategory[];
 }
