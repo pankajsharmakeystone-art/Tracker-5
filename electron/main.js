@@ -93,6 +93,7 @@ const RECONNECT_TTL_MS = 60 * 1000;
 // Initialize debug flags early so startup logs cannot hit TDZ errors.
 let machineDebugEnabled = false;
 let envDevtoolsEnabled = (process.env.ALLOW_DESKTOP_DEVTOOLS === 'true') || isDev;
+let updateInstallInFlight = false;
 
 electronLog.initialize?.();
 if (electronLog?.transports?.file) {
@@ -1999,6 +2000,40 @@ function stopRecorderServiceProcess(options = {}) {
     recorderServiceReadyAtMs = 0;
   }
   clearRecorderServiceWaiters('recorder-service-stop');
+}
+
+async function waitForRecorderServiceExit(timeoutMs = 5000) {
+  const start = Date.now();
+  while (recorderServiceProcess && !recorderServiceProcess.killed) {
+    if (Date.now() - start >= timeoutMs) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return true;
+}
+
+async function prepareForUpdateInstall() {
+  isQuiting = true;
+  updateInstallInFlight = true;
+
+  try {
+    stopRecorderServiceProcess({ planned: true });
+    await waitForRecorderServiceExit(5000);
+  } catch (e) {
+    log('[autoUpdater] recorder service shutdown before install failed', e?.message || e);
+  }
+
+  try {
+    await stopBackgroundRecordingAndFlush({ payload: { stopReason: 'app_update_install' } });
+  } catch (e) {
+    log('[autoUpdater] recorder flush before install failed', e?.message || e);
+  }
+
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.removeAllListeners('close');
+      mainWindow.hide();
+    }
+  } catch (_) { }
 }
 
 async function sendRecorderCommand(channel, payload = {}, options = {}) {
@@ -6894,7 +6929,14 @@ ipcMain.handle("set-auto-launch", async (_, enable) => {
 
 ipcMain.handle("auto-install-update", async () => {
   try {
-    autoUpdater.quitAndInstall();
+    await prepareForUpdateInstall();
+    setTimeout(() => {
+      try {
+        autoUpdater.quitAndInstall(false, true);
+      } catch (error) {
+        emitAutoUpdateStatus("error", { message: error?.message || String(error) });
+      }
+    }, 250);
     return { success: true };
   } catch (error) {
     emitAutoUpdateStatus("error", { message: error?.message || String(error) });
@@ -7436,6 +7478,9 @@ app.whenReady().then(() => {
 
 app.on("before-quit", async () => {
   isQuiting = true;
+  try {
+    stopRecorderServiceProcess({ planned: true });
+  } catch (_) { }
   try {
     if (currentUid) {
       await setRtdbPresenceOfflineIfSessionMatches(currentUid);
