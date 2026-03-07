@@ -748,7 +748,7 @@ async function retrySpecificRecordingUpload(fileName, logId = null) {
   if (!fileName) return { success: false, error: 'missing-filename' };
 
   if (activeUploads.has(fileName)) {
-    log(`[retry] Skip manual retry for ${fileName} - upload already in progress`);
+    log(`[retry][debug] skip retry for ${fileName} - upload already in progress`);
     return { success: false, error: 'already-uploading' };
   }
   activeUploads.add(fileName);
@@ -884,6 +884,7 @@ let activeMergeRequests = new Set(); // Concurrency lock to prevent parallel mer
 let lastCompletedMerge = new Map(); // mergeKey -> timestamp (ms)
 let lastHttpUploadByMergeKey = new Map(); // mergeKey -> timestamp (ms)
 let pendingMergeRequests = new Set(); // mergeKey values queued while merge is in progress
+let scheduledMergeTimers = new Map(); // mergeKey -> timeout
 let rtdbConnectedCallback = null;
 let rtdbConnectedRef = null;
 let rtdbPresenceRef = null;
@@ -1796,9 +1797,14 @@ async function handleRecorderServiceEvent(name, payload = {}) {
       upsertManifestEntry(fileName, { size, mtimeMs, ownerUid, ownerName });
       const retryRes = await retrySpecificRecordingUpload(fileName);
       if (!retryRes?.success) {
-        log('[recorder-service] upload failed after finalize', { fileName, error: retryRes?.error || 'retry-failed' });
-        enqueueDeferredUpload(fileName, retryRes?.error || 'service-segment-upload-failed');
-        processDeferredUploadQueue().catch(() => { });
+        const retryError = retryRes?.error || 'retry-failed';
+        if (retryError === 'already-uploading') {
+          log('[recorder-service][debug] upload handoff already in progress', { fileName });
+        } else {
+          log('[recorder-service] upload failed after finalize', { fileName, error: retryError });
+          enqueueDeferredUpload(fileName, retryError || 'service-segment-upload-failed');
+          processDeferredUploadQueue().catch(() => { });
+        }
       } else {
         log('[recorder-service] upload success after finalize', { fileName });
         dequeueDeferredUpload(fileName);
@@ -1807,8 +1813,7 @@ async function handleRecorderServiceEvent(name, payload = {}) {
             const safeOwnerName = String(ownerName || cachedDisplayName || '').trim();
             const mergeDate = getIsoDateFromMs(mtimeMs);
             if (safeOwnerName && mergeDate) {
-              requestSegmentMerge(safeOwnerName, mergeDate, true)
-                .catch((e) => log('[merge] post-finalize merge trigger failed:', e?.message || e));
+              scheduleSegmentMerge(safeOwnerName, mergeDate, true, { delayMs: 1200, reason: 'post-finalize' });
             }
           } catch (_) { }
         }
@@ -2549,6 +2554,8 @@ configureGoogleIntegrations();
 
 const pendingAgentStatuses = [];
 let pendingStatusRetryTimer = null;
+let lastAgentStatusIngress = { status: '', at: 0 };
+const STATUS_INGRESS_DEDUPE_MS = 2000;
 
 function enqueuePendingAgentStatus(status) {
   const normalized = String(status || '').trim();
@@ -2560,6 +2567,17 @@ function enqueuePendingAgentStatus(status) {
   } else {
     pendingAgentStatuses.push(normalized);
   }
+}
+
+function shouldIgnoreDuplicateAgentStatusIngress(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return true;
+  const now = Date.now();
+  if (lastAgentStatusIngress.status === normalized && (now - lastAgentStatusIngress.at) <= STATUS_INGRESS_DEDUPE_MS) {
+    return true;
+  }
+  lastAgentStatusIngress = { status: normalized, at: now };
+  return false;
 }
 
 function schedulePendingStatusFlush(delayMs = 3000) {
@@ -2857,12 +2875,7 @@ async function clockOutAndSignOutDesktop(reason = "clocked_out_and_signed_out", 
     const isoDate = sessionStartIsoDate || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
     // Fire and forget - don't wait for merge to complete
-    requestSegmentMerge(agentName, isoDate, true)
-      .then(result => {
-        if (result.success) log(`[merge] Segments merged for ${agentName} on ${isoDate}`);
-        else log(`[merge] Merge skipped/failed:`, result.reason || result.error);
-      })
-      .catch(err => log('[merge] Merge error:', err?.message || err));
+    scheduleSegmentMerge(agentName, isoDate, true, { delayMs: 1200, reason: 'clockout-signout' });
   } catch (mergeErr) {
     log('[merge] Error during auto-merge:', mergeErr?.message || mergeErr);
   }
@@ -3218,8 +3231,7 @@ async function uploadToHttpTarget({ filePath, fileName, safeName, isoDate, isoTi
               lastHttpUploadByMergeKey.set(key, Date.now());
               // If user is clocked out, late uploads should trigger a fresh merge attempt.
               if (!agentClockedIn) {
-                requestSegmentMerge(String(safeName || ''), String(isoDate || ''), true)
-                  .catch((e) => log('[merge] post-upload merge trigger failed:', e?.message || e));
+                scheduleSegmentMerge(String(safeName || ''), String(isoDate || ''), true, { delayMs: 1200, reason: 'post-upload' });
               }
             } catch (_) { }
             return { success: true, message: 'upload-complete', size: fileSize, endpoint, ...result };
@@ -3266,11 +3278,11 @@ async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
   const lastCompletedAt = lastCompletedMerge.get(mergeKey);
   const lastUploadAt = lastHttpUploadByMergeKey.get(mergeKey) || 0;
   if (lastCompletedAt && (Date.now() - lastCompletedAt) < 5 * 60 * 1000 && lastUploadAt <= lastCompletedAt) {
-    log(`[merge] Skipping duplicate merge request for ${agentName} on ${date} (recently completed)`);
+    log(`[merge][debug] skipping duplicate merge request for ${agentName} on ${date} (recently completed)`);
     return { success: false, reason: 'merge-recently-completed' };
   }
   if (activeMergeRequests.has(mergeKey)) {
-    log(`[merge] Skipping duplicate merge request for ${agentName} on ${date}`);
+    log(`[merge][debug] skipping duplicate merge request for ${agentName} on ${date}`);
     pendingMergeRequests.add(mergeKey);
     return { success: false, reason: 'merge-already-in-progress' };
   }
@@ -3346,6 +3358,35 @@ async function requestSegmentMerge(agentName, date, deleteOriginals = true) {
       }, 1200);
     }
   }
+}
+
+function scheduleSegmentMerge(agentName, date, deleteOriginals = true, options = {}) {
+  const safeAgentName = String(agentName || '').trim();
+  const safeDate = String(date || '').trim();
+  if (!safeAgentName || !safeDate) {
+    return { success: false, reason: 'missing-merge-target' };
+  }
+
+  const delayMs = Math.max(0, Number(options?.delayMs) || 0);
+  const mergeKey = `${safeAgentName}|${safeDate}`;
+  if (scheduledMergeTimers.has(mergeKey)) {
+    return { success: true, scheduled: true, deduped: true };
+  }
+
+  const timer = setTimeout(() => {
+    scheduledMergeTimers.delete(mergeKey);
+    requestSegmentMerge(safeAgentName, safeDate, deleteOriginals)
+      .then((result) => {
+        const reason = result?.reason || result?.error || null;
+        if (reason === 'uploads-active' || reason === 'uploads-pending') {
+          scheduleSegmentMerge(safeAgentName, safeDate, deleteOriginals, { delayMs: 1500, reason: 'retry-after-uploads' });
+        }
+      })
+      .catch((e) => log('[merge] scheduled merge failed:', e?.message || e));
+  }, delayMs);
+
+  scheduledMergeTimers.set(mergeKey, timer);
+  return { success: true, scheduled: true };
 }
 
 async function waitForActiveUploadsToSettle(maxWaitMs = 120000) {
@@ -5818,12 +5859,7 @@ async function applyAgentStatus(status) {
       const isoDate = sessionStartIsoDate || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
       // Request merge from recording server
-      const mergeResult = await requestSegmentMerge(agentName, isoDate, true);
-      if (mergeResult.success) {
-        log(`[merge] Segments merged successfully for ${agentName} on ${isoDate}`);
-      } else {
-        log(`[merge] Segment merge skipped or failed:`, mergeResult.reason || mergeResult.error);
-      }
+      scheduleSegmentMerge(agentName, isoDate, true, { delayMs: 1200, reason: 'apply-agent-status-clockout' });
     } catch (mergeErr) {
       log('[merge] Error during auto-merge:', mergeErr?.message || mergeErr);
     }
@@ -5967,6 +6003,10 @@ async function flushPendingAgentStatuses() {
 ipcMain.handle("set-agent-status", async (_, status) => {
   try {
     log("set-agent-status received:", status);
+    if (shouldIgnoreDuplicateAgentStatusIngress(status)) {
+      log('[set-agent-status][debug] ignoring duplicate ingress', status);
+      return { success: true, ignored: 'duplicate-ingress' };
+    }
     if (!currentUid) {
       if (hasRegisteredUidAtLeastOnce || clockOutInFlight) {
         log('Ignoring set-agent-status after logout/no active uid:', status);

@@ -2,8 +2,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, getDocs, doc, setDoc } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import { streamAppActivitySummaries, streamGlobalAdminSettings } from '../services/db';
-import type { AppActivitySummary, AppCategory, AppCategoryRule } from '../types';
+import { streamAppActivitySummaries, streamGlobalAdminSettings, streamWorkLogsForDate } from '../services/db';
+import type { AppActivitySummary, AppCategory, AppCategoryRule, WorkLog } from '../types';
 import Spinner from './Spinner';
 
 interface Props {
@@ -133,8 +133,83 @@ const buildTopAppsFromEntries = (entries: Array<{ app: string; category: string;
         .slice(0, 20);
 };
 
+const toMillis = (value: any): number | null => {
+    if (value == null) return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (value instanceof Date) return value.getTime();
+    if (typeof value?.toMillis === 'function') return value.toMillis();
+    if (typeof value?.seconds === 'number') {
+        const nanos = typeof value?.nanoseconds === 'number' ? value.nanoseconds : 0;
+        return (value.seconds * 1000) + Math.floor(nanos / 1_000_000);
+    }
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+};
+
+const buildWorkingIntervals = (log?: WorkLog | null): Array<{ start: number; end: number }> => {
+    if (!log?.activities || !Array.isArray(log.activities)) return [];
+
+    return log.activities
+        .filter((activity) => activity?.type === 'working')
+        .map((activity) => {
+            const start = toMillis(activity.startTime);
+            const end = toMillis(activity.endTime);
+            if (start == null || end == null || end <= start) return null;
+            return { start, end };
+        })
+        .filter((interval): interval is { start: number; end: number } => Boolean(interval));
+};
+
+const clipEntriesToWorkingTime = (summary: AppActivitySummary, log?: WorkLog | null): AppActivitySummary => {
+    const entries = Array.isArray(summary.entries) ? summary.entries : [];
+    if (!entries.length) return summary;
+
+    const workingIntervals = buildWorkingIntervals(log);
+    if (!workingIntervals.length) return summary;
+
+    const clippedEntries = entries.flatMap((entry) => {
+        const entryStart = toMillis(entry.startTime);
+        const entryEnd = toMillis(entry.endTime);
+        if (entryStart == null || entryEnd == null || entryEnd <= entryStart) return [];
+
+        return workingIntervals.flatMap((interval) => {
+            const overlapStart = Math.max(entryStart, interval.start);
+            const overlapEnd = Math.min(entryEnd, interval.end);
+            if (overlapEnd <= overlapStart) return [];
+
+            const durationSeconds = Math.max(0, Math.round((overlapEnd - overlapStart) / 1000));
+            if (durationSeconds <= 0) return [];
+
+            return [{
+                ...entry,
+                startTime: overlapStart,
+                endTime: overlapEnd,
+                durationSeconds,
+            }];
+        });
+    });
+
+    const byCategory = {} as Record<AppCategory, number>;
+    let totalTrackedSeconds = 0;
+    for (const entry of clippedEntries) {
+        const durationSeconds = Number(entry.durationSeconds) || 0;
+        totalTrackedSeconds += durationSeconds;
+        const category = (entry.category || 'uncategorized') as AppCategory;
+        byCategory[category] = (byCategory[category] || 0) + durationSeconds;
+    }
+
+    return {
+        ...summary,
+        entries: clippedEntries,
+        byCategory,
+        topApps: buildTopAppsFromEntries(clippedEntries) as Array<{ app: string; category: AppCategory; seconds: number }>,
+        totalTrackedSeconds,
+    };
+};
+
 const AppTrackingReport: React.FC<Props> = ({ teamId }) => {
     const [summaries, setSummaries] = useState<AppActivitySummary[]>([]);
+    const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedUser, setSelectedUser] = useState<string | null>(null);
     const [userNames, setUserNames] = useState<Record<string, string>>({});
@@ -222,6 +297,16 @@ const AppTrackingReport: React.FC<Props> = ({ teamId }) => {
         return () => unsub();
     }, [selectedDate, teamId]);
 
+    useEffect(() => {
+        const unsub = streamWorkLogsForDate(selectedDate, setWorkLogs, teamId);
+        return () => unsub();
+    }, [selectedDate, teamId]);
+
+    const displaySummaries = useMemo(() => {
+        const workLogByUser = new Map(workLogs.map((log) => [log.userId, log]));
+        return summaries.map((summary) => clipEntriesToWorkingTime(summary, workLogByUser.get(summary.userId) || null));
+    }, [summaries, workLogs]);
+
     // Aggregate totals across all users
     const aggregated = useMemo(() => {
         const byCategory: Record<string, number> = {};
@@ -229,7 +314,7 @@ const AppTrackingReport: React.FC<Props> = ({ teamId }) => {
         const topAppTotals: Record<string, { app: string; seconds: number; categorySeconds: Record<string, number> }> = {};
         let totalSeconds = 0;
 
-        for (const summary of summaries) {
+        for (const summary of displaySummaries) {
             totalSeconds += summary.totalTrackedSeconds || 0;
 
             // Per category
@@ -291,13 +376,13 @@ const AppTrackingReport: React.FC<Props> = ({ teamId }) => {
             byUser: Object.values(byUser),
             topApps,
         };
-    }, [summaries]);
+    }, [displaySummaries]);
 
     // Selected user detail
     const userDetail = useMemo(() => {
         if (!selectedUser) return null;
-        return summaries.find(s => s.userId === selectedUser) || null;
-    }, [selectedUser, summaries]);
+        return displaySummaries.find(s => s.userId === selectedUser) || null;
+    }, [selectedUser, displaySummaries]);
 
     const handleTimelineSort = (field: TimelineSortKey) => {
         if (timelineSortKey === field) {
@@ -409,7 +494,7 @@ const AppTrackingReport: React.FC<Props> = ({ teamId }) => {
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <h3 className="text-lg font-semibold text-gray-900 dark:text-white">App &amp; Website Tracking</h3>
                 <div className="flex items-center gap-2">
-                    {summaries.length > 0 && (
+                    {displaySummaries.length > 0 && (
                         <button
                             onClick={handleRecategorize}
                             disabled={recategorizing}
@@ -427,7 +512,7 @@ const AppTrackingReport: React.FC<Props> = ({ teamId }) => {
                 </div>
             </div>
 
-            {summaries.length === 0 ? (
+            {displaySummaries.length === 0 ? (
                 <div className="text-center py-12 text-gray-500 dark:text-gray-400">
                     <p className="text-lg mb-2">No tracking data for this date</p>
                     <p className="text-sm">Tracking data will appear here once agents clock out with app tracking enabled.</p>
@@ -442,7 +527,7 @@ const AppTrackingReport: React.FC<Props> = ({ teamId }) => {
                         </div>
                         <div className="p-4 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-700 shadow-sm">
                             <p className="text-sm text-gray-500 dark:text-gray-400">Users Tracked</p>
-                            <p className="text-2xl font-bold text-gray-900 dark:text-white">{summaries.length}</p>
+                            <p className="text-2xl font-bold text-gray-900 dark:text-white">{displaySummaries.length}</p>
                         </div>
                         <div className="p-4 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-700 shadow-sm">
                             <p className="text-sm text-gray-500 dark:text-gray-400">Productive</p>
