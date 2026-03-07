@@ -211,6 +211,7 @@ declare global {
             onSignedOut?: (callback: (data?: { reason?: string }) => void) => (() => void) | void;
             reportError?: (payload: any) => Promise<any>;
             onAutoUpdateStatus?: (callback: (data: { event: string; version?: string; percent?: number; message?: string }) => void) => (() => void) | void;
+            onMainLog?: (callback: (data: { source?: string; args?: any[] }) => void) => (() => void) | void;
             requestImmediateUpdateCheck?: () => Promise<any>;
             installPendingUpdate?: () => Promise<any>;
             ping: () => Promise<any>;

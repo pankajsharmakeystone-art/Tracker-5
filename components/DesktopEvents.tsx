@@ -70,6 +70,11 @@ const DesktopEvents: React.FC = () => {
       }
     });
 
+    window.desktopAPI.onMainLog?.((payload: { source?: string; args?: any[] }) => {
+      const parts = Array.isArray(payload?.args) ? payload.args : [];
+      console.log('[desktop-main]', ...parts);
+    });
+
     // Best-effort crash/health telemetry from the renderer to Electron main.
     const maybeReport = (payload: any) => {
       try {

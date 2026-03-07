@@ -113,6 +113,12 @@ contextBridge.exposeInMainWorld("desktopAPI", {
     ipcRenderer.on("auto-update-status", handler);
     return () => ipcRenderer.removeListener("auto-update-status", handler);
   },
+  onMainLog: (cb) => {
+    if (typeof cb !== "function") return () => { };
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("desktop-main-log", handler);
+    return () => ipcRenderer.removeListener("desktop-main-log", handler);
+  },
   requestImmediateUpdateCheck: () => ipcRenderer.invoke("auto-check-updates"),
   installPendingUpdate: () => ipcRenderer.invoke("auto-install-update"),
 

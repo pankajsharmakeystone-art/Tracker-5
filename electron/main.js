@@ -125,6 +125,19 @@ function log(...args) {
   // Mirror logs to electron-log only when desktop debug is enabled for this machine.
   if (isDesktopDebugEnabled()) {
     try { electronLog.info("[electron]", ...args); } catch (_) { }
+    try {
+      if (mainWindow && mainWindow.webContents && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("desktop-main-log", {
+          source: "main",
+          args: args.map((arg) => {
+            if (arg instanceof Error) {
+              return { name: arg.name, message: arg.message, stack: arg.stack };
+            }
+            return arg;
+          })
+        });
+      }
+    } catch (_) { }
   }
 }
 
