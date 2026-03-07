@@ -1,7 +1,7 @@
 {
   "name": "tracker-5",
   "private": true,
-  "version": "0.5.88",
+  "version": "0.5.89",
   "type": "module",
   "main": "electron/bootstrap.js",
   "author": "Tracker 5",
