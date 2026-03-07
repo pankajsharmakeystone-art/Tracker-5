@@ -1847,18 +1847,24 @@ function startRecorderServiceProcess() {
   if (!isRecorderServiceEnabled()) return false;
   if (recorderServiceProcess && !recorderServiceProcess.killed) return true;
   try {
-    const serviceScript = path.join(__dirname, 'recorderServiceMain.js');
+    const bootstrapScript = path.join(__dirname, 'bootstrap.js');
     const isolatedUserData = path.join(app.getPath("userData"), "recorder_service_profile");
-    const child = spawn(process.execPath, [
+    const childArgs = [
       `--user-data-dir=${isolatedUserData}`,
       '--disable-http-cache',
       '--disable-gpu-shader-disk-cache',
       '--disk-cache-size=1',
-      '--media-cache-size=1',
-      serviceScript
-    ], {
+      '--media-cache-size=1'
+    ];
+    if (app.isPackaged) {
+      childArgs.push('--recorder-service');
+    } else {
+      childArgs.push(bootstrapScript, '--recorder-service');
+    }
+    const child = spawn(process.execPath, childArgs, {
       env: {
         ...process.env,
+        TRACKER_RECORDER_SERVICE: 'true',
         RECORDER_RECORDINGS_DIR: RECORDINGS_DIR,
         RECORDER_TEMP_RECORDINGS_DIR: TEMP_RECORDINGS_DIR
       },

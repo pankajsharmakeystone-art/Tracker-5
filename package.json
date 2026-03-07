@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.5.86",
   "type": "module",
-  "main": "electron/main.js",
+  "main": "electron/bootstrap.js",
   "author": "Tracker 5",
   "repository": {
     "type": "git",
@@ -17,7 +17,7 @@
     "build:renderer:desktop": "tsc && vite build --mode desktop",
     "build:desktop": "node scripts/build-desktop.mjs",
     "preview": "vite preview",
-    "electron:serve": "cross-env ELECTRON_DEV=true electron electron/main.js",
+    "electron:serve": "cross-env ELECTRON_DEV=true electron electron/bootstrap.js",
     "electron:build": "npm run build:desktop && electron-builder",
     "electron:release": "npm run build:desktop && electron-builder --publish always",
     "sync:version": "node ./scripts/sync-electron-version.cjs",
@@ -72,7 +72,7 @@
       }
     ],
     "extraMetadata": {
-      "main": "electron/main.js"
+      "main": "electron/bootstrap.js"
     },
     "publish": [
       {
