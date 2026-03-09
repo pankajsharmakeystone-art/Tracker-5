@@ -192,6 +192,38 @@ function handleCommand(msg) {
         send({ type: 'ack', id, ok: true });
         return;
       }
+      if (action === 'rollover') {
+        await new Promise((resolve, reject) => {
+          const requestedTimeoutMs = Number.isFinite(payload?.timeoutMs) ? Number(payload.timeoutMs) : 60000;
+          const timeoutMs = Math.max(12000, Math.min(requestedTimeoutMs, 30000));
+          let settled = false;
+          const payloadWithId = withCommandIdPayload(id, payload);
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            ipcMain.removeListener('recorder-command-ack', onCommandAck);
+            reject(new Error('rollover-timeout'));
+          }, timeoutMs);
+          const onCommandAck = (_event, ackPayload = {}) => {
+            const commandId = String(ackPayload?.commandId || '');
+            if (commandId !== id || settled) return;
+            const phase = String(ackPayload?.phase || '').toLowerCase();
+            if (phase === 'received') return;
+            settled = true;
+            clearTimeout(timer);
+            ipcMain.removeListener('recorder-command-ack', onCommandAck);
+            if (phase === 'failed') {
+              reject(new Error(String(ackPayload?.error || 'rollover-failed')));
+              return;
+            }
+            resolve();
+          };
+          ipcMain.on('recorder-command-ack', onCommandAck);
+          recorderWindow.webContents.send('recorder-rollover', payloadWithId);
+        });
+        send({ type: 'ack', id, ok: true });
+        return;
+      }
 
       throw new Error(`unknown-action:${action}`);
     } catch (e) {
@@ -216,15 +248,15 @@ ipcMain.handle('recorder-get-sources', async () => {
   }
 });
 
-ipcMain.handle('recorder-create-temp-file', async (_event, sourceId, sourceName) => {
+ipcMain.handle('recorder-create-temp-file', async (_event, handleKey, sourceName) => {
   try {
-    const existing = activeRecordingHandles.get(sourceId);
+    const existing = activeRecordingHandles.get(handleKey);
     if (existing) return { success: false, error: 'source-busy' };
     const safeName = String(sourceName || 'screen').replace(/[^a-z0-9_\-]/gi, '_');
     const tempFileName = `temp-${safeName}-${Date.now()}.webm`;
     const tempPath = path.join(TEMP_RECORDINGS_DIR, tempFileName);
     const fd = fs.openSync(tempPath, 'w');
-    activeRecordingHandles.set(sourceId, {
+    activeRecordingHandles.set(handleKey, {
       fd,
       tempPath,
       bytesWritten: 0,
@@ -241,9 +273,9 @@ ipcMain.handle('recorder-create-temp-file', async (_event, sourceId, sourceName)
   }
 });
 
-ipcMain.handle('recorder-append-chunk', async (_event, sourceId, chunkBuffer) => {
+ipcMain.handle('recorder-append-chunk', async (_event, handleKey, chunkBuffer) => {
   try {
-    const handle = activeRecordingHandles.get(sourceId);
+    const handle = activeRecordingHandles.get(handleKey);
     if (!handle) return { success: false, error: 'no-active-handle' };
     if (handle.closing || handle.closed) return { success: true, bytesWritten: handle.bytesWritten, ignoredBecauseClosing: true };
     let buffer = toNodeBuffer(chunkBuffer);
@@ -275,8 +307,8 @@ ipcMain.handle('recorder-append-chunk', async (_event, sourceId, chunkBuffer) =>
   }
 });
 
-ipcMain.handle('recorder-finalize', async (_event, sourceId, meta = {}) => {
-  const handle = activeRecordingHandles.get(sourceId);
+ipcMain.handle('recorder-finalize', async (_event, handleKey, meta = {}) => {
+  const handle = activeRecordingHandles.get(handleKey);
   if (!handle) return { success: false, error: 'no-active-handle' };
   try {
     handle.closing = true;
@@ -285,14 +317,14 @@ ipcMain.handle('recorder-finalize', async (_event, sourceId, meta = {}) => {
 
     if (!handle.headerFound) {
       try { await fs.promises.unlink(handle.tempPath); } catch (_) { }
-      activeRecordingHandles.delete(sourceId);
+      activeRecordingHandles.delete(handleKey);
       return { success: false, error: 'missing-webm-header' };
     }
 
     const finalFileName = `recording-${handle.sourceName}-${Date.now()}.webm`;
     const finalPath = path.join(RECORDINGS_DIR, finalFileName);
     await fs.promises.rename(handle.tempPath, finalPath);
-    activeRecordingHandles.delete(sourceId);
+    activeRecordingHandles.delete(handleKey);
     const stat = await fs.promises.stat(finalPath);
 
     send({
@@ -310,7 +342,7 @@ ipcMain.handle('recorder-finalize', async (_event, sourceId, meta = {}) => {
 
     return { success: true, filePath: finalPath, fileName: finalFileName, bytes: stat.size };
   } catch (e) {
-    activeRecordingHandles.delete(sourceId);
+    activeRecordingHandles.delete(handleKey);
     return { success: false, error: e?.message || String(e) };
   }
 });

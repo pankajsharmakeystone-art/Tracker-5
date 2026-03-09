@@ -1343,17 +1343,49 @@ function startRecordingSegmentLoop() {
     if (recordingSegmentInFlight) return;
     recordingSegmentInFlight = true;
     try {
-      // Use a longer flush timeout so segment rollover does not overlap old/new recorder sessions.
-      await stopBackgroundRecordingAndFlush({ timeoutMs: 60000, payload: { suppressAutoResume: true } });
-      if (currentUid && agentClockedIn && isRecordingActive) {
-        const restarted = await startBackgroundRecording('segment_rollover');
-        if (!restarted && currentUid && agentClockedIn) {
-          // Segment rollover must not silently stop capture. Retry quickly a few times.
-          for (let attempt = 1; attempt <= 3; attempt += 1) {
-            await new Promise((r) => setTimeout(r, attempt * 1500));
-            isRecordingActive = true;
-            const ok = await startBackgroundRecording(`segment_rollover_retry_${attempt}`);
-            if (ok) break;
+      if (isRecorderServiceEnabled()) {
+        const { profile } = getEffectiveCaptureProfile();
+        try {
+          await sendRecorderServiceCommandWithRecovery(
+            'rollover',
+            {
+              recordingQuality: profile.quality,
+              recordingFps: profile.fps,
+              reason: 'segment_rollover',
+              stopReason: 'segment_rollover',
+              timeoutMs: 60000
+            },
+            { timeoutMs: 45000, retries: 1 }
+          );
+          log('[recorder] rollover command sent', { quality: profile.quality, fps: profile.fps, via: 'service' });
+        } catch (rolloverErr) {
+          log('[recorder-service] rollover failed, falling back to stop/start path', rolloverErr?.message || rolloverErr);
+          await stopBackgroundRecordingAndFlush({ timeoutMs: 60000, payload: { suppressAutoResume: true, stopReason: 'segment_rollover' } });
+          if (currentUid && agentClockedIn && isRecordingActive) {
+            const restarted = await startBackgroundRecording('segment_rollover');
+            if (!restarted && currentUid && agentClockedIn) {
+              for (let attempt = 1; attempt <= 3; attempt += 1) {
+                await new Promise((r) => setTimeout(r, attempt * 1500));
+                isRecordingActive = true;
+                const ok = await startBackgroundRecording(`segment_rollover_retry_${attempt}`);
+                if (ok) break;
+              }
+            }
+          }
+        }
+      } else {
+        // Use a longer flush timeout so segment rollover does not overlap old/new recorder sessions.
+        await stopBackgroundRecordingAndFlush({ timeoutMs: 60000, payload: { suppressAutoResume: true, stopReason: 'segment_rollover' } });
+        if (currentUid && agentClockedIn && isRecordingActive) {
+          const restarted = await startBackgroundRecording('segment_rollover');
+          if (!restarted && currentUid && agentClockedIn) {
+            // Segment rollover must not silently stop capture. Retry quickly a few times.
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+              await new Promise((r) => setTimeout(r, attempt * 1500));
+              isRecordingActive = true;
+              const ok = await startBackgroundRecording(`segment_rollover_retry_${attempt}`);
+              if (ok) break;
+            }
           }
         }
       }

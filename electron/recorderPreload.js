@@ -6,6 +6,7 @@ const { ipcRenderer, desktopCapturer } = require('electron');
 const sessions = new Map();
 let nextSaveMeta = null;
 let fatalRecorderFailureInFlight = false;
+let nextSessionOrdinal = 0;
 
 function parseCommandPayload(payload = {}) {
   const raw = payload && typeof payload === 'object' ? payload : {};
@@ -25,6 +26,7 @@ function ackCommand(commandId, phase, extra = {}) {
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const sanitizeName = (name) => (name || 'screen').replace(/[^a-z0-9_\-]/gi, '_');
+const createSessionKey = (sourceId) => `${String(sourceId || 'screen')}:${Date.now()}:${++nextSessionOrdinal}`;
 
 const buildConstraints = (sourceId, resolution, fps) => {
   const mandatory = {
@@ -159,8 +161,9 @@ async function validateInitialFrames(video, canvas, ctx) {
   return { checks, blackSamples, blackRatio: blackSamples / checks };
 }
 
-async function startRecorderForSource(source, resolution, fps, labelOverride) {
+async function startRecorderForSource(source, resolution, fps, labelOverride, options = {}) {
   const { id, name } = source;
+  const sessionKey = String(options?.sessionKey || createSessionKey(id));
   const constraints = buildConstraints(id, resolution, fps);
   const mediaDevices = navigator.mediaDevices;
   const legacyGetUserMedia = (navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia)?.bind(navigator);
@@ -338,10 +341,10 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   const selectedMimeType = MediaRecorder.isTypeSupported(mimeType)
     ? mimeType
     : (MediaRecorder.isTypeSupported('video/webm; codecs=vp8') ? 'video/webm; codecs=vp8' : 'video/webm');
-  const options = { mimeType: selectedMimeType };
+  const recorderOptions = { mimeType: selectedMimeType };
 
-  const mediaRecorder = new MediaRecorder(inputStream, options);
-  const instanceId = `${id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+  const mediaRecorder = new MediaRecorder(inputStream, recorderOptions);
+  const instanceId = `${sessionKey}:${Math.random().toString(36).slice(2, 8)}`;
   let finalizeResolve;
   const finalizePromise = new Promise((resolve) => { finalizeResolve = resolve; });
   const startTime = Date.now();
@@ -353,7 +356,7 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   const label = labelOverride || deriveScreenLabel(source, 0);
 
   try {
-    const createRes = await ipcRenderer.invoke('recorder-create-temp-file', id, label);
+    const createRes = await ipcRenderer.invoke('recorder-create-temp-file', sessionKey, label);
     if (createRes?.success) {
       tempFileReady = true;
       console.log('[recorder] Temp file created for', id);
@@ -362,7 +365,7 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       for (const pendingChunk of pendingChunks) {
         try {
           const arrayBuffer = await pendingChunk.arrayBuffer();
-          await ipcRenderer.invoke('recorder-append-chunk', id, new Uint8Array(arrayBuffer));
+          await ipcRenderer.invoke('recorder-append-chunk', sessionKey, new Uint8Array(arrayBuffer));
         } catch (e) {
           console.warn('[recorder] Failed to flush pending chunk', e);
         }
@@ -382,6 +385,11 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     instanceId,
     mediaRecorder,
     stream: inputStream,
+    source,
+    sourceId: id,
+    sessionKey,
+    resolution,
+    fps,
     sourceName: label,
     finalizePromise,
     startTime,
@@ -391,19 +399,19 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
     monitorTimer,
     video
   };
-  sessions.set(id, sessionRecord);
+  sessions.set(sessionKey, sessionRecord);
 
   mediaRecorder.ondataavailable = async (event) => {
     if (!event.data || event.data.size === 0) return;
 
-    const session = sessions.get(id);
+    const session = sessions.get(sessionKey);
     if (!session || session.instanceId !== instanceId) return;
 
     if (session.tempFileReady) {
       // Stream directly to disk via IPC
       try {
         const arrayBuffer = await event.data.arrayBuffer();
-        await ipcRenderer.invoke('recorder-append-chunk', id, new Uint8Array(arrayBuffer));
+        await ipcRenderer.invoke('recorder-append-chunk', sessionKey, new Uint8Array(arrayBuffer));
       } catch (err) {
         console.warn('[recorder] Failed to append chunk to disk', err);
       }
@@ -429,7 +437,7 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
       if (sessionRecord.tempFileReady) {
         // Finalize: close file, move to recordings, trigger upload
         console.log('[recorder] Finalizing incremental recording for', id);
-        ipcRenderer.invoke('recorder-finalize', id, saveMeta)
+        ipcRenderer.invoke('recorder-finalize', sessionKey, saveMeta)
           .catch((err) => console.error('[recorder] finalize failed', err));
       } else if (sessionRecord.pendingChunks && sessionRecord.pendingChunks.length > 0) {
         // Fallback: use old memory-based approach (for small recordings or failures)
@@ -449,9 +457,9 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
         if (sessionRecord?.video) sessionRecord.video.srcObject = null;
         sessionRecord?.stream?.getTracks()?.forEach((t) => t.stop());
       } catch (e) { }
-      const active = sessions.get(id);
+      const active = sessions.get(sessionKey);
       if (active && active.instanceId === instanceId) {
-        sessions.delete(id);
+        sessions.delete(sessionKey);
       }
       if (sessions.size === 0) {
         try {
@@ -467,9 +475,11 @@ async function startRecorderForSource(source, resolution, fps, labelOverride) {
   console.log('[recorder] started', name, id, 'incremental:', tempFileReady);
 }
 
-async function stopAllRecorders() {
+async function stopAllRecorders(sessionKeys = null) {
+  const targetKeys = Array.isArray(sessionKeys) ? new Set(sessionKeys) : null;
   if (sessions.size === 0) return;
-  sessions.forEach(({ mediaRecorder }) => {
+  sessions.forEach(({ mediaRecorder }, key) => {
+    if (targetKeys && !targetKeys.has(key)) return;
     try {
       if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     } catch (err) {
@@ -478,12 +488,13 @@ async function stopAllRecorders() {
   });
 }
 
-async function forceFinalizeRemainingSessions(saveMeta = {}) {
-  const remaining = Array.from(sessions.entries());
-  for (const [id, sessionRecord] of remaining) {
+async function forceFinalizeRemainingSessions(saveMeta = {}, sessionKeys = null) {
+  const targetKeys = Array.isArray(sessionKeys) ? new Set(sessionKeys) : null;
+  const remaining = Array.from(sessions.entries()).filter(([key]) => !targetKeys || targetKeys.has(key));
+  for (const [sessionKey, sessionRecord] of remaining) {
     try {
       if (sessionRecord?.tempFileReady) {
-        await ipcRenderer.invoke('recorder-finalize', id, {
+        await ipcRenderer.invoke('recorder-finalize', sessionKey, {
           ...(saveMeta || {}),
           stopReason: saveMeta?.stopReason || 'forced_flush_timeout'
         });
@@ -498,25 +509,28 @@ async function forceFinalizeRemainingSessions(saveMeta = {}) {
         });
       }
     } catch (err) {
-      console.warn('[recorder] forced finalize failed', id, err);
+      console.warn('[recorder] forced finalize failed', sessionKey, err);
     } finally {
       try {
         if (sessionRecord?.monitorTimer) clearInterval(sessionRecord.monitorTimer);
         if (sessionRecord?.video) sessionRecord.video.srcObject = null;
         sessionRecord?.stream?.getTracks()?.forEach((t) => t.stop());
       } catch (_) { }
-      sessions.delete(id);
+      sessions.delete(sessionKey);
       try { sessionRecord?.finalizeResolve?.(); } catch (_) { }
     }
   }
 }
 
 async function stopAndFlushAllRecorders(options = {}) {
+  const sessionKeys = Array.isArray(options?.sessionKeys) ? options.sessionKeys : null;
   if (sessions.size === 0) return;
   const saveMeta = (options?.saveMeta && typeof options.saveMeta === 'object') ? options.saveMeta : {};
   const timeoutMs = Number.isFinite(options?.timeoutMs) ? Number(options.timeoutMs) : 60000;
-  const finalizePromises = Array.from(sessions.values()).map((s) => s.finalizePromise);
-  await stopAllRecorders();
+  const finalizePromises = Array.from(sessions.entries())
+    .filter(([key]) => !sessionKeys || sessionKeys.includes(key))
+    .map(([, s]) => s.finalizePromise);
+  await stopAllRecorders(sessionKeys);
   try {
     const flushRace = await Promise.race([
       Promise.allSettled(finalizePromises).then(() => 'done'),
@@ -524,12 +538,12 @@ async function stopAndFlushAllRecorders(options = {}) {
     ]);
     if (flushRace === 'timeout' && sessions.size > 0) {
       console.warn('[recorder] flush wait timed out; forcing finalize for remaining sessions', sessions.size);
-      await forceFinalizeRemainingSessions(saveMeta);
+      await forceFinalizeRemainingSessions(saveMeta, sessionKeys);
     }
   } catch (err) {
     console.warn('[recorder] flush wait failed', err);
     if (sessions.size > 0) {
-      await forceFinalizeRemainingSessions(saveMeta);
+      await forceFinalizeRemainingSessions(saveMeta, sessionKeys);
     }
   }
 }
@@ -683,5 +697,52 @@ ipcRenderer.on('recorder-stop-and-flush', async (_event, payload = {}) => {
     } catch (e) {
       console.warn('[recorder] failed to notify flushed', e);
     }
+  }
+});
+
+ipcRenderer.on('recorder-rollover', async (_event, payload = {}) => {
+  const cmd = parseCommandPayload(payload);
+  ackCommand(cmd.commandId, 'received');
+  try {
+    fatalRecorderFailureInFlight = false;
+    const oldSessions = Array.from(sessions.entries());
+    if (oldSessions.length === 0) {
+      throw new Error('no-active-sessions');
+    }
+
+    let startedCount = 0;
+    for (const [, sessionRecord] of oldSessions) {
+      const newSessionKey = createSessionKey(sessionRecord.sourceId);
+      await startRecorderForSource(
+        sessionRecord.source,
+        sessionRecord.resolution,
+        sessionRecord.fps,
+        sessionRecord.sourceName,
+        { sessionKey: newSessionKey }
+      );
+      startedCount += 1;
+    }
+
+    await stopAndFlushAllRecorders({
+      timeoutMs: Number.isFinite(cmd.data?.timeoutMs) ? Number(cmd.data.timeoutMs) : 60000,
+      saveMeta: cmd.data || {},
+      sessionKeys: oldSessions.map(([key]) => key)
+    });
+
+    try {
+      ipcRenderer.send('recorder-state-event', {
+        state: 'recording',
+        sourceCount: startedCount,
+        rollover: true
+      });
+    } catch (_) { }
+
+    ackCommand(cmd.commandId, 'completed', {
+      sourceCount: startedCount,
+      rolledOverSessionCount: oldSessions.length
+    });
+  } catch (err) {
+    console.warn('[recorder] rollover failed', err);
+    ackCommand(cmd.commandId, 'failed', { error: err?.message || String(err) });
   }
 });
